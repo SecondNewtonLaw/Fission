@@ -1,0 +1,25 @@
+/.idea
+/cmake-build
+/cmake-build-debug
+/cmake-build-release
+/cmake-build-relwithdebinfo
+/artifacts
+/bin
+/.vs/RbxCli/config/applicationhost.config
+/.vs/RbxCli/FileContentIndex/3b65f40e-c787-4695-b90c-583f71190e9d.vsidx
+/.vs/RbxCli/FileContentIndex/2730309f-76a4-4636-8ade-62c2e8bf434a.vsidx
+/.vs/RbxCli/FileContentIndex/8930690e-8055-404a-b029-862ce4601068.vsidx
+/.vs/RbxCli/FileContentIndex/c711dc86-ee28-46ca-a1fb-923ef5b5b84d.vsidx
+/.vs/RbxCli/FileContentIndex/cd578947-0e3e-45f0-ae2f-298ad6d4af2f.vsidx
+/.vs/RbxCli/v17/ipch/AutoPCH/2f0be0415347d133/LOGGER.ipch
+/.vs/RbxCli/v17/ipch/AutoPCH/da418289c068f117/DATAMODELHOLDER.ipch
+/.vs/RbxCli/v17/.wsuo
+/.vs/RbxCli/v17/Browse.VC.db
+/.vs/RbxCli/v17/DocumentLayout.backup.json
+/.vs/RbxCli/v17/DocumentLayout.json
+/.vs/RbxCli/v17/workspaceFileList.bin
+/.vs/cmake.db
+/.vs/CMake Overview
+/.vs/ProjectSettings.json
+/.vs/slnx.sqlite
+/.vs/VSWorkspaceState.json
