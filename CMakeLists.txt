@@ -150,20 +150,20 @@ endif ()
 
 add_subdirectory(Dependencies/Luau)
 set_target_properties(
-        Luau.VM
-        Luau.VM.Internals
-        Luau.Compiler
-        Luau.CodeGen
-        Luau.Ast
-        PROPERTIES
-        INTERFACE_SYSTEM ON
+    Luau.VM
+    Luau.VM.Internals
+    Luau.Compiler
+    Luau.CodeGen
+    Luau.Ast
+    PROPERTIES
+    INTERFACE_SYSTEM ON
 )
 
 
 add_library(Fission.Common STATIC
-        Fission.Common/include/BytecodeDecoder.hpp
+    Fission.Common/src/BytecodeDecoder.cpp
 
-        Fission.Common/BytecodeDecoder.cpp
+    Fission.Common/include/BytecodeDecoder.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
 target_precompile_headers(Fission.Common PUBLIC Fission.Common/include/pch.hpp)
@@ -171,16 +171,17 @@ target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 
 add_library(Fission.Decompiler STATIC
-        Fission.Decompiler/Deserializer.cpp
+    Fission.Decompiler/src/Deserializer.cpp
 
-        Fission.Decompiler/Deserializer.hpp
+    Fission.Decompiler/include/Deserializer.hpp
 )
 target_link_libraries(Fission.Decompiler PUBLIC Fission.Common)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
 
 add_library(Fission.CLI STATIC
-        Fission.CLI/main.cpp)
+    Fission.CLI/src/main.cpp
+)
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
