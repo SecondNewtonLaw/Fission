@@ -76,6 +76,22 @@ CPMAddPackage(
     "LIBASSERT_USE_MAGIC_ENUM ON"
 )
 
+CPMAddPackage(
+    NAME Luau
+    GITHUB_REPOSITORY luau-lang/luau
+    GIT_TAG 0.694
+)
+
+set_target_properties(
+    Luau.VM
+    Luau.VM.Internals
+    Luau.Compiler
+    Luau.CodeGen
+    Luau.Ast
+    PROPERTIES
+    INTERFACE_SYSTEM ON
+)
+
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     # gnu flags.
     set(CXX_COMPILE_OPTIONS -mavx -static -Werror -Wall -Wextra -Wmicrosoft -Wpedantic -pedantic -fslp-vectorize -ftree-vectorize -fvectorize -funroll-loops -fstack-protector-strong -fstack-protector-all)
@@ -147,18 +163,6 @@ elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     endif ()
 
 endif ()
-
-add_subdirectory(Dependencies/Luau)
-set_target_properties(
-    Luau.VM
-    Luau.VM.Internals
-    Luau.Compiler
-    Luau.CodeGen
-    Luau.Ast
-    PROPERTIES
-    INTERFACE_SYSTEM ON
-)
-
 
 add_library(Fission.Common STATIC
     Fission.Common/src/BytecodeDecoder.cpp
