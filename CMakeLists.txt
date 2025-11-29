@@ -69,27 +69,27 @@ if (CXX_COMPILER_KIND STREQUAL "clang-cl")
 endif ()
 
 CPMAddPackage(
-    NAME libassert
-    GITHUB_REPOSITORY jeremy-rifkin/libassert
-    GIT_TAG v2.2.0
-    OPTIONS
-    "LIBASSERT_USE_MAGIC_ENUM ON"
+        NAME libassert
+        GITHUB_REPOSITORY jeremy-rifkin/libassert
+        GIT_TAG v2.2.0
+        OPTIONS
+        "LIBASSERT_USE_MAGIC_ENUM ON"
 )
 
 CPMAddPackage(
-    NAME Luau
-    GITHUB_REPOSITORY luau-lang/luau
-    GIT_TAG 0.694
+        NAME Luau
+        GITHUB_REPOSITORY luau-lang/luau
+        GIT_TAG 0.701
 )
 
 set_target_properties(
-    Luau.VM
-    Luau.VM.Internals
-    Luau.Compiler
-    Luau.CodeGen
-    Luau.Ast
-    PROPERTIES
-    INTERFACE_SYSTEM ON
+        Luau.VM
+        Luau.VM.Internals
+        Luau.Compiler
+        Luau.CodeGen
+        Luau.Ast
+        PROPERTIES
+        INTERFACE_SYSTEM ON
 )
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
@@ -135,22 +135,22 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
 elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
     # msvc flags.
     set(CXX_COMPILE_OPTIONS /arch:AVX2 /WX /W4 /permissive- /Zc:preprocessor /Ob3 /O2 /Ot
-        /wd4127 #[==[ conditional expression is constant ]==]
-        /wd4068 #[==[ unknown pragma '...' ]==]
-        /wd4324 #[==[ THIS IS A REALLY STUPID WARNING, MSVC WHY? ]==]
-        /wd4820 #[==[ THIS IS A REALLY STUPID WARNING, MSVC WHY? ]==]
-        /wd5045 #[==[ Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified -- Why the fuck would you warn for this? ]==]
-        /wd4365 #[==[ 'argument': conversion from '...' to '...', signed/unsigned mismatch ]==]
-        /wd5219 #[==[ implicit conversion from '...' to '...', possible loss of data ]==]
-        /wd5039 #[==[ pointer or reference to potentially throwing function passed to 'extern "C"' function under -EHc. Undefined behavior may occur if this function throws an exception. ]==]
-        /wd4625 #[==[ blah blah copy implcitly deleted blah blah ]==]
-        /wd5026 #[==[ blah blah copy implcitly deleted blah blah ]==]
-        /wd4626 #[==[ blah blah copy implcitly deleted blah blah ]==]
-        /wd5027 #[==[ blah blah copy implcitly deleted blah blah ]==]
-        /wd5267 #[==[ definition of implicit copy constructor for '...' is deprecated because it has a user-provided destructor ]==]
-        /wd4702 #[==[ unreachable code (it is not.) ]==]
-        /wd4668 #[==[ '...' is not defined as a preprocessor macro, replacing with '0' for '#if/#elif' ]==]
-        /wd4464 #[==[ relative include path contains '..' ]==]
+            /wd4127 #[==[ conditional expression is constant ]==]
+            /wd4068 #[==[ unknown pragma '...' ]==]
+            /wd4324 #[==[ THIS IS A REALLY STUPID WARNING, MSVC WHY? ]==]
+            /wd4820 #[==[ THIS IS A REALLY STUPID WARNING, MSVC WHY? ]==]
+            /wd5045 #[==[ Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified -- Why the fuck would you warn for this? ]==]
+            /wd4365 #[==[ 'argument': conversion from '...' to '...', signed/unsigned mismatch ]==]
+            /wd5219 #[==[ implicit conversion from '...' to '...', possible loss of data ]==]
+            /wd5039 #[==[ pointer or reference to potentially throwing function passed to 'extern "C"' function under -EHc. Undefined behavior may occur if this function throws an exception. ]==]
+            /wd4625 #[==[ blah blah copy implcitly deleted blah blah ]==]
+            /wd5026 #[==[ blah blah copy implcitly deleted blah blah ]==]
+            /wd4626 #[==[ blah blah copy implcitly deleted blah blah ]==]
+            /wd5027 #[==[ blah blah copy implcitly deleted blah blah ]==]
+            /wd5267 #[==[ definition of implicit copy constructor for '...' is deprecated because it has a user-provided destructor ]==]
+            /wd4702 #[==[ unreachable code (it is not.) ]==]
+            /wd4668 #[==[ '...' is not defined as a preprocessor macro, replacing with '0' for '#if/#elif' ]==]
+            /wd4464 #[==[ relative include path contains '..' ]==]
     )
 
     if (USE_LTO)
@@ -165,9 +165,10 @@ elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif ()
 
 add_library(Fission.Common STATIC
-    Fission.Common/src/BytecodeDecoder.cpp
+        Fission.Common/src/BytecodeDecoder.cpp
 
-    Fission.Common/include/BytecodeDecoder.hpp
+        Fission.Common/include/BytecodeDecoder.hpp
+        Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
 target_precompile_headers(Fission.Common PUBLIC Fission.Common/include/pch.hpp)
@@ -175,17 +176,17 @@ target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 
 add_library(Fission.Decompiler STATIC
-    Fission.Decompiler/src/Deserializer.cpp
-
-    Fission.Decompiler/include/Deserializer.hpp
+        Fission.Decompiler/src/Deserializer.cpp
+        Fission.Decompiler/include/Deserializer.hpp
 )
+
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
-target_link_libraries(Fission.Decompiler PUBLIC Fission.Common)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
+target_link_libraries(Fission.Decompiler PUBLIC Fission.Common Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals)
 
 add_executable(Fission.CLI
-    Fission.CLI/src/main.cpp
+        Fission.CLI/src/main.cpp
 )
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
