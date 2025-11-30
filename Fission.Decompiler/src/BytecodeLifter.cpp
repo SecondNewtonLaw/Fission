@@ -1,15 +1,13 @@
 //
 // Created by Pixeluted on 29/11/2025.
 //
-#include "IRLifter.hpp"
+#include "BytecodeLifter.hpp"
 
 #include "Deserializer.hpp"
 
 #include <libassert/assert.hpp>
 
-static uint64_t functionCounter = 0;
-
-LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
+LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
     LiftedFunction liftedFunction { };
 
     if (function->debugName)
@@ -235,8 +233,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
     return liftedFunction;
 }
 
-LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
-    functionCounter = 0;
+LiftedFunction BytecodeLifter::LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
     return LiftFunctionBytecodeInternal(bytecode.lpMainFunction);
 }
 

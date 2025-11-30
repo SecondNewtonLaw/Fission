@@ -66,6 +66,12 @@ struct LiftedFunction {
     std::string name;
 };
 
-LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
+class BytecodeLifter {
+    uint64_t functionCounter = 0;
+
+    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function);
+public:
+    LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
+};
 
 std::string_view OperationToString(LiftedOperation operation);

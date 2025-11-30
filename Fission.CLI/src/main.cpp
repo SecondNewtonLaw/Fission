@@ -12,7 +12,7 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
-#include "IRLifter.hpp"
+#include "BytecodeLifter.hpp"
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 
@@ -105,7 +105,8 @@ a()
 
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
     auto &deserializationResult = deserializationResultOptional.value();
-    auto liftedIR = LiftDeserializedBytecode(deserializationResult);
+    auto bytecodeLifter = BytecodeLifter{};
+    auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(deserializationResult);
 
     PrintIR(liftedIR);
     return 0;
