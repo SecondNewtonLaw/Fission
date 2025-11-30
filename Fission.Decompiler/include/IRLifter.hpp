@@ -34,7 +34,6 @@ enum class LiftedOperation : uint32_t {
 
 enum class LiftedOperandType : uint8_t {
     Register,
-    Immediate,
     ImmediateNil,
     ImmediateInteger,
     ImmediateBool,
