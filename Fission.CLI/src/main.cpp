@@ -95,6 +95,9 @@ function a()
         local cc = 32000
         local dd = 10000
         local q = "string"
+        if math.random(5, 100) > 10 then
+            print("real?")
+        end
         print(q)
     end
 
