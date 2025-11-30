@@ -52,7 +52,7 @@ struct AnalyzedFunction {
     std::vector<AnalyzedFunction> innerFunctions;
 };
 
-std::string BlockTypeToString(BlockType type) {
+inline std::string BlockTypeToString(BlockType type) {
     switch (type) {
     case BlockType::Standard:
         return "Standard";
@@ -77,7 +77,7 @@ std::string BlockTypeToString(BlockType type) {
     }
 }
 
-std::string BlockTerminatorToString(BlockTerminator term) {
+inline std::string BlockTerminatorToString(BlockTerminator term) {
     switch (term) {
     case BlockTerminator::Fallthrough:
         return "Fallthrough";

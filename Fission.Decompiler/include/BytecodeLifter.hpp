@@ -5,8 +5,8 @@
 
 #include "InstructionDecoder.hpp"
 
-#include <optional>
 #include <libassert/assert.hpp>
+#include <optional>
 #include <vector>
 
 struct DeserializedFunction;
@@ -84,17 +84,12 @@ enum class LiftedOperation : uint32_t {
     FORGPREP,
     JUMPXEQK,
     IDIV,
-    IDIVK
+    IDIVK,
+
+    PHI // phi node on SSA.
 };
 
-enum class LiftedOperandType : uint8_t {
-    Register,
-    ImmediateNil,
-    ImmediateInteger,
-    ImmediateBool,
-    ImmediateConstant,
-    ImmediateAux
-};
+enum class LiftedOperandType : uint8_t { Register, ImmediateNil, ImmediateInteger, ImmediateBool, ImmediateConstant, ImmediateAux };
 
 struct LiftedOperand {
     LiftedOperandType type;
@@ -109,11 +104,13 @@ struct LiftedOperand {
             uint32_t u;
         } imm;
     } value;
+
+    int32_t ssaVersion = -1;
 };
 
 struct LiftedInstruction {
     LiftedOperation operation;
-    std::vector<LiftedOperand> operands { };
+    std::vector<LiftedOperand> operands{};
     std::optional<std::string> comment = std::nullopt;
 };
 
@@ -130,7 +127,7 @@ class BytecodeLifter {
 
     Fission::InstructionDecoder *lpDecoder = nullptr;
 
-public:
+  public:
     BytecodeLifter(Fission::InstructionDecoder *decoder) {
         lpDecoder = decoder;
         ASSERT(lpDecoder != nullptr, "Instruction decoder cannot be nullptr", lpDecoder);

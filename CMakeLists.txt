@@ -190,6 +190,7 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/BytecodeLifter.cpp
         Fission.Decompiler/include/ControlFlowAnalyzer.hpp
         Fission.Decompiler/src/ControlFlowAnalyzer.cpp
+        Fission.Decompiler/include/DenominatorAnalysis.hpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)

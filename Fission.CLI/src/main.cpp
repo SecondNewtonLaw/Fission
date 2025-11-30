@@ -18,6 +18,7 @@
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
+#include "DenominatorAnalysis.hpp"
 #include "Luau/Compiler.h"
 
 #include <filesystem>
@@ -184,6 +185,20 @@ int main() {
     std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();
     auto analyzedFunction = analyzer.DetermineBasicBlocks(&liftedIR);
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
+
+    DominatorAnalyzer domAnalyzer;
+    auto domInfo = domAnalyzer.Analyze(analyzedFunction);
+
+    std::cout << "\nDominator Tree:\n";
+    for (const auto &[id, info] : domInfo) {
+        std::cout << "Block " << id << " IDOM: " << info.idom << " | Children: [";
+        for (int child : info.children)
+            std::cout << child << " ";
+        std::cout << "] | Frontier: [";
+        for (int f : info.dominanceFrontier)
+            std::cout << f << " ";
+        std::cout << "]\n";
+    }
 
     std::chrono::steady_clock::time_point t6 = std::chrono::steady_clock::now();
     auto ir = FormatAnalyzedIR(analyzedFunction);
