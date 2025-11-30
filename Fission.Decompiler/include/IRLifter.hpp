@@ -38,7 +38,8 @@ enum class LiftedOperandType : uint8_t {
     ImmediateNil,
     ImmediateInteger,
     ImmediateBool,
-    ImmediateConstant
+    ImmediateConstant,
+    ImmediateAux
 };
 
 struct LiftedOperand {
@@ -51,6 +52,7 @@ struct LiftedOperand {
             int16_t n;
             bool b;
             int32_t k;
+            uint32_t u;
         } imm;
     } value;
 };
