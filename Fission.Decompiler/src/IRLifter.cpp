@@ -189,8 +189,8 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
-            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = instruction.GetD();
+            instr.operands[1].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[1].value.imm.k = instruction.GetD();
             break;
         }
         case LOP_NAMECALL: {
@@ -242,23 +242,28 @@ LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
 
 std::string_view OperationToString(LiftedOperation operation) {
     switch (operation) {
-    case LiftedOperation::NOP:
-        return "NOP";
-    case LiftedOperation::BREAK:
-        return "DEBUGBREAK";
-    case LiftedOperation::LOAD:
-        return "LOAD";
-    case LiftedOperation::LOADNJUMP:
-        return "LOAD_AND_JUMP";
-    case LiftedOperation::MOVE:
-        return "MOVE";
-    case LiftedOperation::GETGLOBAL:
-        return "GETGLOBAL";
-    case LiftedOperation::SETGLOBAL:
-        return "SETGLOBAL";
+    case LiftedOperation::NOP:        return "NOP";
+    case LiftedOperation::BREAK:      return "DEBUGBREAK";
+    case LiftedOperation::LOAD:       return "LOAD";
+    case LiftedOperation::LOADNJUMP:  return "LOAD_AND_JUMP";
+    case LiftedOperation::MOVE:       return "MOVE";
+    case LiftedOperation::GETGLOBAL:  return "GETGLOBAL";
+    case LiftedOperation::SETGLOBAL:  return "SETGLOBAL";
+    case LiftedOperation::GETUPVAL:   return "GETUPVAL";
+    case LiftedOperation::SETUPVAL:   return "SETUPVAL";
+    case LiftedOperation::GETIMPORT:  return "GETIMPORT";
+    case LiftedOperation::GETTABLE:   return "GETTABLE";
+    case LiftedOperation::SETTABLE:   return "SETTABLE";
+    case LiftedOperation::GETTABLEKS: return "GETTABLEKS";
+    case LiftedOperation::SETTABLEKS: return "SETTABLEKS";
+    case LiftedOperation::GETTABLEN:  return "GETTABLEN";
+    case LiftedOperation::SETTABLEN:  return "SETTABLEN";
+    case LiftedOperation::NEWCLOSURE: return "NEWCLOSURE";
+    case LiftedOperation::NAMECALL:   return "NAMECALL";
+    case LiftedOperation::CALL:       return "CALL";
+    case LiftedOperation::RETURN:     return "RETURN";
     default:
         ASSERT(false, "unhandled operation. No string representation available, so we panic.");
+        return "UNKNOWN";
     }
-
-    return "";
 }
