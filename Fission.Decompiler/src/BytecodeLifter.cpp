@@ -1124,10 +1124,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger; // jmp off
             instr.operands[1].value.imm.n = instruction.GetD();
-            instr.operands[1].type = LiftedOperandType::ImmediateConstant; // ktable idx
-            instr.operands[1].value.imm.k = LUAU_INSN_AUX_KV(function->instructions.at(currentIndex + 1).instruction);
-            instr.operands[2].type = LiftedOperandType::ImmediateBool; // NOT flag
-            instr.operands[2].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant; // ktable idx
+            instr.operands[2].value.imm.k = LUAU_INSN_AUX_KV(function->instructions.at(currentIndex + 1).instruction);
+            instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
+            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).comment = "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
