@@ -15,7 +15,20 @@ enum class LiftedOperation : uint32_t {
     LOADNJUMP,
     MOVE,
     GETGLOBAL,
-    SETGLOBAL
+    SETGLOBAL,
+    GETUPVAL,
+    SETUPVAL,
+    GETIMPORT,
+    GETTABLE,
+    SETTABLE,
+    GETTABLEKS,
+    SETTABLEKS,
+    GETTABLEN,
+    SETTABLEN,
+    NEWCLOSURE,
+    NAMECALL,
+    CALL,
+    RETURN
 };
 
 enum class LiftedOperandType : uint8_t {

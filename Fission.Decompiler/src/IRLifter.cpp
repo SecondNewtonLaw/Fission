@@ -86,6 +86,132 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
             break;
         }
+        case LOP_GETUPVAL: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETUPVAL);
+            instr.operands.resize(2);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            break;
+        }
+        case LOP_SETUPVAL: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETUPVAL);
+            instr.operands.resize(2);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            break;
+        }
+        case LOP_GETIMPORT: {
+            // TODO: im too stupid for this, do it ditto - pixeluted
+            break;
+        }
+        case LOP_GETTABLE: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETTABLE);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::Register;
+            instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            break;
+        }
+        case LOP_SETTABLE: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETTABLE);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::Register;
+            instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            break;
+        }
+        case LOP_GETTABLEKS: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETTABLEKS);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            break;
+        }
+        case LOP_SETTABLEKS: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETTABLEKS);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            break;
+        }
+        case LOP_GETTABLEN: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETTABLEN);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            break;
+        }
+        case LOP_SETTABLEN: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETTABLEN);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            break;
+        }
+        case LOP_NEWCLOSURE: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWCLOSURE);
+            instr.operands.resize(2);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = instruction.GetD();
+            break;
+        }
+        case LOP_NAMECALL: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::NAMECALL);
+            instr.operands.resize(2);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            break;
+        }
+        case LOP_CALL: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::CALL);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            break;
+        }
+        case LOP_RETURN: {
+            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::RETURN);
+            instr.operands.resize(2);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            break;
+        }
 
             default:
                 break;
