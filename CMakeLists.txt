@@ -82,6 +82,15 @@ CPMAddPackage(
         GIT_TAG 0.701
 )
 
+CPMAddPackage(
+        NAME Boost
+        VERSION 1.86.0 # Versions less than 1.85.0 may need patches for installation targets.
+        URL https://github.com/boostorg/boost/releases/download/boost-1.86.0/boost-1.86.0-cmake.tar.xz
+        URL_HASH SHA256=2c5ec5edcdff47ff55e27ed9560b0a0b94b07bd07ed9928b476150e16b0efc57
+        OPTIONS "BOOST_ENABLE_CMAKE ON" "BOOST_SKIP_INSTALL_RULES ON" # Set `OFF` for installation
+        "BUILD_SHARED_LIBS OFF"
+)
+
 set_target_properties(
         Luau.VM
         Luau.VM.Internals
@@ -178,15 +187,17 @@ target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/Deserializer.cpp
         Fission.Decompiler/include/Deserializer.hpp
+        Fission.Decompiler/src/IRLifter.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
-target_link_libraries(Fission.Decompiler PUBLIC Fission.Common Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals)
+target_link_libraries(Fission.Decompiler PUBLIC Fission.Common Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container)
 
 add_executable(Fission.CLI
         Fission.CLI/src/main.cpp
+        Fission.Decompiler/include/IRLifter.hpp
 )
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})

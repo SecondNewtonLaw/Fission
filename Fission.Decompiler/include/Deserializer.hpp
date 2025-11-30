@@ -33,9 +33,44 @@ struct LuauInstruction {
 
     LuauInstruction(const Instruction instruction) { this->instruction = instruction; }
 
-    bool HasAuxilliary() const { return Luau::getOpLength(this->GetOpCode()) == 2; }
+    [[nodiscard]] bool HasAux() const { return Luau::getOpLength(this->GetOpCode()) == 2; }
 
-    LuauOpcode GetOpCode() const { return static_cast<LuauOpcode>(LUAU_INSN_OP(this->instruction)); }
+    [[nodiscard]] int GetOpCodeSize() const { return Luau::getOpLength(this->GetOpCode()); }
+
+    [[nodiscard]] LuauOpcode GetOpCode() const { return static_cast<LuauOpcode>(LUAU_INSN_OP(this->instruction)); }
+
+    enum class LuauOperand : uint8_t {
+        A,
+        B,
+        C,
+        D,
+        E
+    };
+
+    [[nodiscard]] uint8_t GetABCOperand(const LuauOperand operand) const {
+        if (operand > LuauOperand::C)
+            return 0; // TODO: NEEDS ASSERT DOTTIK PLS
+
+        switch (operand) {
+        case LuauOperand::A:
+            return LUAU_INSN_A(instruction);
+        case LuauOperand::B:
+            return LUAU_INSN_B(instruction);
+        case LuauOperand::C:
+            return LUAU_INSN_C(instruction);
+
+            default:
+                return 0; // TODO: DOTTIK AGAIN ASSERT PLS
+        }
+    }
+
+    [[nodiscard]] int16_t GetD() const {
+        return LUAU_INSN_D(instruction);
+    }
+
+    [[nodiscard]] int32_t GetE() const {
+        return LUAU_INSN_E(instruction);
+    }
 };
 
 typedef double LuauNumber;

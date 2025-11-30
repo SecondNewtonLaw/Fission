@@ -5,6 +5,7 @@
 #include "Deserializer.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
+#include "IRLifter.hpp"
 #include "Luau/Compiler.h"
 #include <cstdio>
 #include <iostream>
@@ -15,6 +16,7 @@ int main() {
     auto bytecode = Luau::compile(
         R"(
 print("hi")
+print = "i hate niggers"
 )",
         compileOpts
     );
@@ -23,14 +25,8 @@ print("hi")
     const auto deserializationResultOptional = deserializer.Deserialize(bytecode);
 
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
-    auto deserializationResult = deserializationResultOptional.value();
+    auto& deserializationResult = deserializationResultOptional.value();
+    const auto liftedIR = LiftDeserializedBytecode(deserializationResult);
 
-    // Decompiler::Lifter::BytecodeLifter lifter { };
-    // auto ast = lifter.Lift(deserializationResult);
-    //
-    // Decompiler::SourceCodeGenerator generator { };
-    // generator.VisitNodeTree(ast);
-
-    std::cout << "Output: \r\n" << deserializationResult.stringTable[0] << std::endl;
     return 0;
 }
