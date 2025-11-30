@@ -45,6 +45,9 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
             case LiftedOperandType::ImmediateConstant:
                 stream << "K" << std::to_string(operand.value.imm.k);
                 break;
+            case LiftedOperandType::ImmediateAux:
+                stream << "AUXV_" << std::to_string(operand.value.imm.u);
+                break;
             default:
                 ASSERT(false, "unhandled mapping of operand to text");
             }
@@ -74,14 +77,16 @@ void PrintIR(LiftedFunction &func) {
 }
 
 int main() {
-    Luau::CompileOptions compileOpts {0, 2};
+    Luau::CompileOptions compileOpts {1, 2};
     auto bytecode = Luau::compile(
         R"(
 function a()
     local a = false
     local b = a
-    local c = 32000
-    local d = 10000
+    local c = 0xDEAD
+    local d = 0xBEEF
+    local n = 0xB16B
+    local v = 0x00B5
     local q = "string"
 
     function b()
@@ -90,6 +95,7 @@ function a()
         local cc = 32000
         local dd = 10000
         local q = "string"
+        print(q)
     end
 
     b()
