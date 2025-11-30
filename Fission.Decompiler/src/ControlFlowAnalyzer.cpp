@@ -173,33 +173,45 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
 
         LiftedInstruction *tailInst = block.lpTail;
 
-        if (tailInst->operation == LiftedOperation::RETURN) {
+        block.bType = BlockType::Standard;
+
+        switch (tailInst->operation) {
+        case LiftedOperation::JUMP:
+        case LiftedOperation::LOADNJUMP:
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
+            block.bTerminator = BlockTerminator::Unconditional;
+            if (GetJumpOffset(tailInst) < 0)
+                block.bType = BlockType::LoopLatch;
+            break;
+        case LiftedOperation::JUMPIF:
+        case LiftedOperation::JUMPIFNOT:
+        case LiftedOperation::JUMPIFEQ:
+        case LiftedOperation::JUMPIFLE:
+        case LiftedOperation::JUMPIFLT:
+        case LiftedOperation::JUMPIFNOTEQ:
+        case LiftedOperation::JUMPIFNOTLE:
+        case LiftedOperation::JUMPIFNOTLT:
+        case LiftedOperation::JUMPXEQK:
+        case LiftedOperation::FORNLOOP:
+        case LiftedOperation::FORGLOOP:
+            block.bTerminator = BlockTerminator::Conditional;
+            if (tailInst->operation == LiftedOperation::FORNLOOP || tailInst->operation == LiftedOperation::FORGLOOP) {
+                if (GetJumpOffset(tailInst) < 0) {
+                    block.bType = BlockType::LoopLatch;
+                }
+            }
+            break;
+        case LiftedOperation::RETURN:
             block.bTerminator = BlockTerminator::Return;
             block.bType = BlockType::Return;
-        } else if (tailInst->operation == LiftedOperation::JUMP || tailInst->operation == LiftedOperation::LOADNJUMP) {
-            block.bTerminator = BlockTerminator::Unconditional;
-
-            // loop latch, likely jumping back to the beginning of a loop.
-            // during analysis, we will have to see anyway if the jump is a 'continue'.
-            if (GetJumpOffset(tailInst) < 0)
-                block.bType = BlockType::LoopLatch;
-            else
-                block.bType = BlockType::Standard;
-        } else if (tailInst->operation == LiftedOperation::FORNLOOP || tailInst->operation == LiftedOperation::FORGLOOP) {
-            block.bTerminator = BlockTerminator::Conditional; // only if it needs to continue.
-
-            if (GetJumpOffset(tailInst) < 0)
-                block.bType = BlockType::LoopLatch;
-            else
-                block.bType = BlockType::Standard;
-        } else if (IsTerminator(tailInst->operation)) {
-            // terminator block, conditional.
-            block.bTerminator = BlockTerminator::Conditional;
-            block.bType = BlockType::Standard; // we can assumpe it may be the header of an if block, but during linking we will evaluate it properly
-        } else {
-            // not a terminator, falls through
+            break;
+        default:
             block.bTerminator = BlockTerminator::Fallthrough;
             block.bType = BlockType::Standard;
+            break;
         }
 
         basicBlocks.push_back(block);
@@ -354,9 +366,12 @@ std::string GraphVisualizer::BlockTypeToString(BlockType type) {
 
 std::string GraphVisualizer::OperationToString(LiftedOperation op) { return std::string(::OperationToString(op)); }
 
-std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand) {
+std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand, bool isSsa) {
     switch (operand.type) {
     case LiftedOperandType::Register:
+        if (isSsa && operand.ssaVersion != -1) {
+            return std::format("R{}<SUB>{}</SUB>", operand.value.reg, operand.ssaVersion);
+        }
         return std::format("R{}", operand.value.reg);
     case LiftedOperandType::ImmediateNil:
         return "nil";
@@ -373,7 +388,7 @@ std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand) {
     }
 }
 
-std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func) {
+std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func, bool isSsa) {
     std::stringstream ss;
 
     ss << "<TABLE BORDER=\"1\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"4\">";
@@ -386,6 +401,23 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
     ss << "</TD></TR>";
 
     ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#888888\">--------------------------------------------------</FONT></TD></TR>";
+
+    if (isSsa) {
+        for (const auto &phi : block.phiNodes) {
+            std::stringstream line;
+            line << FormatOperand(phi.operands[0], isSsa) << " = ϕ(";
+            for (size_t i = 1; i < phi.operands.size(); ++i) {
+                line << FormatOperand(phi.operands[i], isSsa);
+                if (i < phi.operands.size() - 1)
+                    line << ", ";
+            }
+            line << ")";
+            ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><I>" << line.str() << "</I></TD></TR>";
+        }
+        if (!block.phiNodes.empty()) {
+            ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#888888\">--------------------------------------------------</FONT></TD></TR>";
+        }
+    }
 
     if (block.lpHead && block.lpTail) {
         const LiftedInstruction *current = block.lpHead;
@@ -408,7 +440,7 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
             line << "_" << idx << ": " << OperationToString(current->operation) << " ";
 
             for (size_t i = 0; i < current->operands.size(); ++i) {
-                line << EscapeHtml(FormatOperand(current->operands[i]));
+                line << FormatOperand(current->operands[i], isSsa);
                 if (i < current->operands.size() - 1)
                     line << ", ";
             }
@@ -434,9 +466,9 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
     return ss.str();
 }
 
-void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix) {
+void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix, bool isSsa) {
     dot << "\n    subgraph cluster_" << funcPrefix << " {\n";
-    dot << "        label=\"" << EscapeHtml(func.lpLiftedFunction->name) << "\";\n";
+    dot << "        label=\"" << EscapeHtml(func.lpLiftedFunction->name) << (isSsa ? " (SSA)" : "") << "\";\n";
     dot << "        style=filled; color=lightgrey; node [style=filled,color=white];\n";
 
     for (const auto &block : func.basicBlocks) {
@@ -457,7 +489,7 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
 
         dot << "        " << uniqueNodeId << " [\n";
         dot << "            shape=plain\n";
-        dot << "            label=<" << GenerateNodeHtml(block, func.lpLiftedFunction) << ">\n";
+        dot << "            label=<" << GenerateNodeHtml(block, func.lpLiftedFunction, isSsa) << ">\n";
         dot << "            fillcolor=\"" << fillColor << "\"\n";
         dot << "            fontname=\"Courier New\" fontsize=10\n";
         dot << "        ];\n";
@@ -530,7 +562,7 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
     int subFuncIndex = 0;
     for (const auto &sub : func.innerFunctions) {
         std::string subPrefix = std::format("{}_SUB_{}", funcPrefix, subFuncIndex++);
-        GenerateFunctionGraph(dot, sub, subPrefix);
+        GenerateFunctionGraph(dot, sub, subPrefix, isSsa);
     }
     dot << "    }\n";
 }
@@ -541,7 +573,17 @@ std::string GraphVisualizer::GenerateDotGraph(const AnalyzedFunction &rootAnalys
     dot << "    compound=true;\n";
     dot << "    labelloc=\"t\";\n";
     dot << "    fontname=\"Courier New\";\n";
-    GenerateFunctionGraph(dot, rootAnalysis, "ROOT");
+
+    dot << "subgraph cluster_non_ssa {\n";
+    dot << "    label=\"Non-SSA\";\n";
+    GenerateFunctionGraph(dot, rootAnalysis, "ROOT_NON_SSA", false);
+    dot << "}\n";
+
+    dot << "subgraph cluster_ssa {\n";
+    dot << "    label=\"SSA\";\n";
+    GenerateFunctionGraph(dot, rootAnalysis, "ROOT_SSA", true);
+    dot << "}\n";
+
     dot << "}\n";
     return dot.str();
 }

@@ -123,11 +123,11 @@ class GraphVisualizer {
 
     static std::string OperationToString(LiftedOperation op);
 
-    static std::string FormatOperand(const LiftedOperand &operand);
+    static std::string FormatOperand(const LiftedOperand &operand, bool isSsa);
 
-    static std::string GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func);
+    static std::string GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func, bool isSsa);
 
-    static void GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix);
+    static void GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix, bool isSsa);
 
   public:
     static std::string GenerateDotGraph(const AnalyzedFunction &rootAnalysis);
