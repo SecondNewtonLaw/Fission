@@ -20,7 +20,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             liftedFunction.name = std::format("f{}", functionCounter++);
     }
 
-    for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex += function->instructions.at(currentIndex).GetOpCodeSize()) {
+    for (size_t currentIndex = 0; currentIndex < function->instructions.size();) {
         const auto &instruction = LuauInstruction {lpDecoder->DecodeInstruction(function->instructions.at(currentIndex).instruction)};
         const uint8_t opCode = (uint8_t)instruction.GetOpCode();
 
@@ -835,10 +835,11 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
 
         default:
-            __debugbreak();
             ASSERT(false, "unhandled opcode.", (LuauOpcode)opCode);
             break;
         }
+
+        currentIndex += instruction.GetOpCodeSize();
     }
 
     for (const auto subFunction : function->subfunctions) {
