@@ -26,7 +26,7 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
 
     stream << GetIndentation(indentationLevel) << "/* Function IR Instructions (size: " << func.instructions.size() << ") */" << "\n";
     for (const auto &insn : func.instructions) {
-        stream << GetIndentation(indentationLevel) << OperationToString(insn.operation) << " ";
+        stream << GetIndentation(indentationLevel + 4) << OperationToString(insn.operation) << " ";
         for (std::size_t i = 0; i < insn.operands.size(); i++) {
             const auto &operand = insn.operands[i];
             switch (operand.type) {
@@ -68,7 +68,7 @@ void PrintIR(LiftedFunction &func) {
     sstream << "/* Fission IR Viewer */\n";
     sstream << "/* Created by Fission Contributors */\n";
     sstream << "\n";
-    PrintFunctionOntoStream(sstream, 0, func);
+    PrintFunctionOntoStream(sstream, 4, func);
 
     std::cout << sstream.str();
 }
