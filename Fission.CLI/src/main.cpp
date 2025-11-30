@@ -159,21 +159,21 @@ std::optional<std::string> readfile(std::filesystem::path path) {
 }
 
 int main() {
-    Luau::CompileOptions compileOpts{0, 2};
-    auto hack = readfile("text.txt");
+    //Luau::CompileOptions compileOpts{0, 2};
+    auto hack = readfile("bytecode_raw.txt");
     if (!hack.has_value()) {
         std::println("Failed to read text.txt");
         return 1;
     }
 
-    auto bytecode = Luau::compile(*hack, compileOpts);
+    //auto bytecode = Luau::compile(*hack, compileOpts);
 
     Deserializer deserializer{};
     std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
-    const auto deserializationResultOptional = deserializer.Deserialize(bytecode);
+    const auto deserializationResultOptional = deserializer.Deserialize(*hack);
     std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
 
-    Fission::InstructionDecoder decoder{};
+    Fission::RobloxClientDecoder decoder{};
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
 
     auto bytecodeLifter = BytecodeLifter{&decoder};

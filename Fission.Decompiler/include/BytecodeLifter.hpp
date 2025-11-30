@@ -118,6 +118,7 @@ struct LiftedFunction {
     std::vector<LiftedInstruction> instructions;
     std::vector<LiftedFunction> subfunctions;
     std::string name;
+    uint8_t numparams;
 };
 
 class BytecodeLifter {

@@ -193,6 +193,7 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/include/DenominatorAnalysis.hpp
         Fission.Decompiler/src/DenominatorAnalysis.cpp
         Fission.Decompiler/include/SSABuilder.hpp
+        Fission.Decompiler/src/SSABuilder.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)

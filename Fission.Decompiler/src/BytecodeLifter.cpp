@@ -205,6 +205,7 @@ std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
 
 LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
     LiftedFunction liftedFunction{};
+    liftedFunction.numparams = function->numparams;
 
     if (function->debugName)
         liftedFunction.name = *function->debugName;
