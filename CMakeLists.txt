@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.31)
 project(Fission)
 
-set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD 23)
 set(USE_CCACHE ON)
 
 set(ALLOW_NON_STANDARD_MATH ON)
