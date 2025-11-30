@@ -43,6 +43,8 @@ struct BasicBlock {
 
     std::vector<std::uint32_t> successors;
     std::vector<std::uint32_t> predecessors;
+
+    std::vector<LiftedInstruction> phiNodes;
 };
 
 struct AnalyzedFunction {

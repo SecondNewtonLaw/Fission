@@ -3,7 +3,7 @@
 //
 #include "DenominatorAnalysis.hpp"
 
-std::map<int32_t, DominatorInfo> Analyze(const AnalyzedFunction &func) {
+std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &func) {
     std::map<int32_t, DominatorInfo> info;
     const auto &blocks = func.basicBlocks;
 

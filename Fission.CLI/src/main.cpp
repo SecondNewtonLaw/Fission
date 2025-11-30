@@ -20,6 +20,7 @@
 #include "ControlFlowAnalyzer.hpp"
 #include "DenominatorAnalysis.hpp"
 #include "Luau/Compiler.h"
+#include "SSABuilder.hpp"
 
 #include <filesystem>
 #pragma clang diagnostic pop
@@ -186,39 +187,32 @@ int main() {
     auto analyzedFunction = analyzer.DetermineBasicBlocks(&liftedIR);
     std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
 
-    DominatorAnalyzer domAnalyzer;
-    auto domInfo = domAnalyzer.Analyze(analyzedFunction);
-
-    std::cout << "\nDominator Tree:\n";
-    for (const auto &[id, info] : domInfo) {
-        std::cout << "Block " << id << " IDOM: " << info.idom << " | Children: [";
-        for (int child : info.children)
-            std::cout << child << " ";
-        std::cout << "] | Frontier: [";
-        for (int f : info.dominanceFrontier)
-            std::cout << f << " ";
-        std::cout << "]\n";
-    }
-
+    SSABuilder ssa;
     std::chrono::steady_clock::time_point t6 = std::chrono::steady_clock::now();
-    auto ir = FormatAnalyzedIR(analyzedFunction);
+    ssa.Build(analyzedFunction);
     std::chrono::steady_clock::time_point t7 = std::chrono::steady_clock::now();
+
+    std::chrono::steady_clock::time_point t8 = std::chrono::steady_clock::now();
+    auto ir = FormatAnalyzedIR(analyzedFunction);
+    std::chrono::steady_clock::time_point t9 = std::chrono::steady_clock::now();
 
     writefile(std::filesystem::path{"ir_out.txt"}, ir);
     std::cout << ir << std::endl;
-    std::chrono::steady_clock::time_point t8 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point t10 = std::chrono::steady_clock::now();
     std::string dotContent = GraphVisualizer::GenerateDotGraph(analyzedFunction);
-    std::chrono::steady_clock::time_point t9 = std::chrono::steady_clock::now();
+    std::chrono::steady_clock::time_point t11 = std::chrono::steady_clock::now();
     writefile("cfg.dot", dotContent);
 
     std::cout << "Generated ir_out.txt and cfg.dot" << std::endl;
     std::cout << "you can open cfg.dot in https://edotor.net/ or a Graphviz viewer to enjoy a fucking readable output." << std::endl;
 
     std::println(
-        "Decompilation Breakdown:\n\tDeserializing Bytecode: {}s\n\tLifting into IR: {}s\n\tControl Flow Analysis: {}s\n\tOptimization: {}s\n\tFormatting: "
+        "Decompilation Breakdown:\n\tDeserializing Bytecode: {}s\n\tLifting into IR: {}s\n\tControl Flow Analysis: {}s\n\tIR -> SSA Form: {}s\n\tOptimization: "
+        "{}s\n\tFormatting: "
         "{}s\n\tGraph View Generation: {}s\n\tOutput generated in {}s.",
-        std::chrono::duration<float>(t1 - t0).count(), std::chrono::duration<float>(t3 - t2).count(), std::chrono::duration<float>(t5 - t4).count(), 0,
-        std::chrono::duration<float>(t7 - t6).count(), std::chrono::duration<float>(t9 - t8).count(), std::chrono::duration<float>(t7 - t0).count()
+        std::chrono::duration<float>(t1 - t0).count(), std::chrono::duration<float>(t3 - t2).count(), std::chrono::duration<float>(t5 - t4).count(),
+        std::chrono::duration<float>(t7 - t6), 0, std::chrono::duration<float>(t9 - t8).count(), std::chrono::duration<float>(t11 - t10).count(),
+        std::chrono::duration<float>(t11 - t0).count()
     );
     return 0;
 }

@@ -15,4 +15,4 @@ struct DominatorInfo {
     std::set<int32_t> dominanceFrontier;
 };
 
-std::map<int32_t, DominatorInfo> Analyze(const AnalyzedFunction &func);
+std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &func);
