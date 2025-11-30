@@ -180,8 +180,6 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::LOADNJUMP:
         case LiftedOperation::FORNPREP:
         case LiftedOperation::FORGPREP:
-        case LiftedOperation::FORGPREP_INEXT:
-        case LiftedOperation::FORGPREP_NEXT:
             block.bTerminator = BlockTerminator::Unconditional;
             if (GetJumpOffset(tailInst) < 0)
                 block.bType = BlockType::LoopLatch;
@@ -260,6 +258,8 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
                 // reassign predecesors to point to the correct next block, as this block will be yanked
                 // we have to simply reassign the predecessor's successor that's us to point to our only successor.
                 // this unlinks us from the graph and allows us shorten it.
+
+                std::vector<std::uint32_t> newPredecessors;
                 for (int32_t predecesorId : block.predecessors) {
                     BasicBlock &predBlock = blocks[predecesorId];
 
@@ -279,12 +279,12 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
 
                     if (!alreadyExists)
                         ourSuccessor.predecessors.push_back(predecesorId); // add our predecessor to the successor.
-                }
 
-                // clear ourselves from predecessors.
-                BasicBlock &targetBlock = blocks[targetId];
-                auto &preds = targetBlock.predecessors;
-                std::erase(preds, currentId);
+                    // clear ourselves from predecessors.
+                    BasicBlock &targetBlock = blocks[targetId];
+                    auto &preds = targetBlock.predecessors;
+                    std::erase(preds, currentId);
+                }
 
                 block.bType = BlockType::Dead; // mark dead
                 block.successors.clear();
@@ -300,10 +300,12 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocks(LiftedFunction *lpLif
     auto analyzed = DetermineBasicBlocksInternal(lpLiftedFunction);
     LinkBasicBlocks(analyzed.basicBlocks);
     this->OptimiseGraph(analyzed.basicBlocks);
+    this->PruneUnreachableBlocks(analyzed.basicBlocks);
 
     for (auto &sub : analyzed.innerFunctions) {
         LinkBasicBlocks(sub.basicBlocks);
         this->OptimiseGraph(sub.basicBlocks);
+        this->PruneUnreachableBlocks(sub.basicBlocks);
     }
     return analyzed;
 }
@@ -372,6 +374,7 @@ std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand, bool is
         if (isSsa && operand.ssaVersion != -1) {
             return std::format("R{}<SUB>{}</SUB>", operand.value.reg, operand.ssaVersion);
         }
+        ASSERT(isSsa == false, "we reached a wrong block of code what the fuck?", operand, operand.ssaVersion);
         return std::format("R{}", operand.value.reg);
     case LiftedOperandType::ImmediateNil:
         return "nil";

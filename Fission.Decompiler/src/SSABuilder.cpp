@@ -109,6 +109,12 @@ int32_t SSABuilder::CurrentVersion(int32_t reg) {
 
 void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std::map<int32_t, DominatorInfo> &domInfo) {
     this->blocksDefining.clear();
+    if (lpOriginalFunction->lpLiftedFunction) {
+        for (uint8_t i = 0; i < lpOriginalFunction->lpLiftedFunction->numparams; ++i) {
+            blocksDefining[i].insert(0);
+        }
+    }
+
     for (const auto &block : lpOriginalFunction->basicBlocks) {
         if (!block.lpHead)
             continue;
@@ -184,36 +190,38 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
     }
 
     if (block.lpHead) {
-        LiftedInstruction *inst = block.lpHead;
-        while (true) {
-            if (inst->operation != LiftedOperation::NOP) {
-                for (size_t i = 0; i < inst->operands.size(); ++i) {
-                    auto &op = inst->operands[i];
-                    if (op.type != LiftedOperandType::Register)
-                        continue;
+        for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
+            if (inst->operation == LiftedOperation::NOP)
+                continue;
+            for (size_t i = 0; i < inst->operands.size(); ++i) {
+                auto &op = inst->operands[i];
+                if (op.type != LiftedOperandType::Register)
+                    continue;
 
-                    AccessType mode = GetRegisterAccess(*inst, i);
-                    if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
-                        op.ssaVersion = CurrentVersion(op.value.reg);
-                    }
-                }
-
-                for (size_t i = 0; i < inst->operands.size(); ++i) {
-                    auto &op = inst->operands[i];
-                    if (op.type != LiftedOperandType::Register)
-                        continue;
-
-                    AccessType mode = GetRegisterAccess(*inst, i);
-                    if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
-                        int v = NewVersion(op.value.reg);
-                        op.ssaVersion = v;
-                        pushedCount[op.value.reg]++;
-                    }
+                AccessType mode = GetRegisterAccess(*inst, i);
+                if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
+                    op.ssaVersion = CurrentVersion(op.value.reg);
                 }
             }
+
+            for (size_t i = 0; i < inst->operands.size(); ++i) {
+                auto &op = inst->operands[i];
+                if (op.type != LiftedOperandType::Register)
+                    continue;
+
+                AccessType mode = GetRegisterAccess(*inst, i);
+                if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
+                    if (mode == AccessType::Write) {
+                        op.ssaVersion = NewVersion(op.value.reg);
+                    } else {
+                        NewVersion(op.value.reg);
+                    }
+                    pushedCount[op.value.reg]++;
+                }
+            }
+
             if (inst == block.lpTail)
                 break;
-            inst++;
         }
     }
 
@@ -247,17 +255,20 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 }
 
 void SSABuilder::Build(AnalyzedFunction &func) {
+    this->versionStack.clear();
+    this->versionCounter.clear();
+    this->blocksDefining.clear();
+
     const auto domInfo = AnalyzeDenominators(func);
 
     this->CreatePhiNodes(&func, domInfo);
-    for (uint8_t i = 0; i < func.lpLiftedFunction->numparams; ++i) {
-        NewVersion(i);
-    }
+
+    if (func.lpLiftedFunction)
+        for (uint8_t i = 0; i < func.lpLiftedFunction->numparams; ++i)
+            NewVersion(i);
 
     Rename(0, func, domInfo);
 
-    for (auto &sub : func.innerFunctions) {
-        SSABuilder builder;
-        builder.Build(sub);
-    }
+    for (auto &sub : func.innerFunctions)
+        this->Build(sub);
 }

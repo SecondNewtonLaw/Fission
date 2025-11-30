@@ -4,103 +4,149 @@
 #include "DenominatorAnalysis.hpp"
 
 std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &func) {
-    std::map<int32_t, DominatorInfo> info;
     const auto &blocks = func.basicBlocks;
+    if (blocks.empty())
+        return {};
 
-    std::map<int32_t, size_t> idToIndex;
-    for (size_t i = 0; i < blocks.size(); ++i)
-        idToIndex[blocks[i].dwBlockId] = i;
+    std::unordered_map<int32_t, int> idToIdx;
+    for (int i = 0; i < (int)blocks.size(); i++)
+        idToIdx[blocks[i].dwBlockId] = i;
 
-    for (const auto &b : blocks)
-        info[b.dwBlockId] = {};
+    int32_t entryId = blocks[0].dwBlockId;
 
-    // compute denominators
-    // Dom(n) = {n} U (Intersect(Dom(p) for all p in preds))
+    const int Nmax = blocks.size();
 
-    std::map<int32_t, std::set<int32_t>> domSets;
-    std::vector<int32_t> allBlockIds;
-    for (const auto &b : blocks)
-        allBlockIds.push_back(b.dwBlockId);
+    std::vector<int> dfsParent(Nmax, -1);
+    std::vector<int> vertex(Nmax, -1);
+    std::vector<int> parent(Nmax, -1);
+    std::vector<int> semi(Nmax);
+    std::vector<int> idom(Nmax, -1);
+    std::vector<int> ancestor(Nmax, -1);
+    std::vector<int> best(Nmax, -1);
+    std::vector<std::vector<int>> bucket(Nmax);
 
-    domSets[0] = {0};
-    for (const auto &b : blocks) {
-        if (b.dwBlockId != 0)
-            domSets[b.dwBlockId] = {allBlockIds.begin(), allBlockIds.end()};
+    std::vector<int> dfsNumber(Nmax, -1);
+    int dfsTime = 0;
+
+    std::function<void(int)> dfs = [&](int idx) {
+        dfsNumber[idx] = dfsTime;
+        vertex[dfsTime] = idx;
+        semi[dfsTime] = dfsTime;
+        best[dfsTime] = dfsTime;
+        ancestor[dfsTime] = -1;
+        dfsTime++;
+
+        for (int32_t succ : blocks[idx].successors) {
+            auto it = idToIdx.find(succ);
+            if (it == idToIdx.end())
+                continue;
+
+            int w = it->second;
+            if (dfsNumber[w] == -1) {
+                parent[w] = idx;
+                dfs(w);
+            }
+        }
+    };
+
+    dfs(idToIdx[entryId]);
+
+    const int N = dfsTime;
+
+    auto compress = [&](auto &self, int v) -> void {
+        int a = ancestor[v];
+        if (ancestor[a] != -1) {
+            self(self, a);
+            if (semi[best[a]] < semi[best[v]])
+                best[v] = best[a];
+            ancestor[v] = ancestor[a];
+        }
+    };
+
+    auto eval = [&](int v) {
+        if (ancestor[v] == -1)
+            return v;
+        compress(compress, v);
+        return best[v];
+    };
+
+    auto link = [&](int v, int w) { ancestor[w] = v; };
+
+    for (int i = N - 1; i >= 1; i--) {
+        int w = vertex[i];
+        int wIdx = w;
+
+        for (int32_t predId : blocks[wIdx].predecessors) {
+            auto it = idToIdx.find(predId);
+            if (it == idToIdx.end())
+                continue;
+
+            int v = it->second;
+            if (dfsNumber[v] == -1)
+                continue; // unreachable
+
+            int u = eval(dfsNumber[v]);
+            semi[i] = std::min(semi[i], semi[u]);
+        }
+
+        bucket[semi[i]].push_back(i);
+        int p = parent[wIdx];
+
+        link(dfsNumber[p], i);
+
+        for (int v : bucket[dfsNumber[p]]) {
+            int u = eval(v);
+            if (semi[u] < semi[v])
+                idom[v] = u;
+            else
+                idom[v] = dfsNumber[p];
+        }
+        bucket[dfsNumber[p]].clear();
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (const auto &block : blocks) {
-            if (block.dwBlockId == 0)
-                continue; // skip entry block, we don't want to modify it.
+    idom[0] = -1;
 
-            std::set<int32_t> newDom;
-            bool firstPred = true;
+    for (int i = 1; i < N; i++) {
+        if (idom[i] != semi[i])
+            idom[i] = idom[idom[i]];
+    }
 
-            for (int32_t predId : block.predecessors) {
-                // unreachable predecessor (dead code)
-                if (!domSets.contains(predId))
-                    continue;
+    std::map<int32_t, DominatorInfo> info;
 
-                if (firstPred) {
-                    newDom = domSets[predId];
-                    firstPred = false;
-                } else {
-                    // set intersection
-                    std::set<int32_t> intersection;
-                    std::ranges::set_intersection(newDom, domSets[predId], std::inserter(intersection, intersection.begin()));
-                    newDom = intersection;
-                }
-            }
+    for (int i = 0; i < N; i++) {
+        int blockIdx = vertex[i];
+        int32_t blockId = blocks[blockIdx].dwBlockId;
 
-            // self
-            newDom.insert(block.dwBlockId);
-
-            // change
-            if (newDom != domSets[block.dwBlockId]) {
-                domSets[block.dwBlockId] = newDom;
-                changed = true;
-            }
+        int idomIdx = idom[i];
+        if (idomIdx == -1) {
+            info[blockId].idom = -1;
+        } else {
+            int domBlockIdx = vertex[idomIdx];
+            info[blockId].idom = blocks[domBlockIdx].dwBlockId;
         }
     }
 
-    // compute IDOM, which is the denominator closest to this node.
-    for (const auto &block : blocks) {
-        if (block.dwBlockId == 0)
+    for (auto &[blk, di] : info) {
+        if (di.idom != -1)
+            info[di.idom].children.push_back(blk);
+    }
+
+    for (int i = 0; i < N; i++) {
+        int blkIdx = vertex[i];
+        int32_t blkId = blocks[blkIdx].dwBlockId;
+
+        const auto &preds = blocks[blkIdx].predecessors;
+        if (preds.size() < 2)
             continue;
 
-        int32_t currentId = block.dwBlockId;
-        const auto &dominators = domSets[currentId];
+        for (int32_t pId : preds) {
+            if (!info.contains(pId))
+                continue;
 
-        int32_t bestIdom = -1;
-        size_t maxDomSize = 0;
-
-        for (int32_t domId : dominators) {
-            if (domId == currentId)
-                continue; // cannot be self.
-
-            if (domSets[domId].size() > maxDomSize) {
-                maxDomSize = domSets[domId].size();
-                bestIdom = domId;
-            }
-        }
-
-        info[currentId].idom = bestIdom;
-        if (bestIdom != -1) {
-            info[bestIdom].children.push_back(currentId);
-        }
-    }
-
-    for (const auto &block : blocks) {
-        if (block.predecessors.size() >= 2) {
-            for (const int32_t predId : block.predecessors) {
-                int32_t runner = predId;
-
-                while (runner != info[block.dwBlockId].idom && runner != -1) {
-                    info[runner].dominanceFrontier.insert(block.dwBlockId);
-                    runner = info[runner].idom;
-                }
+            int32_t runner = pId;
+            while (runner != -1 && runner != info[blkId].idom) {
+                info[runner].dominanceFrontier.insert(blkId);
+                runner = info[runner].idom;
             }
         }
     }

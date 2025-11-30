@@ -110,6 +110,36 @@ class ControlFlowAnalyzer {
 
     void OptimiseGraph(std::vector<BasicBlock> &blocks);
 
+    void PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
+        if (blocks.empty())
+            return;
+
+        std::set<int32_t> reachable;
+        std::vector<int32_t> worklist;
+
+        worklist.push_back(0);
+        reachable.insert(0);
+
+        size_t head = 0;
+        while (head < worklist.size()) {
+            int32_t currentId = worklist[head++];
+            const BasicBlock &currentBlock = blocks[currentId];
+
+            for (int32_t succId : currentBlock.successors) {
+                if (!reachable.contains(succId)) {
+                    reachable.insert(succId);
+                    worklist.push_back(succId);
+                }
+            }
+        }
+
+        for (auto &block : blocks) {
+            if (!reachable.contains(block.dwBlockId)) {
+                block.bType = BlockType::Dead;
+            }
+        }
+    }
+
   public:
     ControlFlowAnalyzer() = default;
 
