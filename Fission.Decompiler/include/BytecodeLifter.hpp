@@ -3,6 +3,8 @@
 //
 #pragma once
 
+#include "InstructionDecoder.hpp"
+
 #include <optional>
 #include <boost/container/small_vector.hpp>
 #include <vector>
@@ -126,7 +128,13 @@ class BytecodeLifter {
 
     LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
 
+    Fission::InstructionDecoder *lpDecoder = nullptr;
+
 public:
+    BytecodeLifter(Fission::InstructionDecoder *decoder) {
+        lpDecoder = decoder;
+    }
+
     LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
 };
 

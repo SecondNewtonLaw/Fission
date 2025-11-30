@@ -174,9 +174,9 @@ elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
 endif ()
 
 add_library(Fission.Common STATIC
-        Fission.Common/src/BytecodeDecoder.cpp
+        Fission.Common/src/InstructionDecoder.cpp
 
-        Fission.Common/include/BytecodeDecoder.hpp
+        Fission.Common/include/InstructionDecoder.hpp
         Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)

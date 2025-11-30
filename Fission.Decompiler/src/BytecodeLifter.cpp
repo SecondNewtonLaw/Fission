@@ -21,8 +21,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
     }
 
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex += function->instructions.at(currentIndex).GetOpCodeSize()) {
-        const auto &instruction = function->instructions.at(currentIndex);
-        const auto opCode = instruction.GetOpCode();
+        const auto &instruction = LuauInstruction {lpDecoder->DecodeInstruction(function->instructions.at(currentIndex).instruction)};
+        const uint8_t opCode = (uint8_t)instruction.GetOpCode();
 
         switch (opCode) {
         case LOP_NOP:
@@ -130,7 +130,6 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 finalComment <<
                     "WARNING: Obtaining a non-representable global. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
             }
-
             instr.comment = finalComment.str();
             break;
         }
@@ -273,6 +272,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
             instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
 
@@ -835,6 +835,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
 
         default:
+            __debugbreak();
+            ASSERT(false, "unhandled opcode.", (LuauOpcode)opCode);
             break;
         }
     }

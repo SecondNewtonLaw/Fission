@@ -93,31 +93,36 @@ void writefile(const std::filesystem::path &path, const std::string &content) {
 }
 
 std::optional<std::string> readfile(std::filesystem::path path) {
-    std::ifstream scriptFile(path);
+    std::ifstream file(path, std::ios::binary | std::ios::ate);
 
-    if (!scriptFile.is_open())
+    if (!file.is_open())
         return std::nullopt;
 
-    std::stringstream buffer;
-    buffer << scriptFile.rdbuf();
-    std::string scriptSource = buffer.str();
+    std::streamsize size = file.tellg();
 
-    scriptFile.close();
+    file.seekg(0, std::ios::beg);
 
-    return scriptSource;
+    std::string buffer(size, '\0');
+
+    if (file.read(&buffer[0], size))
+        return buffer;
+
+    return buffer;
 }
 
 int main() {
-    Luau::CompileOptions compileOpts {1, 2};
-    auto hack = readfile("text.txt");
-    auto bytecode = Luau::compile(*hack, compileOpts);
+    // Luau::CompileOptions compileOpts {1, 2};
+    // auto hack = readfile("text.txt");
+    // auto bytecode = Luau::compile(*hack, compileOpts);
 
+    auto bypassFE = readfile("bytecode_raw.txt");
     Deserializer deserializer { };
-    const auto deserializationResultOptional = deserializer.Deserialize(bytecode);
+    const auto deserializationResultOptional = deserializer.Deserialize(*bypassFE);
 
+    Fission::RobloxClientDecoder decoder { };
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
     auto &deserializationResult = deserializationResultOptional.value();
-    auto bytecodeLifter = BytecodeLifter { };
+    auto bytecodeLifter = BytecodeLifter {&decoder};
     auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(deserializationResult);
 
     auto ir = FormatIR(liftedIR);

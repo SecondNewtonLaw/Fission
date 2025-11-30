@@ -2,4 +2,4 @@
 // Created by Dottik on 5/10/2025.
 //
 
-#include <BytecodeDecoder.hpp>
+#include <InstructionDecoder.hpp>
