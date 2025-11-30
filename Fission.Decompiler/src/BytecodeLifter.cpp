@@ -321,11 +321,25 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_NAMECALL: {
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NAMECALL);
-            instr.operands.resize(2);
+            instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            std::stringstream finalComment;
+            const auto& constant = function->constants.at(instr.operands[2].value.imm.k);
+
+            if (constant.kType == LUA_TSTRING) {
+                finalComment << "INFO: Setting up namecall: '" << std::get<std::string>(constant.constantData) << "'";
+            } else {
+                finalComment <<
+                    "WARNING: The constant used in this namecall cannnot be represented.";
+            }
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_CALL: {
