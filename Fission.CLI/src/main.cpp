@@ -4,74 +4,160 @@
 
 #include "Deserializer.hpp"
 #include "libassert/assert.hpp"
-#include <sstream>
-#include <format>
 #include <cstdio>
-#include <ostream>
-#include <iostream>
+#include <format>
 #include <fstream>
+#include <iostream>
+#include <ostream>
+#include <print>
+#include <sstream>
+#include <string>
+#include <vector>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #include "BytecodeLifter.hpp"
+#include "ControlFlowAnalyzer.hpp"
 #include "Luau/Compiler.h"
 
 #include <filesystem>
 #pragma clang diagnostic pop
+
+std::string BlockTypeToString(BlockType type) {
+    switch (type) {
+    case BlockType::Standard:
+        return "Standard";
+    case BlockType::IfHeader:
+        return "IfHeader";
+    case BlockType::LoopHeader:
+        return "LoopHeader";
+    case BlockType::LoopLatch:
+        return "LoopLatch";
+    case BlockType::Break:
+        return "Break";
+    case BlockType::Continue:
+        return "Continue";
+    case BlockType::Return:
+        return "Return";
+    case BlockType::Error:
+        return "Error/Dead";
+    default:
+        return "Unknown";
+    }
+}
+
+std::string BlockTerminatorToString(BlockTerminator term) {
+    switch (term) {
+    case BlockTerminator::Fallthrough:
+        return "Fallthrough";
+    case BlockTerminator::Unconditional:
+        return "Unconditional";
+    case BlockTerminator::Conditional:
+        return "Conditional";
+    case BlockTerminator::Return:
+        return "Return";
+    case BlockTerminator::Error:
+        return "Error";
+    default:
+        return "Unknown";
+    }
+}
 
 std::string GetIndentation(int indentationLevel) {
     std::string indent(indentationLevel, ' ');
     return indent;
 }
 
-void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, const LiftedFunction &func) {
-    stream << GetIndentation(indentationLevel) << "/* Function Name: '" << func.name << "' */\n";
-
-    stream << GetIndentation(indentationLevel) << "/* Function IR Instructions (size: " << func.instructions.size() << ") */" << "\n";
-    for (const auto &insn : func.instructions) {
-        stream << GetIndentation(indentationLevel + 4) << OperationToString(insn.operation) << " ";
-        for (std::size_t i = 0; i < insn.operands.size(); i++) {
-            const auto &operand = insn.operands[i];
-            switch (operand.type) {
-            case LiftedOperandType::Register:
-                stream << "R" << std::to_string(operand.value.reg);
-                break;
-            case LiftedOperandType::ImmediateNil:
-                stream << "nil";
-                break;
-            case LiftedOperandType::ImmediateInteger:
-                stream << std::format("0x{:X}", static_cast<uint32_t>(operand.value.imm.n));
-                break;
-            case LiftedOperandType::ImmediateBool:
-                stream << std::format("{}", operand.value.imm.b ? "true" : "false");
-                break;
-            case LiftedOperandType::ImmediateConstant:
-                stream << "K" << std::to_string(operand.value.imm.k);
-                break;
-            case LiftedOperandType::ImmediateAux:
-                stream << "AUXV_" << std::to_string(operand.value.imm.u);
-                break;
-            default:
-                ASSERT(false, "unhandled mapping of operand to text");
-            }
-            if (i + 1 != insn.operands.size())
-                stream << ", ";
-        }
-
-        if (insn.comment)
-            stream << " /* " << *insn.comment << " */";
-
-        stream << "\n";
+std::string FormatIntList(const std::vector<std::uint32_t> &list) {
+    if (list.empty())
+        return "[]";
+    std::stringstream ss;
+    ss << "[";
+    for (size_t i = 0; i < list.size(); ++i) {
+        ss << list[i];
+        if (i < list.size() - 1)
+            ss << ", ";
     }
-
-    stream << GetIndentation(indentationLevel) << "/* Functions inside of Function (size: " << func.subfunctions.size() << ") */" << "\n";
-
-    for (const auto &subfunction : func.subfunctions)
-        PrintFunctionOntoStream(stream, indentationLevel + 4, subfunction);
-
+    ss << "]";
+    return ss.str();
 }
 
-std::string FormatIR(LiftedFunction &func) {
+void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, const AnalyzedFunction &analyzedFunc) {
+    LiftedFunction *rawFunc = analyzedFunc.lpLiftedFunction;
+
+    stream << GetIndentation(indentationLevel) << "/* Function Name: '" << rawFunc->name << "' */\n";
+    stream << GetIndentation(indentationLevel) << "/* Basic Blocks: " << analyzedFunc.basicBlocks.size() << " */\n";
+
+    for (const auto &block : analyzedFunc.basicBlocks) {
+        stream << "\n";
+        stream << GetIndentation(indentationLevel + 2) << "BLOCK_" << block.dwBlockId << ":\n";
+        stream << GetIndentation(indentationLevel + 4) << "Type: " << BlockTypeToString(block.bType) << "\n";
+        stream << GetIndentation(indentationLevel + 4) << "Terminator: " << BlockTerminatorToString(block.bTerminator) << "\n";
+        stream << GetIndentation(indentationLevel + 4) << "Predecessors: " << FormatIntList(block.predecessors) << "\n";
+        stream << GetIndentation(indentationLevel + 4) << "Successors:   " << FormatIntList(block.successors) << "\n";
+        stream << GetIndentation(indentationLevel + 4) << "Code:\n";
+
+        if (block.lpHead == nullptr || block.lpTail == nullptr) {
+            stream << GetIndentation(indentationLevel + 6) << "<Empty/Error Block>\n";
+            continue;
+        }
+
+        LiftedInstruction *currentInst = block.lpHead;
+        while (true) {
+            auto instructionIndex = std::distance(rawFunc->instructions.data(), currentInst);
+
+            stream << GetIndentation(indentationLevel + 6) << "_" << instructionIndex << ": " << OperationToString(currentInst->operation) << " ";
+
+            for (std::size_t i = 0; i < currentInst->operands.size(); i++) {
+                const auto &operand = currentInst->operands[i];
+                switch (operand.type) {
+                case LiftedOperandType::Register:
+                    stream << "R" << std::to_string(operand.value.reg);
+                    break;
+                case LiftedOperandType::ImmediateNil:
+                    stream << "nil";
+                    break;
+                case LiftedOperandType::ImmediateInteger:
+                    stream << std::format("0x{:X}", static_cast<uint32_t>(operand.value.imm.n));
+                    break;
+                case LiftedOperandType::ImmediateBool:
+                    stream << std::format("{}", operand.value.imm.b ? "true" : "false");
+                    break;
+                case LiftedOperandType::ImmediateConstant:
+                    stream << "K" << std::to_string(operand.value.imm.k);
+                    break;
+                case LiftedOperandType::ImmediateAux:
+                    stream << "AUXV_" << std::to_string(operand.value.imm.u);
+                    break;
+                default:
+                    ASSERT(false, "unhandled mapping of operand to text");
+                }
+                if (i + 1 != currentInst->operands.size())
+                    stream << ", ";
+            }
+
+            if (currentInst->comment)
+                stream << " /* " << *currentInst->comment << " */";
+
+            stream << "\n";
+
+            if (currentInst == block.lpTail)
+                break;
+
+            currentInst++;
+        }
+    }
+
+    if (analyzedFunc.innerFunctions.empty())
+        stream << "\n" << GetIndentation(indentationLevel) << "/* There are no nested functions inside of this function. */" << "\n";
+    else
+        stream << "\n" << GetIndentation(indentationLevel) << "/* Functions inside of Function (size: " << analyzedFunc.innerFunctions.size() << ") */" << "\n";
+
+    for (const auto &subfunction : analyzedFunc.innerFunctions)
+        PrintFunctionOntoStream(stream, indentationLevel + 4, subfunction);
+}
+
+std::string FormatAnalyzedIR(const AnalyzedFunction &func) {
     std::stringstream sstream;
 
     sstream << "/* Fission IR Viewer */\n";
@@ -111,23 +197,47 @@ std::optional<std::string> readfile(std::filesystem::path path) {
 }
 
 int main() {
-    // Luau::CompileOptions compileOpts {1, 2};
-    // auto hack = readfile("text.txt");
-    // auto bytecode = Luau::compile(*hack, compileOpts);
+    Luau::CompileOptions compileOpts{0, 2};
+    auto hack = readfile("text.txt");
+    if (!hack.has_value()) {
+        std::println("Failed to read text.txt");
+        return 1;
+    }
 
-    auto bypassFE = readfile("bytecode_raw.txt");
-    Deserializer deserializer { };
-    const auto deserializationResultOptional = deserializer.Deserialize(*bypassFE);
+    auto bytecode = Luau::compile(*hack, compileOpts);
 
-    Fission::RobloxClientDecoder decoder { };
+    Deserializer deserializer{};
+    std::chrono::steady_clock::time_point t0 = std::chrono::steady_clock::now();
+    const auto deserializationResultOptional = deserializer.Deserialize(bytecode);
+    std::chrono::steady_clock::time_point t1 = std::chrono::steady_clock::now();
+
+    Fission::InstructionDecoder decoder{};
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
+
     auto &deserializationResult = deserializationResultOptional.value();
-    auto bytecodeLifter = BytecodeLifter {&decoder};
+    auto bytecodeLifter = BytecodeLifter{&decoder};
+
+    std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
     auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(deserializationResult);
+    std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
 
-    auto ir = FormatIR(liftedIR);
+    ControlFlowAnalyzer analyzer{};
+    std::chrono::steady_clock::time_point t4 = std::chrono::steady_clock::now();
+    auto analyzedFunction = analyzer.DetermineBasicBlocks(&liftedIR);
+    std::chrono::steady_clock::time_point t5 = std::chrono::steady_clock::now();
 
-    writefile(std::filesystem::path {"ir_out.txt"}, ir);
+    std::chrono::steady_clock::time_point t6 = std::chrono::steady_clock::now();
+    auto ir = FormatAnalyzedIR(analyzedFunction);
+    std::chrono::steady_clock::time_point t7 = std::chrono::steady_clock::now();
+
+    writefile(std::filesystem::path{"ir_out.txt"}, ir);
     std::cout << ir << std::endl;
+
+    std::println(
+        "Decompilation Breakdown:\n\tDeserializing Bytecode: {}s\n\tLifting into IR: {}s\n\tControl Flow Analysis: {}s\n\tOptimization: {}s\n\tFormatting: "
+        "{}s\n\tOutput generated in {}s.",
+        std::chrono::duration<float>(t1 - t0).count(), std::chrono::duration<float>(t3 - t2).count(), std::chrono::duration<float>(t5 - t4).count(), 0,
+        std::chrono::duration<float>(t7 - t6).count(), std::chrono::duration<float>(t7 - t0).count()
+    );
     return 0;
 }

@@ -12,6 +12,7 @@
 #include "Luau/Bytecode.h"
 #include "Luau/BytecodeUtils.h"
 #include "lua.h"
+#include <libassert/assert.hpp>
 
 #define USERDATA_TYPE_LIMIT (LBC_TYPE_TAGGED_USERDATA_END - LBC_TYPE_TAGGED_USERDATA_BASE)
 
@@ -48,8 +49,7 @@ struct LuauInstruction {
     };
 
     [[nodiscard]] uint8_t GetABCOperand(const LuauOperand operand) const {
-        if (operand > LuauOperand::C)
-            return 0; // TODO: NEEDS ASSERT DOTTIK PLS
+        ASSERT(operand <= LuauOperand::C && operand >= LuauOperand::A, "malformed request for an ABC operand.");
 
         switch (operand) {
         case LuauOperand::A:
@@ -59,9 +59,11 @@ struct LuauInstruction {
         case LuauOperand::C:
             return LUAU_INSN_C(instruction);
 
-            default:
-                return 0; // TODO: DOTTIK AGAIN ASSERT PLS
+        default:
+            ASSERT(false, "malformed request for an ABC operand, operand out of range.");
         }
+
+        UNREACHABLE();
     }
 
     [[nodiscard]] int16_t GetD() const {

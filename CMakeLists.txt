@@ -188,6 +188,8 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/Deserializer.cpp
         Fission.Decompiler/include/Deserializer.hpp
         Fission.Decompiler/src/BytecodeLifter.cpp
+        Fission.Decompiler/include/ControlFlowAnalyzer.hpp
+        Fission.Decompiler/src/ControlFlowAnalyzer.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
