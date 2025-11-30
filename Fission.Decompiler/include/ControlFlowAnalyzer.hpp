@@ -8,6 +8,7 @@
 #include "BytecodeLifter.hpp"
 
 #include <map>
+#include <sstream>
 
 enum class BlockType {
     Standard,
@@ -51,11 +52,57 @@ struct AnalyzedFunction {
     std::vector<AnalyzedFunction> innerFunctions;
 };
 
+std::string BlockTypeToString(BlockType type) {
+    switch (type) {
+    case BlockType::Standard:
+        return "Standard";
+    case BlockType::IfHeader:
+        return "IfHeader";
+    case BlockType::LoopHeader:
+        return "LoopHeader";
+    case BlockType::LoopLatch:
+        return "LoopLatch";
+    case BlockType::Break:
+        return "Break";
+    case BlockType::Continue:
+        return "Continue";
+    case BlockType::Return:
+        return "Return";
+    case BlockType::Error:
+        return "Error";
+    case BlockType::Dead:
+        return "Dead/Pruned/Optimized Away";
+    default:
+        return "Unknown";
+    }
+}
+
+std::string BlockTerminatorToString(BlockTerminator term) {
+    switch (term) {
+    case BlockTerminator::Fallthrough:
+        return "Fallthrough";
+    case BlockTerminator::Unconditional:
+        return "Unconditional";
+    case BlockTerminator::Conditional:
+        return "Conditional";
+    case BlockTerminator::Return:
+        return "Return";
+    case BlockTerminator::Error:
+        return "Error";
+    default:
+        return "Unknown";
+    }
+}
+
 class ControlFlowAnalyzer {
 
     bool IsTerminator(LiftedOperation operation) {
         switch (operation) {
             // unconditionals
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
         case LiftedOperation::JUMP:
         case LiftedOperation::LOADNJUMP:
             // conditionals
@@ -85,7 +132,11 @@ class ControlFlowAnalyzer {
             return lpInstruction->operands[0].value.imm.n;
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
-            return lpInstruction->operands[1].value.imm.n;
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
+            return lpInstruction->operands[1].value.imm.n - 1 /* we must lay ourselves into a prep instruction. */;
 
         case LiftedOperation::LOADNJUMP:
             return lpInstruction->operands[2].value.imm.n;
@@ -178,24 +229,15 @@ class ControlFlowAnalyzer {
         leaderIndexes.insert(0); // the first instruction of the function is a leader, as it's the start of a simple standard block.
         size_t totalInstructions = lpLiftedFunction->instructions.size();
 
-        size_t currentIndex = 0;
-        while (totalInstructions >= currentIndex++) {
-            if (currentIndex == totalInstructions)
-                break; // end of list.
-
+        for (size_t currentIndex = 0; currentIndex < totalInstructions; ++currentIndex) {
             auto instruction = &lpLiftedFunction->instructions.at(currentIndex);
             if (this->IsTerminator(instruction->operation)) {
-                // the instruction after a terminator is a new leader, since it defines the end of the previous block.
-                if (totalInstructions > currentIndex + 1)
+                if (currentIndex + 1 < totalInstructions)
                     leaderIndexes.insert(currentIndex + 1);
-
                 if (instruction->operation != LiftedOperation::RETURN) {
                     const int32_t offset = GetJumpOffset(instruction);
-                    // offsets in jump are relative to next instruction. Some opcodes may not do this, as they sometimes rather be 0 or 1, we optimize these off
-                    // during the lifting stage, discarding those who provide absolutely no contribution
-                    // however we will have to later check the index maths to make sure this is consistent
-                    if (const int32_t targetIndex = static_cast<int32_t>(currentIndex + 1) + offset;
-                        targetIndex >= 0 && targetIndex < static_cast<int32_t>(lpLiftedFunction->instructions.size())) {
+                    int64_t targetIndex = static_cast<int64_t>(currentIndex) + 1 + offset;
+                    if (targetIndex >= 0 && targetIndex < static_cast<int64_t>(totalInstructions)) {
                         leaderIndexes.insert(static_cast<size_t>(targetIndex));
                     }
                 }
@@ -231,6 +273,13 @@ class ControlFlowAnalyzer {
 
                 // loop latch, likely jumping back to the beginning of a loop.
                 // during analysis, we will have to see anyway if the jump is a 'continue'.
+                if (GetJumpOffset(tailInst) < 0)
+                    block.bType = BlockType::LoopLatch;
+                else
+                    block.bType = BlockType::Standard;
+            } else if (tailInst->operation == LiftedOperation::FORNLOOP || tailInst->operation == LiftedOperation::FORGLOOP) {
+                block.bTerminator = BlockTerminator::Conditional; // only if it needs to continue.
+
                 if (GetJumpOffset(tailInst) < 0)
                     block.bType = BlockType::LoopLatch;
                 else
@@ -417,8 +466,262 @@ class ControlFlowAnalyzer {
 
         for (auto &sub : analyzed.innerFunctions) {
             LinkBasicBlocks(sub.basicBlocks);
-            this->OptimiseGraph(analyzed.basicBlocks);
+            this->OptimiseGraph(sub.basicBlocks);
         }
         return analyzed;
+    }
+};
+
+class GraphVisualizer {
+  private:
+    static std::string EscapeHtml(const std::string &str) {
+        std::string result;
+        for (char c : str) {
+            switch (c) {
+            case '&':
+                result += "&amp;";
+                break;
+            case '<':
+                result += "&lt;";
+                break;
+            case '>':
+                result += "&gt;";
+                break;
+            case '\"':
+                result += "&quot;";
+                break;
+            case '\'':
+                result += "&#39;";
+                break;
+            case '\n':
+                result += "<BR ALIGN=\"LEFT\"/>";
+                break;
+            case '\t':
+                result += "&nbsp;&nbsp;&nbsp;&nbsp;";
+                break;
+            default:
+                result += c;
+                break;
+            }
+        }
+        return result;
+    }
+
+    static std::string BlockTypeToString(BlockType type) {
+        switch (type) {
+        case BlockType::Standard:
+            return "Standard";
+        case BlockType::IfHeader:
+            return "If";
+        case BlockType::LoopHeader:
+            return "LoopHead";
+        case BlockType::LoopLatch:
+            return "LoopLatch";
+        case BlockType::Break:
+            return "Break";
+        case BlockType::Continue:
+            return "Cont";
+        case BlockType::Return:
+            return "Return";
+        case BlockType::Dead:
+            return "Dead";
+        default:
+            return "Unknown";
+        }
+    }
+
+    static std::string OperationToString(LiftedOperation op) { return std::string(::OperationToString(op)); }
+
+    static std::string FormatOperand(const LiftedOperand &operand) {
+        switch (operand.type) {
+        case LiftedOperandType::Register:
+            return std::format("R{}", operand.value.reg);
+        case LiftedOperandType::ImmediateNil:
+            return "nil";
+        case LiftedOperandType::ImmediateInteger:
+            return std::format("0x{:X}", static_cast<uint32_t>(operand.value.imm.n));
+        case LiftedOperandType::ImmediateBool:
+            return operand.value.imm.b ? "true" : "false";
+        case LiftedOperandType::ImmediateConstant:
+            return std::format("K{}", operand.value.imm.k);
+        case LiftedOperandType::ImmediateAux:
+            return std::format("AUX_{}", operand.value.imm.u);
+        default:
+            return "?";
+        }
+    }
+
+    static std::string GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func) {
+        std::stringstream ss;
+
+        ss << "<TABLE BORDER=\"1\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"4\">";
+
+        ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><B>BLOCK " << block.dwBlockId << " [" << BlockTypeToString(block.bType) << "]</B>";
+        if (block.bTerminator == BlockTerminator::Conditional)
+            ss << " (Cond)";
+        else if (block.bTerminator == BlockTerminator::Unconditional)
+            ss << " (Jump)";
+        ss << "</TD></TR>";
+
+        ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#888888\">--------------------------------------------------</FONT></TD></TR>";
+
+        if (block.lpHead && block.lpTail) {
+            const LiftedInstruction *current = block.lpHead;
+            while (true) {
+                if (current < func->instructions.data() || current >= func->instructions.data() + func->instructions.size()) {
+                    ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"RED\">(Ptr Error)</FONT></TD></TR>";
+                    break;
+                }
+
+                if (current->operation == LiftedOperation::NOP) {
+                    if (current == block.lpTail)
+                        break;
+                    current++;
+                    continue;
+                }
+
+                std::stringstream line;
+                auto idx = std::distance(func->instructions.data(), current);
+
+                line << "_" << idx << ": " << OperationToString(current->operation) << " ";
+
+                for (size_t i = 0; i < current->operands.size(); ++i) {
+                    line << EscapeHtml(FormatOperand(current->operands[i]));
+                    if (i < current->operands.size() - 1)
+                        line << ", ";
+                }
+
+                if (current->comment) {
+                    std::string cmt = *current->comment;
+                    if (cmt.find("INFO: ") == 0)
+                        cmt = cmt.substr(6);
+                    line << "  <FONT COLOR=\"#005500\">; " << EscapeHtml(cmt) << "</FONT>";
+                }
+
+                ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\">" << line.str() << "</TD></TR>";
+
+                if (current == block.lpTail)
+                    break;
+                current++;
+            }
+        } else {
+            ss << "<TR><TD ALIGN=\"LEFT\">(Empty)</TD></TR>";
+        }
+
+        ss << "</TABLE>";
+        return ss.str();
+    }
+
+    static void GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix) {
+        dot << "\n    subgraph cluster_" << funcPrefix << " {\n";
+        dot << "        label=\"" << EscapeHtml(func.lpLiftedFunction->name) << "\";\n";
+        dot << "        style=filled; color=lightgrey; node [style=filled,color=white];\n";
+
+        for (const auto &block : func.basicBlocks) {
+            if (block.bType == BlockType::Dead || block.bType == BlockType::Error)
+                continue;
+
+            std::string uniqueNodeId = std::format("{}_BLK_{}", funcPrefix, block.dwBlockId);
+
+            std::string fillColor = "white";
+            if (block.dwBlockId == 0)
+                fillColor = "#E8F5E9"; // Entry
+            else if (block.bType == BlockType::Return)
+                fillColor = "#FFEBEE"; // Exit
+            else if (block.bType == BlockType::LoopHeader)
+                fillColor = "#FFF8E1"; // Loop Head
+            else if (block.bType == BlockType::LoopLatch)
+                fillColor = "#F5F5F5"; // Loop Latch
+
+            dot << "        " << uniqueNodeId << " [\n";
+            dot << "            shape=plain\n";
+            dot << "            label=<" << GenerateNodeHtml(block, func.lpLiftedFunction) << ">\n";
+            dot << "            fillcolor=\"" << fillColor << "\"\n";
+            dot << "            fontname=\"Courier New\" fontsize=10\n";
+            dot << "        ];\n";
+        }
+
+        for (const auto &block : func.basicBlocks) {
+            if (block.bType == BlockType::Dead || block.bType == BlockType::Error)
+                continue;
+
+            std::string srcId = std::format("{}_BLK_{}", funcPrefix, block.dwBlockId);
+
+            bool isFornPrep = (block.lpTail && block.lpTail->operation == LiftedOperation::FORNPREP);
+            bool isFornLoop = (block.lpTail && (block.lpTail->operation == LiftedOperation::FORNLOOP || block.lpTail->operation == LiftedOperation::FORGLOOP));
+
+            if (block.bTerminator == BlockTerminator::Conditional) {
+                if (isFornPrep) {
+                    // FORNPREP: Fallthrough=Enter(Green), Jump=Skip(Red)
+                    if (block.successors.size() >= 1) // Jump Target (Skip)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[0])
+                            << " [label=\"Skip\", color=\"red3\", fontcolor=\"red3\"];\n";
+                    if (block.successors.size() >= 2) // Fallthrough (Enter)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[1])
+                            << " [label=\"Enter\", color=\"green4\", fontcolor=\"green4\", weight=2];\n";
+                } else if (isFornLoop) {
+                    // FORNLOOP: Jump=Loop(Blue), Fallthrough=Exit(Red)
+                    if (block.successors.size() >= 1) // Jump Target (Loop Back)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[0])
+                            << " [label=\"Loop\", style=dashed, color=\"blue\", fontcolor=\"blue\"];\n";
+                    if (block.successors.size() >= 2) // Fallthrough (Exit)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[1])
+                            << " [label=\"Exit\", color=\"red3\", fontcolor=\"red3\", penwidth=2];\n";
+                } else {
+                    // Standard If/Else
+                    if (block.successors.size() >= 1)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[0])
+                            << " [label=\"True\", color=\"green4\", fontcolor=\"green4\"];\n";
+                    if (block.successors.size() >= 2)
+                        dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[1])
+                            << " [label=\"False\", color=\"red3\", fontcolor=\"red3\"];\n";
+                }
+            } else {
+                for (size_t i = 0; i < block.successors.size(); ++i) {
+                    bool isBackEdge = (block.successors[i] <= block.dwBlockId);
+                    dot << "        " << srcId << " -> " << std::format("{}_BLK_{}", funcPrefix, block.successors[i]);
+                    if (isBackEdge && block.bTerminator == BlockTerminator::Unconditional)
+                        dot << " [style=dashed, color=blue, label=\"Back\"];\n";
+                    else
+                        dot << " [color=black];\n";
+                }
+            }
+
+            // link closures to their children
+            if (block.lpHead && block.lpTail) {
+                const LiftedInstruction *curr = block.lpHead;
+                while (true) {
+                    if (curr->operation == LiftedOperation::NEWCLOSURE) {
+                        if (curr->operands.size() >= 2 && curr->operands[1].type == LiftedOperandType::ImmediateConstant) {
+                            int protoIndex = (curr->operands[1].value.imm.k);
+                            std::string childEntryId = std::format("{}_SUB_{}_BLK_0", funcPrefix, protoIndex);
+                            dot << "        " << srcId << " -> " << childEntryId << " [label=\"NewClosure\", style=dotted, color=purple, fontcolor=purple];\n";
+                        }
+                    }
+                    if (curr == block.lpTail)
+                        break;
+                    curr++;
+                }
+            }
+        }
+
+        int subFuncIndex = 0;
+        for (const auto &sub : func.innerFunctions) {
+            std::string subPrefix = std::format("{}_SUB_{}", funcPrefix, subFuncIndex++);
+            GenerateFunctionGraph(dot, sub, subPrefix);
+        }
+        dot << "    }\n";
+    }
+
+  public:
+    static std::string GenerateDotGraph(const AnalyzedFunction &rootAnalysis) {
+        std::stringstream dot;
+        dot << "digraph LuauCFG {\n";
+        dot << "    compound=true;\n";
+        dot << "    labelloc=\"t\";\n";
+        dot << "    fontname=\"Courier New\";\n";
+        GenerateFunctionGraph(dot, rootAnalysis, "ROOT");
+        dot << "}\n";
+        return dot.str();
     }
 };

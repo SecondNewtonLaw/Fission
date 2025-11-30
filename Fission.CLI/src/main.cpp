@@ -23,46 +23,6 @@
 #include <filesystem>
 #pragma clang diagnostic pop
 
-std::string BlockTypeToString(BlockType type) {
-    switch (type) {
-    case BlockType::Standard:
-        return "Standard";
-    case BlockType::IfHeader:
-        return "IfHeader";
-    case BlockType::LoopHeader:
-        return "LoopHeader";
-    case BlockType::LoopLatch:
-        return "LoopLatch";
-    case BlockType::Break:
-        return "Break";
-    case BlockType::Continue:
-        return "Continue";
-    case BlockType::Return:
-        return "Return";
-    case BlockType::Error:
-        return "Error/Dead";
-    default:
-        return "Unknown";
-    }
-}
-
-std::string BlockTerminatorToString(BlockTerminator term) {
-    switch (term) {
-    case BlockTerminator::Fallthrough:
-        return "Fallthrough";
-    case BlockTerminator::Unconditional:
-        return "Unconditional";
-    case BlockTerminator::Conditional:
-        return "Conditional";
-    case BlockTerminator::Return:
-        return "Return";
-    case BlockTerminator::Error:
-        return "Error";
-    default:
-        return "Unknown";
-    }
-}
-
 std::string GetIndentation(int indentationLevel) {
     std::string indent(indentationLevel, ' ');
     return indent;
@@ -214,11 +174,10 @@ int main() {
     Fission::InstructionDecoder decoder{};
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
 
-    auto &deserializationResult = deserializationResultOptional.value();
     auto bytecodeLifter = BytecodeLifter{&decoder};
 
     std::chrono::steady_clock::time_point t2 = std::chrono::steady_clock::now();
-    auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(deserializationResult);
+    auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(*deserializationResultOptional);
     std::chrono::steady_clock::time_point t3 = std::chrono::steady_clock::now();
 
     ControlFlowAnalyzer analyzer{};
@@ -232,12 +191,19 @@ int main() {
 
     writefile(std::filesystem::path{"ir_out.txt"}, ir);
     std::cout << ir << std::endl;
+    std::chrono::steady_clock::time_point t8 = std::chrono::steady_clock::now();
+    std::string dotContent = GraphVisualizer::GenerateDotGraph(analyzedFunction);
+    std::chrono::steady_clock::time_point t9 = std::chrono::steady_clock::now();
+    writefile("cfg.dot", dotContent);
+
+    std::cout << "Generated ir_out.txt and cfg.dot" << std::endl;
+    std::cout << "you can open cfg.dot in https://edotor.net/ or a Graphviz viewer to enjoy a fucking readable output." << std::endl;
 
     std::println(
         "Decompilation Breakdown:\n\tDeserializing Bytecode: {}s\n\tLifting into IR: {}s\n\tControl Flow Analysis: {}s\n\tOptimization: {}s\n\tFormatting: "
-        "{}s\n\tOutput generated in {}s.",
+        "{}s\n\tGraph View Generation: {}s\n\tOutput generated in {}s.",
         std::chrono::duration<float>(t1 - t0).count(), std::chrono::duration<float>(t3 - t2).count(), std::chrono::duration<float>(t5 - t4).count(), 0,
-        std::chrono::duration<float>(t7 - t6).count(), std::chrono::duration<float>(t7 - t0).count()
+        std::chrono::duration<float>(t7 - t6).count(), std::chrono::duration<float>(t9 - t8).count(), std::chrono::duration<float>(t7 - t0).count()
     );
     return 0;
 }
