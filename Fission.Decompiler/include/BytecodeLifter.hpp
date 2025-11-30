@@ -6,7 +6,7 @@
 #include "InstructionDecoder.hpp"
 
 #include <optional>
-#include <boost/container/small_vector.hpp>
+#include <libassert/assert.hpp>
 #include <vector>
 
 struct DeserializedFunction;
@@ -133,6 +133,7 @@ class BytecodeLifter {
 public:
     BytecodeLifter(Fission::InstructionDecoder *decoder) {
         lpDecoder = decoder;
+        ASSERT(lpDecoder != nullptr, "Instruction decoder cannot be nullptr", lpDecoder);
     }
 
     LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
