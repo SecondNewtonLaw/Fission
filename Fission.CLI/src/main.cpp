@@ -22,12 +22,13 @@ std::string GetIndentation(int indentationLevel) {
 }
 
 void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, const LiftedFunction &func) {
-    stream << GetIndentation(indentationLevel) << "/* Function Name: " << func.name << "*/\n";
+    stream << GetIndentation(indentationLevel) << "/* Function Name: '" << func.name << "' */\n";
 
     stream << GetIndentation(indentationLevel) << "/* Function IR Instructions (size: " << func.instructions.size() << ") */" << "\n";
     for (const auto &insn : func.instructions) {
         stream << GetIndentation(indentationLevel) << OperationToString(insn.operation) << " ";
-        for (const auto &operand : insn.operands) {
+        for (std::size_t i = 0; i < insn.operands.size(); i++) {
+            const auto &operand = insn.operands[i];
             switch (operand.type) {
             case LiftedOperandType::Register:
                 stream << "R" << std::to_string(operand.value.reg);
@@ -47,7 +48,8 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
             default:
                 ASSERT(false, "unhandled mapping of operand to text");
             }
-            stream << " ";
+            if (i + 1 != insn.operands.size())
+                stream << ", ";
         }
 
         stream << "\n";
