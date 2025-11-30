@@ -5,11 +5,19 @@
 
 #include "Deserializer.hpp"
 
-LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
-    LiftedFunction liftedFunction{};
+#include <libassert/assert.hpp>
 
+
+LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
+    LiftedFunction liftedFunction { };
+
+    if (function->debugName)
+        liftedFunction.name = *function->debugName;
+    else {
+
+    }
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex += function->instructions.at(currentIndex).GetOpCodeSize()) {
-        const auto& instruction = function->instructions.at(currentIndex);
+        const auto &instruction = function->instructions.at(currentIndex);
         const auto opCode = instruction.GetOpCode();
 
         switch (opCode) {
@@ -20,7 +28,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             liftedFunction.instructions.emplace_back(LiftedOperation::BREAK);
             break;
         case LOP_LOADNIL: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -29,7 +37,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
         }
         case LOP_LOADB: {
             const auto jumpOffset = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
-            auto& instr = liftedFunction.instructions.emplace_back(jumpOffset != 0 ? LiftedOperation::LOADNJUMP : LiftedOperation::LOAD);
+            auto &instr = liftedFunction.instructions.emplace_back(jumpOffset != 0 ? LiftedOperation::LOADNJUMP : LiftedOperation::LOAD);
             instr.operands.resize(jumpOffset != 0 ? 3 : 2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -42,7 +50,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
         case LOP_LOADN: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -51,7 +59,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
         case LOP_LOADK: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::LOAD);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -60,7 +68,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
         case LOP_MOVE: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::MOVE);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::MOVE);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -69,7 +77,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
         case LOP_GETGLOBAL: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETGLOBAL);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETGLOBAL);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -78,7 +86,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
         case LOP_SETGLOBAL: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETGLOBAL);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETGLOBAL);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -213,8 +221,8 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
             break;
         }
 
-            default:
-                break;
+        default:
+            break;
         }
     }
 
@@ -227,4 +235,27 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
 
 LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
     return LiftFunctionBytecodeInternal(bytecode.lpMainFunction);
+}
+
+std::string_view OperationToString(LiftedOperation operation) {
+    switch (operation) {
+    case LiftedOperation::NOP:
+        return "NOP";
+    case LiftedOperation::BREAK:
+        return "DEBUGBREAK";
+    case LiftedOperation::LOAD:
+        return "LOAD";
+    case LiftedOperation::LOADNJUMP:
+        return "LOAD_AND_JUMP";
+    case LiftedOperation::MOVE:
+        return "MOVE";
+    case LiftedOperation::GETGLOBAL:
+        return "GETGLOBAL";
+    case LiftedOperation::SETGLOBAL:
+        return "SETGLOBAL";
+    default:
+        ASSERT(false, "unhandled operation. No string representation available, so we panic.");
+    }
+
+    return "";
 }

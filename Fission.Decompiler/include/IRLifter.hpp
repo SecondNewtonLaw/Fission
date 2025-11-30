@@ -8,6 +8,7 @@
 
 struct DeserializedFunction;
 struct DeserializedBytecode;
+
 enum class LiftedOperation : uint32_t {
     NOP,
     BREAK,
@@ -42,8 +43,10 @@ enum class LiftedOperandType : uint8_t {
 
 struct LiftedOperand {
     LiftedOperandType type;
+
     union {
         uint8_t reg;
+
         union {
             int16_t n;
             bool b;
@@ -54,12 +57,15 @@ struct LiftedOperand {
 
 struct LiftedInstruction {
     LiftedOperation operation;
-    std::vector<LiftedOperand> operands{};
+    std::vector<LiftedOperand> operands { };
 };
 
 struct LiftedFunction {
     std::vector<LiftedInstruction> instructions;
     std::vector<LiftedFunction> subfunctions;
+    std::string name;
 };
 
-LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode& bytecode);
+LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
+
+std::string_view OperationToString(LiftedOperation operation);
