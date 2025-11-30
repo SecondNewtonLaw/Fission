@@ -67,7 +67,7 @@ void PrintIR(LiftedFunction &func) {
 
     sstream << "/* Fission IR Viewer */\n";
     sstream << "/* Created by Fission Contributors */\n";
-    sstream << "\n";
+    sstream << GetIndentation(4) << "/* Program Root (Main Procedure/Prototype/Function) */\n";
     PrintFunctionOntoStream(sstream, 4, func);
 
     std::cout << sstream.str();
