@@ -7,6 +7,7 @@
 
 #include <libassert/assert.hpp>
 
+static uint64_t functionCounter = 0;
 
 LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
     LiftedFunction liftedFunction { };
@@ -14,8 +15,9 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
     if (function->debugName)
         liftedFunction.name = *function->debugName;
     else {
-
+        liftedFunction.name = std::format("f{}", functionCounter++);
     }
+
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex += function->instructions.at(currentIndex).GetOpCodeSize()) {
         const auto &instruction = function->instructions.at(currentIndex);
         const auto opCode = instruction.GetOpCode();
@@ -234,6 +236,7 @@ LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function
 }
 
 LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
+    functionCounter = 0;
     return LiftFunctionBytecodeInternal(bytecode.lpMainFunction);
 }
 
