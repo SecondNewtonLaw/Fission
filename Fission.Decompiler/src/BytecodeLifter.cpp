@@ -8,6 +8,106 @@
 #include <libassert/assert.hpp>
 #include <sstream>
 
+std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
+    switch (id) {
+        case LBF_NONE: return "none";
+        case LBF_ASSERT: return "assert";
+        case LBF_MATH_ABS: return "math.abs";
+        case LBF_MATH_ACOS: return "math.acos";
+        case LBF_MATH_ASIN: return "math.asin";
+        case LBF_MATH_ATAN2: return "math.atan2";
+        case LBF_MATH_ATAN: return "math.atan";
+        case LBF_MATH_CEIL: return "math.ceil";
+        case LBF_MATH_COSH: return "math.cosh";
+        case LBF_MATH_COS: return "math.cos";
+        case LBF_MATH_DEG: return "math.deg";
+        case LBF_MATH_EXP: return "math.exp";
+        case LBF_MATH_FLOOR: return "math.floor";
+        case LBF_MATH_FMOD: return "math.fmod";
+        case LBF_MATH_FREXP: return "math.frexp";
+        case LBF_MATH_LDEXP: return "math.ldexp";
+        case LBF_MATH_LOG10: return "math.log10";
+        case LBF_MATH_LOG: return "math.log";
+        case LBF_MATH_MAX: return "math.max";
+        case LBF_MATH_MIN: return "math.min";
+        case LBF_MATH_MODF: return "math.modf";
+        case LBF_MATH_POW: return "math.pow";
+        case LBF_MATH_RAD: return "math.rad";
+        case LBF_MATH_SINH: return "math.sinh";
+        case LBF_MATH_SIN: return "math.sin";
+        case LBF_MATH_SQRT: return "math.sqrt";
+        case LBF_MATH_TANH: return "math.tanh";
+        case LBF_MATH_TAN: return "math.tan";
+        case LBF_BIT32_ARSHIFT: return "bit32.arshift";
+        case LBF_BIT32_BAND: return "bit32.band";
+        case LBF_BIT32_BNOT: return "bit32.bnot";
+        case LBF_BIT32_BOR: return "bit32.bor";
+        case LBF_BIT32_BXOR: return "bit32.bxor";
+        case LBF_BIT32_BTEST: return "bit32.btest";
+        case LBF_BIT32_EXTRACT: return "bit32.extract";
+        case LBF_BIT32_LROTATE: return "bit32.lrotate";
+        case LBF_BIT32_LSHIFT: return "bit32.lshift";
+        case LBF_BIT32_REPLACE: return "bit32.replace";
+        case LBF_BIT32_RROTATE: return "bit32.rrotate";
+        case LBF_BIT32_RSHIFT: return "bit32.rshift";
+        case LBF_TYPE: return "type";
+        case LBF_STRING_BYTE: return "string.byte";
+        case LBF_STRING_CHAR: return "string.char";
+        case LBF_STRING_LEN: return "string.len";
+        case LBF_TYPEOF: return "typeof";
+        case LBF_STRING_SUB: return "string.sub";
+        case LBF_MATH_CLAMP: return "math.clamp";
+        case LBF_MATH_SIGN: return "math.sign";
+        case LBF_MATH_ROUND: return "math.round";
+        case LBF_RAWSET: return "rawset";
+        case LBF_RAWGET: return "rawget";
+        case LBF_RAWEQUAL: return "rawequal";
+        case LBF_TABLE_INSERT: return "table.insert";
+        case LBF_TABLE_UNPACK: return "table.unpack";
+        case LBF_VECTOR: return "Vector3.new";
+        case LBF_BIT32_COUNTLZ: return "bit32.countlz";
+        case LBF_BIT32_COUNTRZ: return "bit32.countrz";
+        case LBF_SELECT_VARARG: return "select";
+        case LBF_RAWLEN: return "rawlen";
+        case LBF_BIT32_EXTRACTK: return "bit32.extract"; // extractk maps to extract
+        case LBF_GETMETATABLE: return "getmetatable";
+        case LBF_SETMETATABLE: return "setmetatable";
+        case LBF_TONUMBER: return "tonumber";
+        case LBF_TOSTRING: return "tostring";
+        case LBF_BIT32_BYTESWAP: return "bit32.byteswap";
+        case LBF_BUFFER_READI8: return "buffer.readi8";
+        case LBF_BUFFER_READU8: return "buffer.readu8";
+        case LBF_BUFFER_WRITEU8: return "buffer.writeu8";
+        case LBF_BUFFER_READI16: return "buffer.readi16";
+        case LBF_BUFFER_READU16: return "buffer.readu16";
+        case LBF_BUFFER_WRITEU16: return "buffer.writeu16";
+        case LBF_BUFFER_READI32: return "buffer.readi32";
+        case LBF_BUFFER_READU32: return "buffer.readu32";
+        case LBF_BUFFER_WRITEU32: return "buffer.writeu32";
+        case LBF_BUFFER_READF32: return "buffer.readf32";
+        case LBF_BUFFER_WRITEF32: return "buffer.writef32";
+        case LBF_BUFFER_READF64: return "buffer.readf64";
+        case LBF_BUFFER_WRITEF64: return "buffer.writef64";
+        case LBF_VECTOR_MAGNITUDE: return "vector.magnitude";
+        case LBF_VECTOR_NORMALIZE: return "vector.normalize";
+        case LBF_VECTOR_CROSS: return "vector.cross";
+        case LBF_VECTOR_DOT: return "vector.dot";
+        case LBF_VECTOR_FLOOR: return "vector.floor";
+        case LBF_VECTOR_CEIL: return "vector.ceil";
+        case LBF_VECTOR_ABS: return "vector.abs";
+        case LBF_VECTOR_SIGN: return "vector.sign";
+        case LBF_VECTOR_CLAMP: return "vector.clamp";
+        case LBF_VECTOR_MIN: return "vector.min";
+        case LBF_VECTOR_MAX: return "vector.max";
+        case LBF_MATH_LERP: return "math.lerp";
+        case LBF_VECTOR_LERP: return "vector.lerp";
+        case LBF_MATH_ISNAN: return "math.isnan";
+        case LBF_MATH_ISINF: return "math.isinf";
+        case LBF_MATH_ISFINITE: return "math.isfinite";
+        default: return std::format("Unknown_BFID_{}", static_cast<int>(id));
+    }
+}
+
 LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
     LiftedFunction liftedFunction { };
 
@@ -661,6 +761,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[3].value.imm.n = LUAU_INSN_AUX_A(aux);
             instr.operands[4].type = LiftedOperandType::Register;
             instr.operands[4].value.imm.n = LUAU_INSN_AUX_B(aux);
+
+            instr.comment = std::format("INFO: Perform FastCall3 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_FORGPREP_NEXT: {
@@ -704,6 +806,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+
+            instr.comment = std::format("INFO: Perform FastCall of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_COVERAGE: {
@@ -741,6 +845,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+
+            instr.comment = std::format("INFO: Perform FastCall1 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_FASTCALL2: {
@@ -754,6 +860,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::Register;
             instr.operands[3].value.reg = LUAU_INSN_AUX_A(function->instructions.at(currentIndex + 1).instruction);
+
+            instr.comment = std::format("INFO: Perform FastCall2 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_FASTCALL2K: {
@@ -767,6 +875,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::ImmediateConstant;
             instr.operands[3].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            instr.comment = std::format("INFO: Perform FastCall2K of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_FORGPREP: {
@@ -1018,3 +1128,4 @@ std::string_view OperationToString(LiftedOperation operation) {
         return "UNKNOWN";
     }
 }
+
