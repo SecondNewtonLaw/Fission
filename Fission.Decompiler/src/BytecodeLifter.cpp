@@ -6,14 +6,18 @@
 #include "Deserializer.hpp"
 
 #include <libassert/assert.hpp>
+#include <sstream>
 
-LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function) {
+LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
     LiftedFunction liftedFunction { };
 
     if (function->debugName)
         liftedFunction.name = *function->debugName;
     else {
-        liftedFunction.name = std::format("f{}", functionCounter++);
+        if (bIsMain)
+            liftedFunction.name = "_start";
+        else
+            liftedFunction.name = std::format("f{}", functionCounter++);
     }
 
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex += function->instructions.at(currentIndex).GetOpCodeSize()) {
@@ -70,6 +74,34 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             } else {
                 instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
             }
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[1].value.imm.k);
+
+            switch (k0.kType) {
+            case LUA_TSTRING:
+                finalComment << "INFO: Loading Constant '" << std::get<std::string>(k0.constantData) << "'.";
+                break;
+            case LUA_TNUMBER:
+                finalComment << "INFO: Loading Constant '" << std::get<LuauNumber>(k0.constantData) << "'.";
+                break;
+            case LUA_TVECTOR: {
+                auto vec = std::get<LuauVector>(k0.constantData);
+                finalComment << "INFO: Loads Vector3 with components; x = " << vec.x << " y = " << vec.y << " z = " << vec.z << " w = " << vec.w;
+                break;
+            }
+            case LUA_TTABLE: {
+                finalComment << "INFO: Loads Table Preset.";
+                break;
+            }
+            default: {
+                finalComment <<
+                    "WARNING: Obtaining a non-representable constant which has not been handled. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
+                break;
+            }
+            }
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_MOVE: {
@@ -88,6 +120,18 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant;
             instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[1].value.imm.k);
+
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Obtaining Global " << std::get<std::string>(k0.constantData);
+            } else {
+                finalComment <<
+                    "WARNING: Obtaining a non-representable global. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
+            }
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_SETGLOBAL: {
@@ -97,6 +141,19 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant;
             instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[1].value.imm.k);
+
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Setting Global " << std::get<std::string>(k0.constantData);
+            } else {
+                finalComment <<
+                    "WARNING: Setting a non-representable global. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
+            }
+
+            instr.comment = finalComment.str();
+
             break;
         }
         case LOP_GETUPVAL: {
@@ -126,6 +183,40 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.k = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateAux; // index chain
             instr.operands[2].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
+
+            // taken from luaV_getimport, thank you Luau, why the fuck isn't this in a fucking macro?
+            int id0 = int(instr.operands[2].value.imm.u >> 20) & 1023;
+            int id1 = int(instr.operands[2].value.imm.u >> 10) & 1023;
+            int id2 = int(instr.operands[2].value.imm.u) & 1023;
+
+            int indexCount = instr.operands[2].value.imm.u >> 30;
+            std::stringstream finalComment;
+            finalComment << "INFO: Index Chain '";
+            if (indexCount == 0) {
+                instr.comment = std::format(
+                    "WARNING: Auxiliary corrupted? No GETIMPORT indexes found, cannot estimate path."
+                );
+                break;
+            }
+            if (indexCount-- > 0) {
+                auto &k0 = function->constants.at(id0);
+                if (k0.kType == LUA_TSTRING)
+                    finalComment << std::get<std::string>(k0.constantData);
+            }
+            if (indexCount-- > 0) {
+                auto &k1 = function->constants.at(id1);
+                if (k1.kType == LUA_TSTRING)
+                    finalComment << "." << std::get<std::string>(k1.constantData);
+            }
+            if (indexCount-- > 0) {
+                auto &k2 = function->constants.at(id2);
+                if (k2.kType == LUA_TSTRING)
+                    finalComment << "." << std::get<std::string>(k2.constantData);
+            }
+
+            finalComment << "'";
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_GETTABLE: {
@@ -159,6 +250,18 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
             instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Getting Table Index (Constant with known hash) '" << std::get<std::string>(k0.constantData) << "'";
+            } else {
+                finalComment <<
+                    "WARNING: Getting a table index which cannot be represented. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
+            }
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_SETTABLEKS: {
@@ -170,6 +273,17 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
             instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Setting Table Index (Constant with known hash) '" << std::get<std::string>(k0.constantData) << "'";
+            } else {
+                finalComment <<
+                    "WARNING: The index of the table cannot be represented. This should never happen unless the bytecode is absolutely toasted or the kTable is corrupted";
+            }
+
+            instr.comment = finalComment.str();
             break;
         }
         case LOP_GETTABLEN: {
@@ -181,6 +295,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.comment = std::format("INFO: Get Table index {}", instr.operands[2].value.imm.n);
             break;
         }
         case LOP_SETTABLEN: {
@@ -192,6 +307,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.comment = std::format("INFO: Set Table at index {}", instr.operands[2].value.imm.n);
             break;
         }
         case LOP_NEWCLOSURE: {
@@ -235,8 +351,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         case LOP_JUMPX:
         case LOP_JUMPBACK:
         case LOP_JUMP: {
-            if (instruction.GetD() == 0) {
-                liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            if ((opCode != LOP_JUMPX && instruction.GetD() == 0) || instruction.GetE() == 0) {
+                auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+                ins.comment = "WARNING: Op Code simplified, ignored by interpreter (JUMPX/JUMPBACK/JUMP)";
                 break;
             }
 
@@ -291,7 +408,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 ASSERT(false, "how?");
             }
 
-            auto& instr = liftedFunction.instructions.emplace_back(liftedOpCode);
+            auto &instr = liftedFunction.instructions.emplace_back(liftedOpCode);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -332,7 +449,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 ASSERT(false, "how?");
             }
 
-            auto& instr = liftedFunction.instructions.emplace_back(liftedOpCode);
+            auto &instr = liftedFunction.instructions.emplace_back(liftedOpCode);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -373,7 +490,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 ASSERT(false, "how?");
             }
 
-            auto& instr = liftedFunction.instructions.emplace_back(liftedOpCode);
+            auto &instr = liftedFunction.instructions.emplace_back(liftedOpCode);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -385,7 +502,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_AND:
         case LOP_OR: {
-            auto& instr = liftedFunction.instructions.emplace_back(opCode == LOP_AND ? LiftedOperation::AND : LiftedOperation::OR);
+            auto &instr = liftedFunction.instructions.emplace_back(opCode == LOP_AND ? LiftedOperation::AND : LiftedOperation::OR);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -397,7 +514,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_ANDK:
         case LOP_ORK: {
-            auto& instr = liftedFunction.instructions.emplace_back(opCode == LOP_ANDK ? LiftedOperation::ANDK : LiftedOperation::ORK);
+            auto &instr = liftedFunction.instructions.emplace_back(opCode == LOP_ANDK ? LiftedOperation::ANDK : LiftedOperation::ORK);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -408,7 +525,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_CONCAT: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::CONCAT);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CONCAT);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -437,7 +554,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 ASSERT(false, "how?");
             }
 
-            auto& instr = liftedFunction.instructions.emplace_back(liftedOpCode);
+            auto &instr = liftedFunction.instructions.emplace_back(liftedOpCode);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -446,7 +563,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_NEWTABLE: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWTABLE);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWTABLE);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -457,7 +574,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_DUPTABLE: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::DUPTABLE);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::DUPTABLE);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -466,7 +583,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_SETLIST: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETLIST);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETLIST);
             instr.operands.resize(4);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -479,7 +596,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORNPREP: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORNPREP);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORNPREP);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -488,7 +605,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORNLOOP: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORNLOOP);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORNLOOP);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -497,7 +614,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORGLOOP: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGLOOP);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGLOOP);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -508,7 +625,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORGPREP_INEXT: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGPREP_INEXT);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGPREP_INEXT);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -517,7 +634,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FASTCALL3: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL3);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL3);
             instr.operands.resize(5);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -533,7 +650,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORGPREP_NEXT: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGREP_NEXT);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGPREP_NEXT);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -542,7 +659,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_GETVARARGS: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETVARARGS);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETVARARGS);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -551,7 +668,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_DUPCLOSURE: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::DUPCLOSURE);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::DUPCLOSURE);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -560,14 +677,14 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_PREPVARARGS: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::PREPVARARGS);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::PREPVARARGS);
             instr.operands.resize(1);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             break;
         }
         case LOP_FASTCALL: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -576,11 +693,12 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_COVERAGE: {
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP); // Unlikely to be seen in the wild, but we need it
+            auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP); // Unlikely to be seen in the wild, but we need it
+            ins.comment = "WARNING: Op Code simplified, ignored by interpreter (COVERAGE)";
             break;
         }
         case LOP_CAPTURE: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::CAPTURE);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CAPTURE);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -590,7 +708,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_SUBRK:
         case LOP_DIVRK: {
-            auto& instr = liftedFunction.instructions.emplace_back(opCode == LOP_SUBRK ? LiftedOperation::SUBRK : LiftedOperation::DIVRK);
+            auto &instr = liftedFunction.instructions.emplace_back(opCode == LOP_SUBRK ? LiftedOperation::SUBRK : LiftedOperation::DIVRK);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -601,7 +719,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FASTCALL1: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL1);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL1);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -612,7 +730,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FASTCALL2: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL2);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL2);
             instr.operands.resize(4);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -625,7 +743,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FASTCALL2K: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL2K);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTCALL2K);
             instr.operands.resize(4);
             instr.operands[0].type = LiftedOperandType::ImmediateInteger;
             instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -638,7 +756,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_FORGPREP: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGPREP);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORGPREP);
             instr.operands.resize(2);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -647,7 +765,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_IDIV: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::IDIV);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::IDIV);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -658,7 +776,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
         case LOP_IDIVK: {
-            auto& instr = liftedFunction.instructions.emplace_back(LiftedOperation::IDIVK);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::IDIVK);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -668,7 +786,53 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.k = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             break;
         }
-        // TODO: LOP_JUMPXEQKNIL, LOP_JUMPXEQKB, LOP_JUMPXEQKN, LOP_JUMPXEQKS for you ditto :heart:
+        case LOP_JUMPXEQKNIL:
+        case LOP_JUMPXEQKB: {
+            if (instruction.GetD() == 1u) {
+                // instruction doesn't contribute to CFlow, eliminate straight up.
+                auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+                liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+                ins.comment = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
+                break;
+            }
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::JUMPXEQK);
+            instr.operands.resize(4);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetD();
+            if (opCode == LOP_JUMPXEQKB) {
+                instr.operands[1].type = LiftedOperandType::ImmediateBool;
+                instr.operands[1].value.imm.n = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex+1).instruction);
+            } else {
+                instr.operands[1].type = LiftedOperandType::ImmediateNil;
+            }
+            instr.operands[2].type = LiftedOperandType::ImmediateBool; // NOT flag
+            instr.operands[2].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex+1).instruction) != 0;
+            break;
+        }
+
+        case LOP_JUMPXEQKN:
+        case LOP_JUMPXEQKS: {
+            if (instruction.GetD() == 1u) {
+                // instruction doesn't contribute to CFlow, eliminate straight up.
+                auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+                liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+                ins.comment = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
+                break;
+            }
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::JUMPXEQK);
+            instr.operands.resize(4);
+            instr.operands[0].type = LiftedOperandType::Register; // src
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger; // jmp off
+            instr.operands[1].value.imm.n = instruction.GetD();
+            instr.operands[1].type = LiftedOperandType::ImmediateConstant; // ktable idx
+            instr.operands[1].value.imm.k = LUAU_INSN_AUX_KV(function->instructions.at(currentIndex+1).instruction);
+            instr.operands[2].type = LiftedOperandType::ImmediateBool; // NOT flag
+            instr.operands[2].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex+1).instruction) != 0;
+            break;
+        }
 
         default:
             break;
@@ -683,82 +847,155 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 }
 
 LiftedFunction BytecodeLifter::LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
-    return LiftFunctionBytecodeInternal(bytecode.lpMainFunction);
+    return LiftFunctionBytecodeInternal(bytecode.lpMainFunction, true);
 }
 
 std::string_view OperationToString(LiftedOperation operation) {
     switch (operation) {
-    case LiftedOperation::NOP:            return "NOP";
-    case LiftedOperation::BREAK:          return "DEBUGBREAK";
-    case LiftedOperation::LOAD:           return "LOAD";
-    case LiftedOperation::LOADNJUMP:      return "LOAD_AND_JUMP";
-    case LiftedOperation::MOVE:           return "MOVE";
-    case LiftedOperation::GETGLOBAL:      return "GETGLOBAL";
-    case LiftedOperation::SETGLOBAL:      return "SETGLOBAL";
-    case LiftedOperation::GETUPVAL:       return "GETUPVAL";
-    case LiftedOperation::SETUPVAL:       return "SETUPVAL";
-    case LiftedOperation::GETIMPORT:      return "GETIMPORT";
-    case LiftedOperation::GETTABLE:       return "GETTABLE";
-    case LiftedOperation::SETTABLE:       return "SETTABLE";
-    case LiftedOperation::GETTABLEKS:     return "GETTABLEKS";
-    case LiftedOperation::SETTABLEKS:     return "SETTABLEKS";
-    case LiftedOperation::GETTABLEN:      return "GETTABLEN";
-    case LiftedOperation::SETTABLEN:      return "SETTABLEN";
-    case LiftedOperation::NEWTABLE:       return "NEWTABLE";
-    case LiftedOperation::DUPTABLE:       return "DUPTABLE";
-    case LiftedOperation::SETLIST:        return "SETLIST";
-    case LiftedOperation::NEWCLOSURE:     return "NEWCLOSURE";
-    case LiftedOperation::DUPCLOSURE:     return "DUPCLOSURE";
-    case LiftedOperation::NAMECALL:       return "NAMECALL";
-    case LiftedOperation::CALL:           return "CALL";
-    case LiftedOperation::RETURN:         return "RETURN";
-    case LiftedOperation::GETVARARGS:     return "GETVARARGS";
-    case LiftedOperation::PREPVARARGS:    return "PREPVARARGS";
-    case LiftedOperation::CAPTURE:        return "CAPTURE";
-    case LiftedOperation::FASTCALL:       return "FASTCALL";
-    case LiftedOperation::FASTCALL1:      return "FASTCALL1";
-    case LiftedOperation::FASTCALL2:      return "FASTCALL2";
-    case LiftedOperation::FASTCALL2K:     return "FASTCALL2K";
-    case LiftedOperation::FASTCALL3:      return "FASTCALL3";
-    case LiftedOperation::JUMP:           return "JUMP";
-    case LiftedOperation::JUMPIF:         return "JUMPIF";
-    case LiftedOperation::JUMPIFNOT:      return "JUMPIFNOT";
-    case LiftedOperation::JUMPIFEQ:       return "JUMPIFEQ";
-    case LiftedOperation::JUMPIFLE:       return "JUMPIFLE";
-    case LiftedOperation::JUMPIFLT:       return "JUMPIFLT";
-    case LiftedOperation::JUMPIFNOTEQ:    return "JUMPIFNOTEQ";
-    case LiftedOperation::JUMPIFNOTLE:    return "JUMPIFNOTLE";
-    case LiftedOperation::JUMPIFNOTLT:    return "JUMPIFNOTLT";
-    case LiftedOperation::FORNPREP:       return "FORNPREP";
-    case LiftedOperation::FORNLOOP:       return "FORNLOOP";
-    case LiftedOperation::FORGLOOP:       return "FORGLOOP";
-    case LiftedOperation::FORGPREP:       return "FORGPREP";
-    case LiftedOperation::FORGPREP_INEXT: return "FORGPREP_INEXT";
-    case LiftedOperation::FORGREP_NEXT:   return "FORGREP_NEXT";
-    case LiftedOperation::ADD:            return "ADD";
-    case LiftedOperation::SUB:            return "SUB";
-    case LiftedOperation::MUL:            return "MUL";
-    case LiftedOperation::DIV:            return "DIV";
-    case LiftedOperation::IDIV:           return "IDIV";
-    case LiftedOperation::MOD:            return "MOD";
-    case LiftedOperation::POW:            return "POW";
-    case LiftedOperation::ADDK:           return "ADDK";
-    case LiftedOperation::SUBK:           return "SUBK";
-    case LiftedOperation::MULK:           return "MULK";
-    case LiftedOperation::DIVK:           return "DIVK";
-    case LiftedOperation::IDIVK:          return "IDIVK";
-    case LiftedOperation::MODK:           return "MODK";
-    case LiftedOperation::POWK:           return "POWK";
-    case LiftedOperation::SUBRK:          return "SUBRK";
-    case LiftedOperation::DIVRK:          return "DIVRK";
-    case LiftedOperation::AND:            return "AND";
-    case LiftedOperation::OR:             return "OR";
-    case LiftedOperation::ANDK:           return "ANDK";
-    case LiftedOperation::ORK:            return "ORK";
-    case LiftedOperation::CONCAT:         return "CONCAT";
-    case LiftedOperation::NOT:            return "NOT";
-    case LiftedOperation::MINUS:          return "MINUS";
-    case LiftedOperation::LENGTH:         return "LENGTH";
+    case LiftedOperation::NOP:
+        return "NOP";
+    case LiftedOperation::BREAK:
+        return "DEBUGBREAK";
+    case LiftedOperation::LOAD:
+        return "LOAD";
+    case LiftedOperation::LOADNJUMP:
+        return "LOAD_AND_JUMP";
+    case LiftedOperation::MOVE:
+        return "MOVE";
+    case LiftedOperation::GETGLOBAL:
+        return "GETGLOBAL";
+    case LiftedOperation::SETGLOBAL:
+        return "SETGLOBAL";
+    case LiftedOperation::GETUPVAL:
+        return "GETUPVAL";
+    case LiftedOperation::SETUPVAL:
+        return "SETUPVAL";
+    case LiftedOperation::GETIMPORT:
+        return "GETIMPORT";
+    case LiftedOperation::GETTABLE:
+        return "GETTABLE";
+    case LiftedOperation::SETTABLE:
+        return "SETTABLE";
+    case LiftedOperation::GETTABLEKS:
+        return "GETTABLEKS";
+    case LiftedOperation::SETTABLEKS:
+        return "SETTABLEKS";
+    case LiftedOperation::GETTABLEN:
+        return "GETTABLEN";
+    case LiftedOperation::SETTABLEN:
+        return "SETTABLEN";
+    case LiftedOperation::NEWTABLE:
+        return "NEWTABLE";
+    case LiftedOperation::DUPTABLE:
+        return "DUPTABLE";
+    case LiftedOperation::SETLIST:
+        return "SETLIST";
+    case LiftedOperation::NEWCLOSURE:
+        return "NEWCLOSURE";
+    case LiftedOperation::DUPCLOSURE:
+        return "DUPCLOSURE";
+    case LiftedOperation::NAMECALL:
+        return "NAMECALL";
+    case LiftedOperation::CALL:
+        return "CALL";
+    case LiftedOperation::RETURN:
+        return "RETURN";
+    case LiftedOperation::GETVARARGS:
+        return "GETVARARGS";
+    case LiftedOperation::PREPVARARGS:
+        return "PREPVARARGS";
+    case LiftedOperation::CAPTURE:
+        return "CAPTURE";
+    case LiftedOperation::FASTCALL:
+        return "FASTCALL";
+    case LiftedOperation::FASTCALL1:
+        return "FASTCALL1";
+    case LiftedOperation::FASTCALL2:
+        return "FASTCALL2";
+    case LiftedOperation::FASTCALL2K:
+        return "FASTCALL2K";
+    case LiftedOperation::FASTCALL3:
+        return "FASTCALL3";
+    case LiftedOperation::JUMP:
+        return "JUMP";
+    case LiftedOperation::JUMPIF:
+        return "JUMPIF";
+    case LiftedOperation::JUMPIFNOT:
+        return "JUMPIFNOT";
+    case LiftedOperation::JUMPIFEQ:
+        return "JUMPIFEQ";
+    case LiftedOperation::JUMPIFLE:
+        return "JUMPIFLE";
+    case LiftedOperation::JUMPIFLT:
+        return "JUMPIFLT";
+    case LiftedOperation::JUMPIFNOTEQ:
+        return "JUMPIFNOTEQ";
+    case LiftedOperation::JUMPIFNOTLE:
+        return "JUMPIFNOTLE";
+    case LiftedOperation::JUMPIFNOTLT:
+        return "JUMPIFNOTLT";
+    case LiftedOperation::FORNPREP:
+        return "FORNPREP";
+    case LiftedOperation::FORNLOOP:
+        return "FORNLOOP";
+    case LiftedOperation::FORGLOOP:
+        return "FORGLOOP";
+    case LiftedOperation::FORGPREP:
+        return "FORGPREP";
+    case LiftedOperation::FORGPREP_INEXT:
+        return "FORGPREP_INEXT";
+    case LiftedOperation::FORGPREP_NEXT:
+        return "FORGPREP_NEXT";
+    case LiftedOperation::ADD:
+        return "ADD";
+    case LiftedOperation::SUB:
+        return "SUB";
+    case LiftedOperation::MUL:
+        return "MUL";
+    case LiftedOperation::DIV:
+        return "DIV";
+    case LiftedOperation::IDIV:
+        return "IDIV";
+    case LiftedOperation::MOD:
+        return "MOD";
+    case LiftedOperation::POW:
+        return "POW";
+    case LiftedOperation::ADDK:
+        return "ADDK";
+    case LiftedOperation::SUBK:
+        return "SUBK";
+    case LiftedOperation::MULK:
+        return "MULK";
+    case LiftedOperation::DIVK:
+        return "DIVK";
+    case LiftedOperation::IDIVK:
+        return "IDIVK";
+    case LiftedOperation::MODK:
+        return "MODK";
+    case LiftedOperation::POWK:
+        return "POWK";
+    case LiftedOperation::SUBRK:
+        return "SUBRK";
+    case LiftedOperation::DIVRK:
+        return "DIVRK";
+    case LiftedOperation::AND:
+        return "AND";
+    case LiftedOperation::OR:
+        return "OR";
+    case LiftedOperation::ANDK:
+        return "ANDK";
+    case LiftedOperation::ORK:
+        return "ORK";
+    case LiftedOperation::CONCAT:
+        return "CONCAT";
+    case LiftedOperation::NOT:
+        return "NOT";
+    case LiftedOperation::MINUS:
+        return "MINUS";
+    case LiftedOperation::LENGTH:
+        return "LENGTH";
+    case LiftedOperation::JUMPXEQK:
+        return "JMPXIFKEQ";
     default:
         ASSERT(false, "unhandled operation. No string representation available, so we panic.");
         return "UNKNOWN";

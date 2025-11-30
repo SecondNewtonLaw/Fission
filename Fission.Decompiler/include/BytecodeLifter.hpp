@@ -3,6 +3,7 @@
 //
 #pragma once
 
+#include <optional>
 #include <boost/container/small_vector.hpp>
 #include <vector>
 
@@ -66,7 +67,7 @@ enum class LiftedOperation : uint32_t {
     FORNLOOP,
     FORGLOOP,
     FORGPREP_INEXT,
-    FORGREP_NEXT,
+    FORGPREP_NEXT,
     FASTCALL3,
     GETVARARGS,
     DUPCLOSURE,
@@ -79,6 +80,7 @@ enum class LiftedOperation : uint32_t {
     FASTCALL2,
     FASTCALL2K,
     FORGPREP,
+    JUMPXEQK,
     IDIV,
     IDIVK
 };
@@ -110,6 +112,7 @@ struct LiftedOperand {
 struct LiftedInstruction {
     LiftedOperation operation;
     std::vector<LiftedOperand> operands { };
+    std::optional<std::string> comment = std::nullopt;
 };
 
 struct LiftedFunction {
@@ -121,7 +124,8 @@ struct LiftedFunction {
 class BytecodeLifter {
     uint64_t functionCounter = 0;
 
-    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function);
+    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
+
 public:
     LiftedFunction LiftDeserializedBytecode(const DeserializedBytecode &bytecode);
 };

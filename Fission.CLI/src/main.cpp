@@ -9,11 +9,14 @@
 #include <cstdio>
 #include <ostream>
 #include <iostream>
+#include <fstream>
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #include "BytecodeLifter.hpp"
 #include "Luau/Compiler.h"
+
+#include <filesystem>
 #pragma clang diagnostic pop
 
 std::string GetIndentation(int indentationLevel) {
@@ -37,7 +40,7 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
                 stream << "nil";
                 break;
             case LiftedOperandType::ImmediateInteger:
-                stream << std::format("0x{:X}", operand.value.imm.n);
+                stream << std::format("0x{:X}", static_cast<uint32_t>(operand.value.imm.n));
                 break;
             case LiftedOperandType::ImmediateBool:
                 stream << std::format("{}", operand.value.imm.b ? "true" : "false");
@@ -55,6 +58,9 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
                 stream << ", ";
         }
 
+        if (insn.comment)
+            stream << " /* " << *insn.comment << " */";
+
         stream << "\n";
     }
 
@@ -65,7 +71,7 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
 
 }
 
-void PrintIR(LiftedFunction &func) {
+std::string FormatIR(LiftedFunction &func) {
     std::stringstream sstream;
 
     sstream << "/* Fission IR Viewer */\n";
@@ -73,50 +79,50 @@ void PrintIR(LiftedFunction &func) {
     sstream << GetIndentation(4) << "/* Program Root (Main Procedure/Prototype/Function) */\n";
     PrintFunctionOntoStream(sstream, 4, func);
 
-    std::cout << sstream.str();
+    return sstream.str();
+}
+
+void writefile(const std::filesystem::path &path, const std::string &content) {
+    std::ofstream file(path);
+
+    if (!file.is_open())
+        return;
+
+    file << content;
+    file.close();
+}
+
+std::optional<std::string> readfile(std::filesystem::path path) {
+    std::ifstream scriptFile(path);
+
+    if (!scriptFile.is_open())
+        return std::nullopt;
+
+    std::stringstream buffer;
+    buffer << scriptFile.rdbuf();
+    std::string scriptSource = buffer.str();
+
+    scriptFile.close();
+
+    return scriptSource;
 }
 
 int main() {
     Luau::CompileOptions compileOpts {1, 2};
-    auto bytecode = Luau::compile(
-        R"(
-function a()
-    local a = false
-    local b = a
-    local c = 0xDEAD
-    local d = 0xBEEF
-    local n = 0xB16B
-    local v = 0x00B5
-    local q = "string"
-
-    function b()
-        local aa = false
-        local bb = aa
-        local cc = 32000
-        local dd = 10000
-        local q = "string"
-        if math.random(5, 100) > 10 then
-            print("real?")
-        end
-        print(q)
-    end
-
-    b()
-end
-
-a()
-)",
-        compileOpts
-    );
+    auto hack = readfile("text.txt");
+    auto bytecode = Luau::compile(*hack, compileOpts);
 
     Deserializer deserializer { };
     const auto deserializationResultOptional = deserializer.Deserialize(bytecode);
 
     // ASSERT(deserializationResultOptional.has_value(), "deserialization failed.");
     auto &deserializationResult = deserializationResultOptional.value();
-    auto bytecodeLifter = BytecodeLifter{};
+    auto bytecodeLifter = BytecodeLifter { };
     auto liftedIR = bytecodeLifter.LiftDeserializedBytecode(deserializationResult);
 
-    PrintIR(liftedIR);
+    auto ir = FormatIR(liftedIR);
+
+    writefile(std::filesystem::path {"ir_out.txt"}, ir);
+    std::cout << ir << std::endl;
     return 0;
 }
