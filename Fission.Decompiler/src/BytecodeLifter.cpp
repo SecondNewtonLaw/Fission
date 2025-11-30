@@ -1098,13 +1098,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetD();
             if (opCode == LOP_JUMPXEQKB) {
-                instr.operands[1].type = LiftedOperandType::ImmediateBool;
-                instr.operands[1].value.imm.n = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex + 1).instruction);
+                instr.operands[2].type = LiftedOperandType::ImmediateBool;
+                instr.operands[2].value.imm.n = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex + 1).instruction);
             } else {
-                instr.operands[1].type = LiftedOperandType::ImmediateNil;
+                instr.operands[2].type = LiftedOperandType::ImmediateNil;
             }
-            instr.operands[2].type = LiftedOperandType::ImmediateBool; // NOT flag
-            instr.operands[2].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+            instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
+            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).comment = "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
