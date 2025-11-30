@@ -60,7 +60,27 @@ enum class LiftedOperation : uint32_t {
     MINUS,
     LENGTH,
     NEWTABLE,
-    DUPTABLE
+    DUPTABLE,
+    SETLIST,
+    FORNPREP,
+    FORNLOOP,
+    FORGLOOP,
+    FORGPREP_INEXT,
+    FORGREP_NEXT,
+    FASTCALL3,
+    GETVARARGS,
+    DUPCLOSURE,
+    PREPVARARGS,
+    FASTCALL,
+    CAPTURE,
+    SUBRK,
+    DIVRK,
+    FASTCALL1,
+    FASTCALL2,
+    FASTCALL2K,
+    FORGPREP,
+    IDIV,
+    IDIVK
 };
 
 enum class LiftedOperandType : uint8_t {
@@ -79,7 +99,7 @@ struct LiftedOperand {
         uint8_t reg;
 
         union {
-            int16_t n;
+            int32_t n;
             bool b;
             int32_t k;
             uint32_t u;
