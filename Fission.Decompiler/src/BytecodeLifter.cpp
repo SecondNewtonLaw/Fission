@@ -430,7 +430,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
 
             std::stringstream finalComment;
-            const auto& constant = function->constants.at(instr.operands[2].value.imm.k);
+            const auto &constant = function->constants.at(instr.operands[2].value.imm.k);
 
             if (constant.kType == LUA_TSTRING) {
                 finalComment << "INFO: Setting up namecall: '" << std::get<std::string>(constant.constantData) << "'";
@@ -959,6 +959,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
 
         default:
+            if (opCode < LOP_NOP || opCode > LOP__COUNT)
+                ASSERT(false, "malformed instruction, potentially mis-sized?", (LuauOpcode)opCode);
+
             ASSERT(false, "unhandled opcode.", (LuauOpcode)opCode);
             break;
         }
