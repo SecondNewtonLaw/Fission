@@ -1,0 +1,64 @@
+//
+// Created by Pixeluted on 01/12/2025.
+//
+#pragma once
+#include "BytecodeLifter.hpp"
+#include "ControlFlowAnalyzer.hpp"
+#include "Deserializer.hpp"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#include "Luau/Compiler.h"
+#pragma clang diagnostic pop
+#include "SSABuilder.hpp"
+
+enum class DecompileResult : uint8_t {
+    Success,
+    FailedToReadFile,
+    FailedToDeserialize,
+};
+
+enum class DecompilerFlags : uint8_t {
+    PrintIR = 1 << 0,
+    WriteIRToFile = 1 << 1,
+    GenerateIRGraph = 1 << 2,
+    GenerateSSAIRGraph = 1 << 3,
+    PrintTimingBreakdown = 1 << 4
+};
+
+constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {
+    return static_cast<DecompilerFlags>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+}
+
+constexpr DecompilerFlags operator&(DecompilerFlags lhs, DecompilerFlags rhs) {
+    return static_cast<DecompilerFlags>(static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+}
+
+constexpr DecompilerFlags operator~(DecompilerFlags flag) { return static_cast<DecompilerFlags>(~static_cast<uint8_t>(flag)); }
+
+inline DecompilerFlags &operator|=(DecompilerFlags &lhs, DecompilerFlags rhs) {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+inline DecompilerFlags &operator&=(DecompilerFlags &lhs, DecompilerFlags rhs) {
+    lhs = lhs & rhs;
+    return lhs;
+}
+
+class Decompiler {
+    Deserializer deserializer{};
+    ControlFlowAnalyzer controlFlowAnalyzer{};
+    SSABuilder SSABuilder{};
+    GraphVisualizer visualizer{};
+
+    DecompileResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
+
+  public:
+    DecompileResult
+    DecompileTestCode(const std::string &testCode, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {0, 2});
+    DecompileResult DecompileTestCodeFromFile(
+        const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {0, 2}
+    );
+    DecompileResult DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    DecompileResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+};

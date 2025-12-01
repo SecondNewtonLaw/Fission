@@ -194,6 +194,7 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/DenominatorAnalysis.cpp
         Fission.Decompiler/include/SSABuilder.hpp
         Fission.Decompiler/src/SSABuilder.cpp
+        Fission.Decompiler/src/Decompiler.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
@@ -204,6 +205,7 @@ target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert
 add_executable(Fission.CLI
         Fission.CLI/src/main.cpp
         Fission.Decompiler/include/BytecodeLifter.hpp
+        Fission.Decompiler/include/Decompiler.hpp
 )
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})

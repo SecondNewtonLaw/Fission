@@ -97,7 +97,6 @@ inline std::string BlockTerminatorToString(BlockTerminator term) {
 }
 
 class ControlFlowAnalyzer {
-
     bool IsTerminator(LiftedOperation operation);
 
     int32_t GetJumpOffset(const LiftedInstruction *lpInstruction);
@@ -116,6 +115,12 @@ class ControlFlowAnalyzer {
     AnalyzedFunction DetermineBasicBlocks(LiftedFunction *lpLiftedFunction);
 };
 
+enum class GraphContent : uint8_t {
+    IROnly,
+    SSAOnly,
+    Both
+};
+
 class GraphVisualizer {
     static std::string EscapeHtml(const std::string &str);
 
@@ -130,5 +135,5 @@ class GraphVisualizer {
     static void GenerateFunctionGraph(std::stringstream &dot, const AnalyzedFunction &func, const std::string &funcPrefix, bool isSsa);
 
   public:
-    static std::string GenerateDotGraph(const AnalyzedFunction &rootAnalysis);
+    static std::string GenerateDotGraph(const AnalyzedFunction &rootAnalysis, GraphContent contentMode);
 };
