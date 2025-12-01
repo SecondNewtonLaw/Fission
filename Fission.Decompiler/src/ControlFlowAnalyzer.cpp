@@ -568,22 +568,26 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
     dot << "    }\n";
 }
 
-std::string GraphVisualizer::GenerateDotGraph(const AnalyzedFunction &rootAnalysis) {
+std::string GraphVisualizer::GenerateDotGraph(const AnalyzedFunction &rootAnalysis, GraphContent contentMode) {
     std::stringstream dot;
     dot << "digraph LuauCFG {\n";
     dot << "    compound=true;\n";
     dot << "    labelloc=\"t\";\n";
     dot << "    fontname=\"Courier New\";\n";
 
-    dot << "subgraph cluster_non_ssa {\n";
-    dot << "    label=\"Non-SSA\";\n";
-    GenerateFunctionGraph(dot, rootAnalysis, "ROOT_NON_SSA", false);
-    dot << "}\n";
+    if (contentMode == GraphContent::IROnly || contentMode == GraphContent::Both) {
+        dot << "subgraph cluster_non_ssa {\n";
+        dot << "    label=\"Non-SSA\";\n";
+        GenerateFunctionGraph(dot, rootAnalysis, "ROOT_NON_SSA", false);
+        dot << "}\n";
+    }
 
-    dot << "subgraph cluster_ssa {\n";
-    dot << "    label=\"SSA\";\n";
-    GenerateFunctionGraph(dot, rootAnalysis, "ROOT_SSA", true);
-    dot << "}\n";
+    if (contentMode == GraphContent::SSAOnly || contentMode == GraphContent::Both) {
+        dot << "subgraph cluster_ssa {\n";
+        dot << "    label=\"SSA\";\n";
+        GenerateFunctionGraph(dot, rootAnalysis, "ROOT_SSA", true);
+        dot << "}\n";
+    }
 
     dot << "}\n";
     return dot.str();
