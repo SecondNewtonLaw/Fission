@@ -7,10 +7,6 @@
 bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     switch (operation) {
         // unconditionals
-    case LiftedOperation::FORNPREP:
-    case LiftedOperation::FORGPREP:
-    case LiftedOperation::FORGPREP_INEXT:
-    case LiftedOperation::FORGPREP_NEXT:
     case LiftedOperation::JUMP:
     case LiftedOperation::LOADNJUMP:
         // conditionals
@@ -23,6 +19,7 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     case LiftedOperation::JUMPIFNOTLE:
     case LiftedOperation::JUMPIFNOTLT:
     case LiftedOperation::JUMPXEQK:
+    // FORXPREP OPERATIONS AREN'T TERMINATORS, DO NOT ADD HERE.
     case LiftedOperation::FORNLOOP: // terminates a latch block
     case LiftedOperation::FORGLOOP:
     case LiftedOperation::RETURN:
@@ -177,9 +174,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
 
         switch (tailInst->operation) {
         case LiftedOperation::JUMP:
-        case LiftedOperation::LOADNJUMP:
-        case LiftedOperation::FORNPREP:
-        case LiftedOperation::FORGPREP:
+        case LiftedOperation::LOADNJUMP: // DO NOT FUCKING ADD FORXPREP OPERATIONS HERE, THEY ARE NOT A TERMINATOR.
             block.bTerminator = BlockTerminator::Unconditional;
             if (GetJumpOffset(tailInst) < 0)
                 block.bType = BlockType::LoopLatch;
@@ -296,17 +291,18 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
     }
 }
 
+void ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func) {
+    this->LinkBasicBlocks(func.basicBlocks);
+    this->OptimiseGraph(func.basicBlocks);
+    this->PruneUnreachableBlocks(func.basicBlocks);
+    for (auto &sub : func.innerFunctions) {
+        this->DetermineBasicBlocksInternalAdvanced(sub);
+    }
+}
+
 AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocks(LiftedFunction *lpLiftedFunction) {
     auto analyzed = DetermineBasicBlocksInternal(lpLiftedFunction);
-    LinkBasicBlocks(analyzed.basicBlocks);
-    this->OptimiseGraph(analyzed.basicBlocks);
-    this->PruneUnreachableBlocks(analyzed.basicBlocks);
-
-    for (auto &sub : analyzed.innerFunctions) {
-        LinkBasicBlocks(sub.basicBlocks);
-        this->OptimiseGraph(sub.basicBlocks);
-        this->PruneUnreachableBlocks(sub.basicBlocks);
-    }
+    DetermineBasicBlocksInternalAdvanced(analyzed);
     return analyzed;
 }
 
@@ -374,7 +370,9 @@ std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand, bool is
         if (isSsa && operand.ssaVersion != -1) {
             return std::format("R{}<SUB>{}</SUB>", operand.value.reg, operand.ssaVersion);
         }
-        ASSERT(isSsa == false, "we reached a wrong block of code what the fuck?", operand, operand.ssaVersion);
+        if (isSsa) {
+            return std::format("R{}<SUB>undef</SUB>", operand.value.reg);
+        }
         return std::format("R{}", operand.value.reg);
     case LiftedOperandType::ImmediateNil:
         return "nil";

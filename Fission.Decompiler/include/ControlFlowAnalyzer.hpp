@@ -140,6 +140,8 @@ class ControlFlowAnalyzer {
         }
     }
 
+    void DetermineBasicBlocksInternalAdvanced(AnalyzedFunction&func);
+
   public:
     ControlFlowAnalyzer() = default;
 

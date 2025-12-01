@@ -119,6 +119,7 @@ struct LiftedFunction {
     std::vector<LiftedFunction> subfunctions;
     std::string name;
     uint8_t numparams;
+    DeserializedFunction*lpDeserialized;
 };
 
 class BytecodeLifter {

@@ -3,6 +3,8 @@
 //
 #include "SSABuilder.hpp"
 
+#include "Deserializer.hpp"
+
 AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex) {
     switch (op.operation) {
     case LiftedOperation::NOP:
@@ -102,15 +104,16 @@ int32_t SSABuilder::NewVersion(int32_t reg) {
 }
 
 int32_t SSABuilder::CurrentVersion(int32_t reg) {
-    if (versionStack[reg].empty())
+    if (versionStack[reg].empty()) {
         return -1;
+    }
     return versionStack[reg].top();
 }
 
 void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std::map<int32_t, DominatorInfo> &domInfo) {
     this->blocksDefining.clear();
     if (lpOriginalFunction->lpLiftedFunction) {
-        for (uint8_t i = 0; i < lpOriginalFunction->lpLiftedFunction->numparams; ++i) {
+        for (uint8_t i = 0; i < lpOriginalFunction->lpLiftedFunction->lpDeserialized->maxstacksize; ++i) {
             blocksDefining[i].insert(0);
         }
     }
@@ -200,7 +203,10 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
-                    op.ssaVersion = CurrentVersion(op.value.reg);
+                    if (CurrentVersion(op.value.reg) == -1)
+                        op.ssaVersion = NewVersion(op.value.reg);
+                    else
+                        op.ssaVersion = CurrentVersion(op.value.reg);
                 }
             }
 
@@ -263,9 +269,11 @@ void SSABuilder::Build(AnalyzedFunction &func) {
 
     this->CreatePhiNodes(&func, domInfo);
 
-    if (func.lpLiftedFunction)
-        for (uint8_t i = 0; i < func.lpLiftedFunction->numparams; ++i)
-            NewVersion(i);
+    int totalRegs = func.lpLiftedFunction ? func.lpLiftedFunction->lpDeserialized->maxstacksize : 255;
+    for (int r = 0; r < totalRegs; ++r) {
+        if (versionStack[r].empty())
+            NewVersion(r);
+    }
 
     Rename(0, func, domInfo);
 
