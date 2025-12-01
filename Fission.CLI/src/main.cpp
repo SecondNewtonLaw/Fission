@@ -8,8 +8,8 @@
 int main() {
     Decompiler decompiler{};
     ASSERT(
-        decompiler.DecompileRobloxBytecodeFromFile(
-            "bytecode_raw.txt",
+        decompiler.DecompileTestCodeFromFile(
+            "text.txt",
             DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::GenerateIRGraph
         ) == DecompileResult::Success,
         "Decompilation failed."

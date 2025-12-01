@@ -178,7 +178,19 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             block.bTerminator = BlockTerminator::Unconditional;
             if (GetJumpOffset(tailInst) < 0)
                 block.bType = BlockType::LoopLatch;
+            else
+                block.bType = BlockType::Break; // possibly breaking out of a loop.
+
+            if (LiftedOperation::LOADNJUMP == tailInst->operation)
+                block.bType = BlockType::Standard;
             break;
+        case LiftedOperation::JUMPXEQK:
+            block.bTerminator = BlockTerminator::Conditional;
+            if (GetJumpOffset(tailInst) < 0) {
+                block.bType = BlockType::LoopLatch;
+            } else {
+                block.bType = BlockType::IfHeader;
+            }
         case LiftedOperation::JUMPIF:
         case LiftedOperation::JUMPIFNOT:
         case LiftedOperation::JUMPIFEQ:
@@ -187,7 +199,6 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::JUMPIFNOTEQ:
         case LiftedOperation::JUMPIFNOTLE:
         case LiftedOperation::JUMPIFNOTLT:
-        case LiftedOperation::JUMPXEQK:
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             block.bTerminator = BlockTerminator::Conditional;
@@ -195,6 +206,9 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 if (GetJumpOffset(tailInst) < 0) {
                     block.bType = BlockType::LoopLatch;
                 }
+            }
+            if (GetJumpOffset(tailInst) > 0) {
+                block.bType = BlockType::IfHeader;
             }
             break;
         case LiftedOperation::RETURN:

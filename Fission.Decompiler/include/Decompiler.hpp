@@ -55,9 +55,9 @@ class Decompiler {
 
   public:
     DecompileResult
-    DecompileTestCode(const std::string &testCode, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {0, 2});
+    DecompileTestCode(const std::string &testCode, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {1, 2});
     DecompileResult DecompileTestCodeFromFile(
-        const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {0, 2}
+        const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {1, 2}
     );
     DecompileResult DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
     DecompileResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
