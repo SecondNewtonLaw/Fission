@@ -110,6 +110,7 @@ struct LiftedOperand {
 
 struct LiftedInstruction {
     LiftedOperation operation;
+    int32_t instructionIndex;
     std::vector<LiftedOperand> operands{};
     std::optional<std::string> comment = std::nullopt;
 };
@@ -119,7 +120,7 @@ struct LiftedFunction {
     std::vector<LiftedFunction> subfunctions;
     std::string name;
     uint8_t numparams;
-    DeserializedFunction*lpDeserialized;
+    DeserializedFunction *lpDeserialized;
 };
 
 class BytecodeLifter {

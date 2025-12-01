@@ -6,10 +6,9 @@
 
 bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     switch (operation) {
-        // unconditionals
     case LiftedOperation::JUMP:
     case LiftedOperation::LOADNJUMP:
-        // conditionals
+        return true;
     case LiftedOperation::JUMPIF:
     case LiftedOperation::JUMPIFNOT:
     case LiftedOperation::JUMPIFEQ:
@@ -19,43 +18,59 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     case LiftedOperation::JUMPIFNOTLE:
     case LiftedOperation::JUMPIFNOTLT:
     case LiftedOperation::JUMPXEQK:
-    // FORXPREP OPERATIONS AREN'T TERMINATORS, DO NOT ADD HERE.
-    case LiftedOperation::FORNLOOP: // terminates a latch block
+        return true;
+
+    case LiftedOperation::FORNLOOP:
     case LiftedOperation::FORGLOOP:
+        return true;
+
     case LiftedOperation::RETURN:
         return true;
+
+        // they mustn't be block terminators. FORNLOOP and FORGLOOP will jump to them.
+        // when resolving the jumps this will cause them to not be the block leaders,
+        // failing tailing checks and causing blocks to be discarded by mistake.
+    case LiftedOperation::FORGPREP_INEXT:
+    case LiftedOperation::FORGPREP_NEXT:
+    case LiftedOperation::FORGPREP:
+    case LiftedOperation::FORNPREP:
     default:
         return false;
     }
 }
 
 int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstruction) {
-    ASSERT(!lpInstruction->operands.empty(), "no operands available, cannot caluclate jump offset.");
+    ASSERT(!lpInstruction->operands.empty(), "no operands available, cannot calculate jump offset.");
 
     switch (lpInstruction->operation) {
     case LiftedOperation::JUMP:
         return lpInstruction->operands[0].value.imm.n;
-    case LiftedOperation::FORNLOOP:
-    case LiftedOperation::FORGLOOP:
-    case LiftedOperation::FORNPREP:
-    case LiftedOperation::FORGPREP:
-    case LiftedOperation::FORGPREP_INEXT:
-    case LiftedOperation::FORGPREP_NEXT:
-        return lpInstruction->operands[1].value.imm.n - 1 /* we must lay ourselves into a prep instruction. */;
 
     case LiftedOperation::LOADNJUMP:
         return lpInstruction->operands[2].value.imm.n;
 
+        // case LiftedOperation::FORNPREP:
+        // case LiftedOperation::FORGPREP:
+        // case LiftedOperation::FORGPREP_INEXT:
+        // case LiftedOperation::FORGPREP_NEXT:
+        //     return lpInstruction->operands[1].value.imm.n + 2;
+
     case LiftedOperation::JUMPIF:
     case LiftedOperation::JUMPIFNOT:
+        return lpInstruction->operands[1].value.imm.n;
+
+    case LiftedOperation::FORNLOOP:
+    case LiftedOperation::FORGLOOP:
+        return lpInstruction->operands[1].value.imm.n;
+
+    case LiftedOperation::JUMPXEQK:
     case LiftedOperation::JUMPIFEQ:
     case LiftedOperation::JUMPIFLE:
     case LiftedOperation::JUMPIFLT:
     case LiftedOperation::JUMPIFNOTEQ:
     case LiftedOperation::JUMPIFNOTLE:
     case LiftedOperation::JUMPIFNOTLT:
-    case LiftedOperation::JUMPXEQK:
-        return lpInstruction->operands[1].value.imm.n;
+        return lpInstruction->operands[1].value.imm.n + 2;
 
     default:
         return 0;
@@ -98,7 +113,7 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
         case BlockTerminator::Conditional: {
             // jump (True/False depends on opcode)
             int32_t offset = GetJumpOffset(currentBlock.lpTail);
-            nextInstructions.push_back((currentBlock.lpTail + 1) + offset);
+            nextInstructions.push_back((currentBlock.lpTail) + offset);
 
             // fallthrough (else)
             nextInstructions.push_back(currentBlock.lpTail + 1);
@@ -141,7 +156,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 leaderIndexes.insert(currentIndex + 1);
             if (instruction->operation != LiftedOperation::RETURN) {
                 const int32_t offset = GetJumpOffset(instruction);
-                int64_t targetIndex = static_cast<int64_t>(currentIndex) + 1 + offset;
+                int64_t targetIndex = static_cast<int64_t>(currentIndex + 1) + offset;
                 if (targetIndex >= 0 && targetIndex < static_cast<int64_t>(totalInstructions)) {
                     leaderIndexes.insert(static_cast<size_t>(targetIndex));
                 }
@@ -172,8 +187,35 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
 
         block.bType = BlockType::Standard;
 
+        // TODO: FIGURE OUT WHY FORXPREP INSTRUCTIONS ARE BEING USED AS BLOCK TERMINATORS, CAUSING FORXLOOP INSTRUCTIONS TO BREAK!
+
         switch (tailInst->operation) {
-        case LiftedOperation::JUMP:
+        case LiftedOperation::JUMP: {
+            if ((tailInst + 1)->operation == LiftedOperation::FORNLOOP || (tailInst + 1)->operation == LiftedOperation::FORGLOOP) {
+                // this means the jump instruction is a break out of a loop. FORXLOOP instructions are
+                // in charge of looping back to the beginning.
+                block.bTerminator = BlockTerminator::Unconditional;
+                block.bType = BlockType::Break; // possibly breaking out of a loop.
+            }
+
+            if (tailInst->operands.size() == 2) {
+                // jumpback.
+                auto jmpOffset = GetJumpOffset(tailInst);
+                ASSERT(jmpOffset < 0, "jumpback jumps forward, what the fuck?");
+
+                auto whileBeginning =
+                    (tailInst +
+                     jmpOffset /* TODO: this means we have +1 for no reason. We are apparently misparsing the jumps, THIS IS BAD AND HAS TO BE FIXED ASAP. */);
+
+                if (IsTerminator(whileBeginning->operation)) {
+                    // reached beginning of loop.
+                    // TODO: implement block retyping on second pass of CFA.
+                } else {
+                    // no condition directly after, this means that we are dealing with a repeat until loop. They do not have a condition right afterward.
+                    // TODO: implement block retyping on second pass of CFA.
+                }
+            }
+        }
         case LiftedOperation::LOADNJUMP: // DO NOT FUCKING ADD FORXPREP OPERATIONS HERE, THEY ARE NOT A TERMINATOR.
             block.bTerminator = BlockTerminator::Unconditional;
             if (GetJumpOffset(tailInst) < 0)
@@ -207,9 +249,13 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                     block.bType = BlockType::LoopLatch;
                 }
             }
-            if (GetJumpOffset(tailInst) > 0) {
-                block.bType = BlockType::IfHeader;
+
+            if ((tailInst + (GetJumpOffset(tailInst) + 1))->operation == LiftedOperation::JUMP ||
+                (tailInst + (GetJumpOffset(tailInst) + 1))->operation == LiftedOperation::LOADNJUMP) {
+                // this likely means this belongs to a break instruction from a loop.
+                block.bType = BlockType::Break;
             }
+
             break;
         case LiftedOperation::RETURN:
             block.bTerminator = BlockTerminator::Return;
@@ -245,7 +291,8 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
 
             bool isEmpty = true;
             for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
-                if (inst->operation != LiftedOperation::NOP && !IsTerminator(inst->operation) && inst->operation != LiftedOperation::JUMP) {
+                if ((inst->operation != LiftedOperation::NOP && !IsTerminator(inst->operation)) || inst->operation == LiftedOperation::JUMP ||
+                    inst->operation == LiftedOperation::LOADNJUMP) {
                     isEmpty = false; // meaningful operations present.
                     break;
                 }

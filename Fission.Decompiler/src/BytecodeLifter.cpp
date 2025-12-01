@@ -631,6 +631,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 instr.comment = "INFO: JUMP instruction jumps into a negative offset, likely involved in a loop!";
             }
 
+            if (opCode == LOP_JUMPBACK) { // Jump back leaks information that the next instruction following it is actually the beginning of a loop. Jumpback
+                                          // signifies the end of the loop. Thanks compiler.
+                instr.operands.resize(2);
+                instr.operands[1].type = LiftedOperandType::ImmediateBool;
+                instr.operands[1].value.imm.b = true;
+            }
+
             break;
         }
         case LOP_JUMPIF:
@@ -1153,6 +1160,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
 
         currentIndex += instruction.GetOpCodeSize();
+    }
+
+    for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex++) {
+        liftedFunction.instructions.at(currentIndex).instructionIndex = (int32_t)currentIndex;
     }
 
     for (const auto subFunction : function->subfunctions) {
