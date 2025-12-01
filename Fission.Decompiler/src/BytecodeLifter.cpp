@@ -1105,15 +1105,27 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[1].value.imm.n = instruction.GetD();
+            instr.operands[1].value.imm.n = instruction.GetD() + 1;
+
+            auto constantAsString = std::string("");
+
             if (opCode == LOP_JUMPXEQKB) {
                 instr.operands[2].type = LiftedOperandType::ImmediateBool;
-                instr.operands[2].value.imm.n = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex + 1).instruction);
+                instr.operands[2].value.imm.b = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex + 1).instruction) != 0;
+                constantAsString = std::format("{}", instr.operands[2].value.imm.b);
             } else {
                 instr.operands[2].type = LiftedOperandType::ImmediateNil;
+                constantAsString = "nil";
             }
             instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
             instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+
+            auto jumpTarget = instr.operands[1].value.imm.n + currentIndex;
+            auto targetRegister = instr.operands[0].value.reg;
+            auto equal = instr.operands[3].value.imm.b ? " not" : "";
+
+            instr.comment =
+                std::format("INFO: Jump PC to {} if the value at register {} is{} equal to '{}'.", jumpTarget, targetRegister, equal, constantAsString);
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).comment = "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
@@ -1132,11 +1144,35 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].type = LiftedOperandType::Register; // src
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger; // jmp off
-            instr.operands[1].value.imm.n = instruction.GetD();
+            instr.operands[1].value.imm.n = instruction.GetD() + 1;
             instr.operands[2].type = LiftedOperandType::ImmediateConstant; // ktable idx
             instr.operands[2].value.imm.k = LUAU_INSN_AUX_KV(function->instructions.at(currentIndex + 1).instruction);
             instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
             instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+
+            auto jumpTarget = instr.operands[1].value.imm.n + currentIndex;
+            auto targetRegister = instr.operands[0].value.reg;
+            auto equal = instr.operands[3].value.imm.b ? " not" : "";
+            auto constantAsString = std::string("");
+
+            auto k0 = function->constants.at(instr.operands[2].value.imm.k);
+
+            switch (k0.kType) {
+            case LUA_TSTRING:
+                constantAsString = std::format("{}", std::get<std::string>(k0.constantData));
+                break;
+            case LUA_TNUMBER:
+                constantAsString = std::format("{}", std::get<LuauNumber>(k0.constantData));
+                break;
+            default:;
+                constantAsString = "well. This is weird. This instruction is referencing a constant that it shouldn't! Malformed Bytecode!";
+                break;
+            }
+
+            instr.comment = std::format(
+                "INFO: Jump PC to {} if the value at register {} is{} equal to the number/string '{}'.", jumpTarget, targetRegister, equal, constantAsString
+            );
+
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).comment = "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
