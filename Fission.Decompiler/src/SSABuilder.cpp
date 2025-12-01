@@ -113,7 +113,7 @@ int32_t SSABuilder::CurrentVersion(int32_t reg) {
 void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std::map<int32_t, DominatorInfo> &domInfo) {
     this->blocksDefining.clear();
     if (lpOriginalFunction->lpLiftedFunction) {
-        for (uint8_t i = 0; i < lpOriginalFunction->lpLiftedFunction->lpDeserialized->maxstacksize; ++i) {
+        for (uint8_t i = 0; i <= lpOriginalFunction->lpLiftedFunction->lpDeserialized->maxstacksize; ++i) {
             blocksDefining[i].insert(0);
         }
     }
@@ -203,7 +203,12 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
-                    op.ssaVersion = CurrentVersion(op.value.reg);
+                    if (op.ssaVersion == -1) {
+                        op.ssaVersion = NewVersion(op.value.reg);
+                        pushedCount[op.value.reg]++;
+                    } else {
+                        op.ssaVersion = CurrentVersion(op.value.reg);
+                    }
                 }
             }
 
@@ -221,6 +226,28 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
             if (inst == block.lpTail)
                 break;
+        }
+    }
+
+    if (block.lpHead) {
+        for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
+            if (inst->operation == LiftedOperation::CALL) {
+                int32_t retCount = inst->operands[2].value.imm.n;
+                if (retCount > 1) {
+                    int32_t baseReg = inst->operands[0].value.reg;
+                    for (int32_t i = 1; i < retCount; ++i) {
+                        NewVersion(baseReg + i);
+                    }
+                }
+            } else if (inst->operation == LiftedOperation::GETVARARGS) {
+                int32_t count = inst->operands[1].value.imm.n;
+                if (count > 1) {
+                    int32_t baseReg = inst->operands[0].value.reg;
+                    for (int32_t i = 1; i < count; ++i) {
+                        NewVersion(baseReg + i);
+                    }
+                }
+            }
         }
     }
 

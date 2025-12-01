@@ -3,6 +3,8 @@
 //
 #include "Decompiler.hpp"
 
+#include "IRLifter.hpp"
+
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -202,6 +204,8 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
         std::println("Generated cfg.dot, use graph_generator to turn it into viewable .svg");
     }
 
+    IRLifter lifter(&controlFlowAnalyzedFunction);
+    lifter.Lift();
     if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown) {
         std::println(
             "Decompilation Breakdown:\n\t"

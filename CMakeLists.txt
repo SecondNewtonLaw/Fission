@@ -195,6 +195,13 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/include/SSABuilder.hpp
         Fission.Decompiler/src/SSABuilder.cpp
         Fission.Decompiler/src/Decompiler.cpp
+        Fission.Decompiler/include/SourceGenerator/Generator.hpp
+        Fission.Decompiler/include/AbstractSyntaxTree/ASTNode.hpp
+        Fission.Decompiler/include/IRLifter.hpp
+        Fission.Decompiler/include/AbstractSyntaxTree/Nodes/RootNode.hpp
+        Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
+        Fission.Decompiler/include/AbstractSyntaxTree/Nodes/FunctionDeclarationNode.hpp
+        Fission.Decompiler/include/AbstractSyntaxTree/Nodes/CommentNode.hpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)

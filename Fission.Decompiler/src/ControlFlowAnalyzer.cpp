@@ -58,16 +58,11 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
         // case LiftedOperation::FORGPREP_NEXT:
         //     return lpInstruction->operands[1].value.imm.n + 2;
 
-    case LiftedOperation::JUMPIF:
-    case LiftedOperation::JUMPIFNOT:
-        return lpInstruction->operands[1].value.imm.n;
-
     case LiftedOperation::FORGPREP:
     case LiftedOperation::FORGPREP_INEXT:
     case LiftedOperation::FORGPREP_NEXT:
     case LiftedOperation::FORNPREP:
-        return lpInstruction->operands[1].value.imm.n + 1; // PREP instructions go to LOOP instructions, as they'll not be executed. This, however, complicates
-                                                           // analysis. For now shove them to the instruction AFTER.
+        return lpInstruction->operands[1].value.imm.n;
 
     case LiftedOperation::FORNLOOP:
     case LiftedOperation::FORGLOOP:
@@ -76,6 +71,8 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
     case LiftedOperation::JUMPXEQK:
         return lpInstruction->operands[1].value.imm.n;
 
+    case LiftedOperation::JUMPIF:
+    case LiftedOperation::JUMPIFNOT:
     case LiftedOperation::JUMPIFEQ:
     case LiftedOperation::JUMPIFNOTEQ:
     case LiftedOperation::JUMPIFLE:
@@ -294,6 +291,15 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 block.bType = BlockType::IfHeader;
             }
             break;
+
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
+        case LiftedOperation::FORNPREP: {
+            block.bTerminator = BlockTerminator::Conditional;
+            block.bType = BlockType::LoopHeader;
+            break;
+        }
         case LiftedOperation::JUMPIF:
         case LiftedOperation::JUMPIFNOT:
         case LiftedOperation::JUMPIFEQ:
@@ -302,11 +308,6 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::JUMPIFNOTEQ:
         case LiftedOperation::JUMPIFNOTLE:
         case LiftedOperation::JUMPIFNOTLT:
-
-        case LiftedOperation::FORGPREP:
-        case LiftedOperation::FORGPREP_INEXT:
-        case LiftedOperation::FORGPREP_NEXT:
-        case LiftedOperation::FORNPREP:
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             block.bTerminator = BlockTerminator::Conditional;
@@ -495,6 +496,45 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
     // has no FORXPREP instruction) for ... do end structures perform a FORXLOOP instruction at the end, before jumping if succeeding to repeat at the
     // instruction after a FORXPREP instruction.
 
+    // recognizing FOR loops.
+    for (BasicBlock &block : blocks) {
+        if (block.bType != BlockType::LoopHeader)
+            continue;
+
+        if (block.lpTail != block.lpHead ||
+            (block.lpTail->operation != LiftedOperation::FORNPREP && block.lpTail->operation != LiftedOperation::FORGPREP_INEXT &&
+             block.lpTail->operation != LiftedOperation::FORGPREP && block.lpTail->operation != LiftedOperation::FORGPREP_NEXT))
+            continue; // not supported by this pass.
+
+        for (uint32_t succId : block.successors) {
+            // we realistically do not care about dominance.
+            // we have the guarantee that FORXLOOP instructions will be after a loop header that we know is a FORXPREP and is an only instruction.
+
+            auto &successor = blocks.at(succId);
+            if (successor.lpTail != successor.lpHead ||
+                (successor.lpTail->operation != LiftedOperation::FORNLOOP && successor.lpTail->operation != LiftedOperation::FORGLOOP))
+                continue; // not target
+
+            auto loopFlag = LoopBlockFlags::WhileLoop;
+
+            auto checkTarget = block.lpTail;
+
+            if (checkTarget->operation == LiftedOperation::FORGPREP_INEXT) {
+                loopFlag = LoopBlockFlags::ForGeneralLoop_Indexed;
+            } else if (checkTarget->operation == LiftedOperation::FORGPREP_NEXT) {
+                loopFlag = LoopBlockFlags::ForGeneralLoop_Pairs;
+            } else if (checkTarget->operation == LiftedOperation::FORGPREP) {
+                loopFlag = LoopBlockFlags::ForGeneralLoop;
+            } else if (checkTarget->operation == LiftedOperation::FORNPREP) {
+                loopFlag = LoopBlockFlags::ForNumericLoop;
+            }
+
+            if (loopFlag != LoopBlockFlags::WhileLoop) {
+                block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+                successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+            }
+        }
+    }
     for (BasicBlock &block : blocks) {
         if (block.bType != BlockType::LoopLatch)
             continue; // we only need loop latches to fix the determination and mark the loop type.
@@ -503,43 +543,6 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
             if (succ == block.dwBlockId || dominates(succ, block.dwBlockId)) {
                 auto &successor = blocks.at(succ);
                 // conditional jump.
-
-                if (block.lpTail == block.lpHead) {
-                    // FORNLOOP AND FORGLOOP specials.
-                    auto loopFlag = LoopBlockFlags::WhileLoop;
-
-                    auto checkTarget = successor.lpHead;
-
-                    if (block.lpTail->operands.size() != 2) {
-                        checkTarget = block.lpTail + GetJumpOffset(block.lpTail);
-                        // NEXT/INEXT
-                    } else {
-                        if (block.lpTail->operation == LiftedOperation::FORGLOOP || block.lpTail->operation == LiftedOperation::FORNLOOP)
-                            checkTarget--;
-
-                        if (successor.predecessors.size() == 1) {
-                            // climb to successor, which is more reliable than what's previous to this code. FORXPREP instructions are isolated to their own
-                            // block, which is the only way to jump into this loop.
-                            checkTarget = blocks.at(successor.predecessors[0]).lpTail;
-                        }
-                    }
-
-                    if (checkTarget->operation == LiftedOperation::FORGPREP_INEXT) {
-                        loopFlag = LoopBlockFlags::ForGeneralLoop_Indexed;
-                    } else if (checkTarget->operation == LiftedOperation::FORGPREP_NEXT) {
-                        loopFlag = LoopBlockFlags::ForGeneralLoop_Pairs;
-                    } else if (checkTarget->operation == LiftedOperation::FORGPREP) {
-                        loopFlag = LoopBlockFlags::ForGeneralLoop;
-                    } else if (checkTarget->operation == LiftedOperation::FORNPREP) {
-                        loopFlag = LoopBlockFlags::ForNumericLoop;
-                    }
-
-                    if (loopFlag != LoopBlockFlags::WhileLoop) {
-                        block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
-                        successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
-                        continue;
-                    }
-                }
 
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
                 if (this->IsConditional(targetInstruction->operation) || block.lpTail->operation == LiftedOperation::JUMP) {
@@ -775,13 +778,6 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
             if (current < func->instructions.data() || current >= func->instructions.data() + func->instructions.size()) {
                 ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"RED\">(Ptr Error)</FONT></TD></TR>";
                 break;
-            }
-
-            if (current->operation == LiftedOperation::NOP) {
-                if (current == block.lpTail)
-                    break;
-                current++;
-                continue;
             }
 
             std::stringstream line;
