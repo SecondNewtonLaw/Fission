@@ -4,6 +4,8 @@
 
 #include "ControlFlowAnalyzer.hpp"
 
+#include "DenominatorAnalysis.hpp"
+
 bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     switch (operation) {
     case LiftedOperation::JUMP:
@@ -34,6 +36,7 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     case LiftedOperation::FORGPREP_NEXT:
     case LiftedOperation::FORGPREP:
     case LiftedOperation::FORNPREP:
+        return true;
     default:
         return false;
     }
@@ -59,18 +62,27 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
     case LiftedOperation::JUMPIFNOT:
         return lpInstruction->operands[1].value.imm.n;
 
+    case LiftedOperation::FORGPREP:
+    case LiftedOperation::FORGPREP_INEXT:
+    case LiftedOperation::FORGPREP_NEXT:
+    case LiftedOperation::FORNPREP:
+        return lpInstruction->operands[1].value.imm.n + 1; // PREP instructions go to LOOP instructions, as they'll not be executed. This, however, complicates
+                                                           // analysis. For now shove them to the instruction AFTER.
+
     case LiftedOperation::FORNLOOP:
     case LiftedOperation::FORGLOOP:
         return lpInstruction->operands[1].value.imm.n;
 
     case LiftedOperation::JUMPXEQK:
-    case LiftedOperation::JUMPIFEQ:
-    case LiftedOperation::JUMPIFLE:
-    case LiftedOperation::JUMPIFLT:
-    case LiftedOperation::JUMPIFNOTEQ:
-    case LiftedOperation::JUMPIFNOTLE:
-    case LiftedOperation::JUMPIFNOTLT:
         return lpInstruction->operands[1].value.imm.n;
+
+    case LiftedOperation::JUMPIFEQ:
+    case LiftedOperation::JUMPIFNOTEQ:
+    case LiftedOperation::JUMPIFLE:
+    case LiftedOperation::JUMPIFNOTLE:
+    case LiftedOperation::JUMPIFLT:
+    case LiftedOperation::JUMPIFNOTLT:
+        return lpInstruction->operands[1].value.imm.n + 1;
 
     default:
         return 0;
@@ -183,6 +195,15 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         if (this->IsTerminator(instruction->operation)) {
             if (currentIndex + 1 < totalInstructions)
                 leaderIndexes.insert(currentIndex + 1);
+
+            // FORNLOOP/FORGLOOP always means a new block.
+            // logic may jump to them for branching and control-flow such as loop skipping.
+            if (instruction->operation == LiftedOperation::FORNLOOP || instruction->operation == LiftedOperation::FORGLOOP ||
+                instruction->operation == LiftedOperation::FORNPREP || instruction->operation == LiftedOperation::FORGPREP ||
+                instruction->operation == LiftedOperation::FORGPREP_INEXT || instruction->operation == LiftedOperation::FORGPREP_NEXT) {
+                leaderIndexes.insert(currentIndex);
+            }
+
             if (instruction->operation != LiftedOperation::RETURN) {
                 const int32_t offset = GetJumpOffset(instruction);
                 int64_t targetIndex = static_cast<int64_t>(currentIndex) + offset;
@@ -212,27 +233,11 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         block.lpHead = &lpLiftedFunction->instructions[startIndex];
         block.lpTail = &lpLiftedFunction->instructions[endIndex];
 
-        LiftedInstruction *headInst = block.lpHead;
         LiftedInstruction *tailInst = block.lpTail;
 
         block.bType = BlockType::Standard;
 
         // TODO: FIGURE OUT WHY FORXPREP INSTRUCTIONS ARE BEING USED AS BLOCK TERMINATORS, CAUSING FORXLOOP INSTRUCTIONS TO BREAK!
-
-        switch (headInst->operation) {
-        case LiftedOperation::FORNPREP:
-        case LiftedOperation::FORGPREP: {
-            ASSERT(block.lpHead != block.lpTail, "block.lpHead == block.lpTail");
-            // we must modify the previous block to insert ourselves, as this instruction is for preparing the loop and if necessary skipping it.
-            basicBlocks.back().lpTail++; // incr tail.
-            block.lpHead++;
-            block.bTerminator = BlockTerminator::Conditional;
-            block.bType = BlockType::LoopHeader;
-            break;
-        }
-        default:
-            break;
-        }
 
         switch (tailInst->operation) {
         case LiftedOperation::JUMP: {
@@ -297,6 +302,11 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::JUMPIFNOTEQ:
         case LiftedOperation::JUMPIFNOTLE:
         case LiftedOperation::JUMPIFNOTLT:
+
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
+        case LiftedOperation::FORNPREP:
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             block.bTerminator = BlockTerminator::Conditional;
@@ -304,14 +314,15 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 if (GetJumpOffset(tailInst) < 0) {
                     block.bType = BlockType::LoopLatch;
                 }
+                break;
             }
 
-            if ((tailInst + (GetJumpOffset(tailInst) + 1))->operation == LiftedOperation::JUMP ||
-                (tailInst + (GetJumpOffset(tailInst) + 1))->operation == LiftedOperation::LOADNJUMP) {
+            if ((tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::JUMP ||
+                (tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::LOADNJUMP) {
                 // this likely means this belongs to a break instruction from a loop.
                 block.bType = BlockType::Break;
+                break;
             }
-
             break;
         case LiftedOperation::RETURN:
             block.bTerminator = BlockTerminator::Return;
@@ -336,7 +347,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
     return AnalyzedFunction{lpLiftedFunction, basicBlocks, subfuncs};
 }
 
-void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
+void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks) {
     bool changed = true;
     while (changed) {
         changed = false;
@@ -347,8 +358,9 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
 
             bool isEmpty = true;
             for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
-                if ((inst->operation != LiftedOperation::NOP && !IsTerminator(inst->operation)) || inst->operation == LiftedOperation::JUMP ||
-                    inst->operation == LiftedOperation::LOADNJUMP) {
+                if (((inst->operation != LiftedOperation::NOP && !IsTerminator(inst->operation)) || inst->operation == LiftedOperation::JUMP ||
+                     inst->operation == LiftedOperation::LOADNJUMP) ||
+                    inst->operation == LiftedOperation::FORNLOOP || inst->operation == LiftedOperation::FORGLOOP) {
                     isEmpty = false; // meaningful operations present.
                     break;
                 }
@@ -407,11 +419,195 @@ void ControlFlowAnalyzer::OptimiseGraph(std::vector<BasicBlock> &blocks) {
         }
     }
 }
+bool ControlFlowAnalyzer::IsConditional(LiftedOperation operation) {
+    switch (operation) {
+    case LiftedOperation::JUMPIF:
+    case LiftedOperation::JUMPIFNOT:
+    case LiftedOperation::JUMPIFEQ:
+    case LiftedOperation::JUMPIFLE:
+    case LiftedOperation::JUMPIFLT:
+    case LiftedOperation::JUMPIFNOTEQ:
+    case LiftedOperation::JUMPIFNOTLE:
+    case LiftedOperation::JUMPIFNOTLT:
+    case LiftedOperation::JUMPXEQK:
+        return true;
+
+    case LiftedOperation::FORGPREP:
+    case LiftedOperation::FORGPREP_INEXT:
+    case LiftedOperation::FORGPREP_NEXT:
+    case LiftedOperation::FORNPREP:
+    case LiftedOperation::FORNLOOP:
+    case LiftedOperation::FORGLOOP:
+        return true;
+    default:
+        return false;
+    }
+}
+
+void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func) {
+    auto &blocks = func.basicBlocks;
+    if (blocks.empty())
+        return;
+
+    const auto domInfo = AnalyzeDenominators(func);
+
+    auto dominates = [&](int32_t header, int32_t latchCandidate) -> bool {
+        int32_t cur = latchCandidate;
+        while (cur != -1) {
+            if (cur == header)
+                return true;
+            auto it = domInfo.find(cur);
+            if (it == domInfo.end())
+                return false;
+            cur = it->second.idom;
+        }
+        return false;
+    };
+
+    for (BasicBlock &block : blocks) {
+        if (block.bType == BlockType::Dead || block.bType == BlockType::Error)
+            continue;
+
+        for (uint32_t succ : block.successors) {
+            if (succ == block.dwBlockId || dominates(succ, block.dwBlockId)) {
+                blocks[succ].bType = BlockType::LoopHeader;
+
+                if (block.bType != BlockType::Return)
+                    block.bType = BlockType::LoopLatch;
+            }
+        }
+    }
+
+    for (BasicBlock &block : blocks) {
+        if (block.bType == BlockType::IfHeader) {
+            for (int32_t pred : block.predecessors) {
+                if (dominates(block.dwBlockId, pred)) {
+                    block.bType = BlockType::LoopHeader;
+                    break;
+                }
+            }
+        }
+    }
+
+    // during the previous phases we have cleaned up lots of room for identifying the loop structures truly.
+    // while n do ... end structures perform their jump to a comparison instruction that jumps out of the loop.
+    // repeat ... until n structures perform a comparison at the end, before jumping to a NON comparison instruction at the start of the body of the loop (which
+    // has no FORXPREP instruction) for ... do end structures perform a FORXLOOP instruction at the end, before jumping if succeeding to repeat at the
+    // instruction after a FORXPREP instruction.
+
+    for (BasicBlock &block : blocks) {
+        if (block.bType != BlockType::LoopLatch)
+            continue; // we only need loop latches to fix the determination and mark the loop type.
+
+        for (uint32_t succ : block.successors) {
+            if (succ == block.dwBlockId || dominates(succ, block.dwBlockId)) {
+                auto &successor = blocks.at(succ);
+                // conditional jump.
+
+                if (block.lpTail == block.lpHead) {
+                    // FORNLOOP AND FORGLOOP specials.
+                    auto loopFlag = LoopBlockFlags::WhileLoop;
+
+                    auto checkTarget = successor.lpHead;
+
+                    if (block.lpTail->operands.size() != 2) {
+                        checkTarget = block.lpTail + GetJumpOffset(block.lpTail);
+                        // NEXT/INEXT
+                    } else {
+                        if (block.lpTail->operation == LiftedOperation::FORGLOOP || block.lpTail->operation == LiftedOperation::FORNLOOP)
+                            checkTarget--;
+
+                        if (successor.predecessors.size() == 1) {
+                            // climb to successor, which is more reliable than what's previous to this code. FORXPREP instructions are isolated to their own
+                            // block, which is the only way to jump into this loop.
+                            checkTarget = blocks.at(successor.predecessors[0]).lpTail;
+                        }
+                    }
+
+                    if (checkTarget->operation == LiftedOperation::FORGPREP_INEXT) {
+                        loopFlag = LoopBlockFlags::ForGeneralLoop_Indexed;
+                    } else if (checkTarget->operation == LiftedOperation::FORGPREP_NEXT) {
+                        loopFlag = LoopBlockFlags::ForGeneralLoop_Pairs;
+                    } else if (checkTarget->operation == LiftedOperation::FORGPREP) {
+                        loopFlag = LoopBlockFlags::ForGeneralLoop;
+                    } else if (checkTarget->operation == LiftedOperation::FORNPREP) {
+                        loopFlag = LoopBlockFlags::ForNumericLoop;
+                    }
+
+                    if (loopFlag != LoopBlockFlags::WhileLoop) {
+                        block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+                        successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+                        continue;
+                    }
+                }
+
+                auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
+                if (this->IsConditional(targetInstruction->operation) || block.lpTail->operation == LiftedOperation::JUMP) {
+                    // conditional. This is a while n do end loop!
+                    if (block.lpTail->operation == LiftedOperation::JUMP) {
+                        block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                        successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                    }
+                } else {
+                    auto lpPreHead = (targetInstruction - 1);
+                    if (lpPreHead->operation == LiftedOperation::FORNPREP || lpPreHead->operation == LiftedOperation::FORGPREP ||
+                        lpPreHead->operation == LiftedOperation::FORGPREP_NEXT || lpPreHead->operation == LiftedOperation::FORGPREP_NEXT) {
+                        auto flags = LoopBlockFlags::WhileLoop;
+                        if (lpPreHead->operation == LiftedOperation::FORGPREP_INEXT) {
+                            flags = LoopBlockFlags::ForGeneralLoop_Indexed;
+                        } else if (lpPreHead->operation == LiftedOperation::FORGPREP_NEXT) {
+                            flags = LoopBlockFlags::ForGeneralLoop_Pairs;
+                        } else if (lpPreHead->operation == LiftedOperation::FORGPREP) {
+                            flags = LoopBlockFlags::ForGeneralLoop;
+                        } else if (lpPreHead->operation == LiftedOperation::FORNPREP) {
+                            flags = LoopBlockFlags::ForNumericLoop;
+                        }
+
+                        ASSERT(flags != LoopBlockFlags::WhileLoop, "Impossible.");
+
+                        block.dwBlockFlags |= static_cast<uint32_t>(flags);
+                        successor.dwBlockFlags |= static_cast<uint32_t>(flags);
+                    } else {
+                        block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                        successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                    }
+                }
+            }
+        }
+    }
+}
+
+void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
+    std::vector<bool> reachable(blocks.size(), false);
+    std::queue<int32_t> qq;
+    qq.push(0);
+    reachable[0] = true;
+
+    while (!qq.empty()) {
+        const int32_t id = qq.front();
+        qq.pop();
+        for (int32_t succ : blocks[id].successors) {
+            if (!reachable[succ]) {
+                reachable[succ] = true;
+                qq.push(succ);
+            }
+        }
+    }
+
+    for (size_t i = 0; i < blocks.size(); ++i) {
+        if (!reachable[i]) {
+            blocks[i].bType = BlockType::Dead;
+            blocks[i].successors.clear();
+            for (auto &b : blocks) {
+                std::erase(b.predecessors, i);
+                std::erase(b.successors, i);
+            }
+        }
+    }
+}
 
 void ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func) {
     this->LinkBasicBlocks(func.basicBlocks);
-    this->OptimiseGraph(func.basicBlocks);
-    this->PruneUnreachableBlocks(func.basicBlocks);
     for (auto &sub : func.innerFunctions) {
         this->DetermineBasicBlocksInternalAdvanced(sub);
     }
@@ -421,6 +617,24 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocks(LiftedFunction *lpLif
     auto analyzed = DetermineBasicBlocksInternal(lpLiftedFunction);
     DetermineBasicBlocksInternalAdvanced(analyzed);
     return analyzed;
+}
+
+void ControlFlowAnalyzer::OptimizeGraph(AnalyzedFunction &func) {
+    this->OptimiseGraphInternal(func.basicBlocks);
+    for (auto &f : func.innerFunctions)
+        this->OptimizeGraph(f);
+}
+
+void ControlFlowAnalyzer::PruneUnreachable(AnalyzedFunction &func) {
+    this->PruneUnreachableBlocks(func.basicBlocks);
+    for (auto &f : func.innerFunctions)
+        this->PruneUnreachable(f);
+}
+
+void ControlFlowAnalyzer::IdentifyStructures(AnalyzedFunction &func) {
+    this->IdentifyLoopStructuresInternal(func);
+    for (auto &f : func.innerFunctions)
+        this->IdentifyStructures(f);
 }
 
 std::string GraphVisualizer::EscapeHtml(const std::string &str) {
@@ -511,7 +725,25 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
 
     ss << "<TABLE BORDER=\"1\" CELLBORDER=\"0\" CELLSPACING=\"0\" CELLPADDING=\"4\">";
 
-    ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><B>BLOCK " << block.dwBlockId << " [" << BlockTypeToString(block.bType) << "]</B>";
+    std::string spec = "";
+
+    if (block.bType == BlockType::LoopHeader || block.bType == BlockType::LoopLatch) {
+        if ((block.dwBlockFlags & LoopBlockFlags::ForGeneralLoop) == LoopBlockFlags::ForGeneralLoop) {
+            spec = "/For Loop (General Form)";
+        } else if ((block.dwBlockFlags & LoopBlockFlags::ForGeneralLoop_Indexed) == LoopBlockFlags::ForGeneralLoop_Indexed) {
+            spec = "/For Loop (Indexed Next Form)";
+        } else if ((block.dwBlockFlags & LoopBlockFlags::ForGeneralLoop_Pairs) == LoopBlockFlags::ForGeneralLoop_Pairs) {
+            spec = "/For Loop (Next Form)";
+        } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
+            spec = "/For Loop (Numeric Form)";
+        } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
+            spec = "/while structure";
+        } else {
+            spec = "/unrecognized structure";
+        }
+    }
+
+    ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><B>BLOCK " << block.dwBlockId << " [" << BlockTypeToString(block.bType) << spec << "]</B>";
     if (block.bTerminator == BlockTerminator::Conditional)
         ss << " (Cond)";
     else if (block.bTerminator == BlockTerminator::Unconditional)
@@ -590,7 +822,7 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
     dot << "        style=filled; color=lightgrey; node [style=filled,color=white];\n";
 
     for (const auto &block : func.basicBlocks) {
-        if (block.bType == BlockType::Dead || block.bType == BlockType::Error)
+        if (block.bType == BlockType::Error)
             continue;
 
         std::string uniqueNodeId = std::format("{}_BLK_{}", funcPrefix, block.dwBlockId);

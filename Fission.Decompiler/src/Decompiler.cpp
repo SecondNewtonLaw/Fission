@@ -155,7 +155,20 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     const auto bytecodeLiftEnd = std::chrono::steady_clock::now();
 
     const auto controlFlowAnalyzeStart = std::chrono::steady_clock::now();
+    const auto basicBlockIdentificationStart = std::chrono::steady_clock::now();
     auto controlFlowAnalyzedFunction = controlFlowAnalyzer.DetermineBasicBlocks(&liftedBytecode);
+    const auto basicBlockIdentificationEnd = std::chrono::steady_clock::now();
+
+    const auto optimizeGraphStart = std::chrono::steady_clock::now();
+    controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
+    const auto optimizeGraphEnd = std::chrono::steady_clock::now();
+
+    const auto unreachablePruningStart = std::chrono::steady_clock::now();
+    controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
+    const auto unreachablePruningEnd = std::chrono::steady_clock::now();
+
+    const auto identifyLoopStructuresStart = std::chrono::steady_clock::now();
+    controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
     const auto controlFlowAnalyzeEnd = std::chrono::steady_clock::now();
 
     const auto ssaStart = std::chrono::steady_clock::now();
@@ -191,10 +204,21 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
 
     if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown) {
         std::println(
-            "Decompilation Breakdown:\n\tDeserializing Bytecode: {}s\n\tLifting into IR: {}s\n\tControl Flow Analysis: {}s\n\tIR -> SSA Form: "
-            "{}s\n\tOptimization: {}s",
-            std::chrono::duration<float>(deserializeEnd - deserializeStart).count(), std::chrono::duration<float>(bytecodeLiftEnd - bytecodeLiftStart).count(),
-            std::chrono::duration<float>(controlFlowAnalyzeEnd - controlFlowAnalyzeStart).count(), std::chrono::duration<float>(ssaEnd - ssaStart).count(), 0
+            "Decompilation Breakdown:\n\t"
+            "Deserializing Bytecode: {}\n\t"
+            "Lifting into IR: {}\n\t"
+            "Control Flow Analysis: {}\n\t"
+            "\tDetermining Basic Blocks: {}\n\t"
+            "\tGraph Optimization: {}\n\t"
+            "\tBlock Pruning: {}\n\t"
+            "\tStructure Identification: {}\n\t"
+            "IR -> SSA Form: {}\n\t"
+            "Optimization: {}s",
+            std::chrono::duration<float>(deserializeEnd - deserializeStart), std::chrono::duration<float>(bytecodeLiftEnd - bytecodeLiftStart),
+            std::chrono::duration<float>(controlFlowAnalyzeEnd - controlFlowAnalyzeStart),
+            std::chrono::duration<float>(basicBlockIdentificationEnd - basicBlockIdentificationStart),
+            std::chrono::duration<float>(optimizeGraphEnd - optimizeGraphStart), std::chrono::duration<float>(unreachablePruningEnd - unreachablePruningStart),
+            std::chrono::duration<float>(controlFlowAnalyzeEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart), 0
         );
     }
 

@@ -626,10 +626,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             } else {
                 instr.operands[0].value.imm.n = instruction.GetD();
             }
-
-            if (instr.operands[0].value.imm.n < 0) {
-                instr.comment = "INFO: JUMP instruction jumps into a negative offset, likely involved in a loop!";
-            }
+            if (opCode == LOP_JUMPBACK)
+                instr.operands[0].value.imm.n++;
+            instr.comment = std::format("INFO: Jump PC to {}", currentIndex + instr.operands[0].value.imm.n);
 
             if (opCode == LOP_JUMPBACK) { // Jump back leaks information that the next instruction following it is actually the beginning of a loop. Jumpback
                                           // signifies the end of the loop. Thanks compiler.

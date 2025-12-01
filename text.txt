@@ -1,23 +1,110 @@
-local function u(T, Z)
-    local x = 1
+-- Comprehensive loop test function for Luau decompiler CFG/SSA loop identification
+-- Includes every major loop type that produces distinct bytecode patterns:
+--   • while (pre-tested)
+--   • repeat-until (post-tested)
+--   • numeric for (ascending, descending, step, skipped loop)
+--   • generic for with pairs
+--   • generic for with ipairs (uses INEXT internally)
+--   • generic for with raw next()
+--   • infinite loops (while true, repeat with until false)
+--   • nested loops
+--   • loops with break / continue (via goto, the only real continue in Luau)
 
-    for k = 7, 0, -1.0 do
-        local j = Z / _IMPORTED_P[k] % 2
-        j = j - j % 1
+local function testAllLoopTypes()
+    -- 1. Classic while loop (pre-tested, header = condition)
+    local i = 0
+    while i < 10 do
+        i += 1
+    end
 
-        local Z_result = _IMPORTED_D(T, x + j * 256 + 256)
-
-        x = x * 2 + Z_result
-
-        if j ~= Z_result then
-            while x < 0x100 do -- x held in R8.
-                if x == 5 then
-                    x = x * 2 + D(T, x)
-                end
-            end
+    -- 2. While loop with break
+    i = 0
+    while true do
+        i += 1
+        if i >= 5 then
             break
         end
     end
 
-    return x % 256
+    -- 3. While loop with continue (via goto)
+    i = 0
+    while i < 10 do
+        i += 1
+        if i % 2 == 0 then
+            continue
+        end
+        print("odd:", i)
+    end
+
+    -- 4. Repeat-until loop (post-tested, latch = condition)
+    i = 0
+    repeat
+        i += 1
+    until i >= 10
+
+    -- 5. Repeat-until that runs forever (until false)
+    --[[
+    repeat
+        task.wait(1)
+    until false
+    --]]
+
+    -- 6. Numeric for loop - ascending
+    for j = 1, 10 do
+        local x = j * 2
+    end
+
+    -- 7. Numeric for loop - descending
+    for j = 10, 1, -1 do
+        local x = j
+    end
+
+    -- 8. Numeric for loop - with step > 1
+    for j = 0, 100, 15 do
+        local x = j
+    end
+
+    -- 9. Numeric for loop that is skipped entirely (init > limit)
+    for j = 10, 1 do
+        error("this should never run")
+    end
+
+    -- 10. Generic for - pairs()
+    local tbl = {a = 1, b = 2, c = 3}
+    for k, v in pairs(tbl) do
+        local x = k .. ":" .. v
+    end
+
+    -- 11. Generic for - ipairs()
+    local arr = {"x", "y", "z"}
+    for idx, val in ipairs(arr) do
+        local x = idx .. val
+    end
+
+    -- 12. Generic for - raw next() (same as pairs but explicit)
+    for k, v in next, tbl do
+        local y = k .. v
+    end
+
+    -- 13. Nested loops (outer numeric, inner while)
+    for a = 1, 3 do
+        local b = 0
+        while b < 4 do
+            b += 1
+            local nested = a * 10 + b
+        end
+    end
+
+    -- 14. Nested loops (outer repeat, inner numeric)
+    local outer = 0
+    repeat
+        outer += 1
+        for inner = 1, outer do
+            local prod = outer * inner
+        end
+    until outer >= 5
+
+    print("All loop types tested successfully")
 end
+
+return testAllLoopTypes

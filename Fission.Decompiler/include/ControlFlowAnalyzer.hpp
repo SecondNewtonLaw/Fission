@@ -8,6 +8,7 @@
 #include "BytecodeLifter.hpp"
 
 #include <map>
+#include <queue>
 #include <sstream>
 
 enum class BlockType {
@@ -34,8 +35,41 @@ enum class BlockTerminator {
     Error
 };
 
+enum class LoopBlockFlags {
+    WhileLoop = 1 << 1,
+    ForNumericLoop = 1 << 2,
+    ForGeneralLoop = 1 << 3,
+    ForGeneralLoop_Pairs = 1 << 4,
+    ForGeneralLoop_Indexed = 1 << 5
+};
+
+constexpr LoopBlockFlags operator|(LoopBlockFlags lhs, LoopBlockFlags rhs) {
+    return static_cast<LoopBlockFlags>(static_cast<uint32_t>(lhs) | static_cast<uint32_t>(rhs));
+}
+
+constexpr LoopBlockFlags operator&(uint32_t lhs, LoopBlockFlags rhs) {
+    return static_cast<LoopBlockFlags>(static_cast<uint32_t>(lhs) & static_cast<uint32_t>(rhs));
+}
+
+constexpr LoopBlockFlags operator&(LoopBlockFlags lhs, LoopBlockFlags rhs) {
+    return static_cast<LoopBlockFlags>(static_cast<uint32_t>(lhs) & static_cast<uint32_t>(rhs));
+}
+
+constexpr LoopBlockFlags operator~(LoopBlockFlags flag) { return static_cast<LoopBlockFlags>(~static_cast<uint32_t>(flag)); }
+
+inline LoopBlockFlags &operator|=(LoopBlockFlags &lhs, LoopBlockFlags rhs) {
+    lhs = lhs | rhs;
+    return lhs;
+}
+
+inline LoopBlockFlags &operator&=(LoopBlockFlags &lhs, LoopBlockFlags rhs) {
+    lhs = lhs & rhs;
+    return lhs;
+}
+
 struct BasicBlock {
     std::uint32_t dwBlockId = 0x0;
+    std::uint32_t dwBlockFlags = 0x0;
     BlockType bType = BlockType::Error;
     BlockTerminator bTerminator = BlockTerminator::Error;
     LiftedInstruction *lpHead = nullptr;
@@ -107,51 +141,28 @@ class ControlFlowAnalyzer {
 
     AnalyzedFunction DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction);
 
-    void OptimiseGraph(std::vector<BasicBlock> &blocks);
+    void OptimiseGraphInternal(std::vector<BasicBlock> &blocks);
 
-    void PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
-        if (blocks.empty())
-            return;
+    bool IsConditional(LiftedOperation operation);
+    void IdentifyLoopStructuresInternal(AnalyzedFunction &func);
 
-        std::set<int32_t> reachable;
-        std::vector<int32_t> worklist;
+    void PruneUnreachableBlocks(std::vector<BasicBlock> &blocks);
 
-        worklist.push_back(0);
-        reachable.insert(0);
-
-        size_t head = 0;
-        while (head < worklist.size()) {
-            int32_t currentId = worklist[head++];
-            const BasicBlock &currentBlock = blocks[currentId];
-
-            for (int32_t succId : currentBlock.successors) {
-                if (!reachable.contains(succId)) {
-                    reachable.insert(succId);
-                    worklist.push_back(succId);
-                }
-            }
-        }
-
-        for (auto &block : blocks) {
-            if (!reachable.contains(block.dwBlockId)) {
-                block.bType = BlockType::Dead;
-            }
-        }
-    }
-
-    void DetermineBasicBlocksInternalAdvanced(AnalyzedFunction&func);
+    void DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func);
 
   public:
     ControlFlowAnalyzer() = default;
 
     AnalyzedFunction DetermineBasicBlocks(LiftedFunction *lpLiftedFunction);
+
+    void OptimizeGraph(AnalyzedFunction &func);
+
+    void PruneUnreachable(AnalyzedFunction &func);
+
+    void IdentifyStructures(AnalyzedFunction &func);
 };
 
-enum class GraphContent : uint8_t {
-    IROnly,
-    SSAOnly,
-    Both
-};
+enum class GraphContent : uint8_t { IROnly, SSAOnly, Both };
 
 class GraphVisualizer {
     static std::string EscapeHtml(const std::string &str);
