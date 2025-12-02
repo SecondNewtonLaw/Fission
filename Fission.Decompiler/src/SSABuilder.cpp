@@ -39,9 +39,9 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
         return AccessType::Read;
 
     case LiftedOperation::CALL:
-        if (operandIndex == 0)
+        if ((op.operands.at(/* retn pos */ 2).value.imm.n - 1u) >= operandIndex)
             return AccessType::ReadWrite;
-        return AccessType::Read;
+        return AccessType::Read; // RO.
 
     case LiftedOperation::LOAD:
     case LiftedOperation::LOADNJUMP:
@@ -219,8 +219,10 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
-                    op.ssaVersion = NewVersion(op.value.reg);
-                    pushedCount[op.value.reg]++;
+                    if (mode == AccessType::Write) {
+                        op.ssaVersion = NewVersion(op.value.reg);
+                        pushedCount[op.value.reg]++;
+                    }
                 }
             }
 
