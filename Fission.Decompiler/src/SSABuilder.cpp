@@ -203,7 +203,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
-                    if (op.ssaVersion == -1) {
+                    if (CurrentVersion(op.value.reg) == -1 /* init reg here, not based on insn version, else we will push an extra reg */) {
                         op.ssaVersion = NewVersion(op.value.reg);
                         pushedCount[op.value.reg]++;
                     } else {
