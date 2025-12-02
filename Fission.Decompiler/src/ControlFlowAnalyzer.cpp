@@ -37,6 +37,9 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     case LiftedOperation::FORGPREP:
     case LiftedOperation::FORNPREP:
         return true;
+
+    case LiftedOperation::PREPVARARGS:
+        return true;
     default:
         return false;
     }
@@ -58,11 +61,12 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
         // case LiftedOperation::FORGPREP_NEXT:
         //     return lpInstruction->operands[1].value.imm.n + 2;
 
+    case LiftedOperation::FORNPREP:
+        return lpInstruction->operands[1].value.imm.n;
     case LiftedOperation::FORGPREP:
     case LiftedOperation::FORGPREP_INEXT:
     case LiftedOperation::FORGPREP_NEXT:
-    case LiftedOperation::FORNPREP:
-        return lpInstruction->operands[1].value.imm.n;
+        return lpInstruction->operands[1].value.imm.n + 1;
 
     case LiftedOperation::FORNLOOP:
     case LiftedOperation::FORGLOOP:
@@ -255,7 +259,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             if (tailInst->operands.size() == 2) {
                 // jumpback.
                 auto jmpOffset = GetJumpOffset(tailInst);
-                ASSERT(jmpOffset < 0, "jumpback jumps forward, what the fuck?");
+                ASSERT(jmpOffset <= 0, "jumpback jumps forward, what the fuck?");
 
                 auto whileBeginning =
                     (tailInst +
@@ -308,6 +312,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::JUMPIFNOTEQ:
         case LiftedOperation::JUMPIFNOTLE:
         case LiftedOperation::JUMPIFNOTLT:
+            block.bType = BlockType::IfHeader;
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             block.bTerminator = BlockTerminator::Conditional;
@@ -545,14 +550,13 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
                 // conditional jump.
 
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
-                if (this->IsConditional(targetInstruction->operation) || block.lpTail->operation == LiftedOperation::JUMP) {
+                if (block.lpTail->operation == LiftedOperation::JUMP) {
                     // conditional. This is a while n do end loop!
-                    if (block.lpTail->operation == LiftedOperation::JUMP) {
-                        block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
-                        successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
-                    }
+
+                    block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                    successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                 } else {
-                    auto lpPreHead = (targetInstruction - 1);
+                    auto lpPreHead = targetInstruction;
                     if (lpPreHead->operation == LiftedOperation::FORNPREP || lpPreHead->operation == LiftedOperation::FORGPREP ||
                         lpPreHead->operation == LiftedOperation::FORGPREP_NEXT || lpPreHead->operation == LiftedOperation::FORGPREP_NEXT) {
                         auto flags = LoopBlockFlags::WhileLoop;
@@ -847,7 +851,10 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
 
         std::string srcId = std::format("{}_BLK_{}", funcPrefix, block.dwBlockId);
 
-        bool isFornPrep = (block.lpTail && block.lpTail->operation == LiftedOperation::FORNPREP);
+        bool isFornPrep = (block.lpTail && block.lpTail->operation == LiftedOperation::FORNPREP) ||
+                          (block.lpTail && block.lpTail->operation == LiftedOperation::FORGPREP) ||
+                          (block.lpTail && block.lpTail->operation == LiftedOperation::FORGPREP_NEXT) ||
+                          (block.lpTail && block.lpTail->operation == LiftedOperation::FORGPREP_INEXT);
         bool isFornLoop = (block.lpTail && (block.lpTail->operation == LiftedOperation::FORNLOOP || block.lpTail->operation == LiftedOperation::FORGLOOP));
 
         if (block.bTerminator == BlockTerminator::Conditional) {
