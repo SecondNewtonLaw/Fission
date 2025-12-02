@@ -84,8 +84,8 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
                     stream << ", ";
             }
 
-            if (currentInst->comment)
-                stream << " /* " << *currentInst->comment << " */";
+            if (currentInst->instructionRemarks)
+                stream << " /* " << *currentInst->instructionRemarks << " */";
 
             stream << "\n";
 

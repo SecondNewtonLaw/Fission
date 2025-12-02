@@ -112,7 +112,7 @@ struct LiftedInstruction {
     LiftedOperation operation;
     int32_t instructionIndex;
     std::vector<LiftedOperand> operands{};
-    std::optional<std::string> comment = std::nullopt;
+    std::optional<std::string> instructionRemarks = std::nullopt;
 };
 
 struct LiftedFunction {

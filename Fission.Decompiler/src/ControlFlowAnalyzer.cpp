@@ -795,8 +795,8 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
                     line << ", ";
             }
 
-            if (current->comment) {
-                std::string cmt = *current->comment;
+            if (current->instructionRemarks) {
+                std::string cmt = *current->instructionRemarks;
                 if (cmt.find("INFO: ") == 0)
                     cmt = cmt.substr(6);
                 line << "  <FONT COLOR=\"#005500\">; " << EscapeHtml(cmt) << "</FONT>";
