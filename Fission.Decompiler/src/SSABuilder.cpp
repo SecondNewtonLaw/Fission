@@ -219,10 +219,10 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
-                    if (mode == AccessType::Write) {
+                    //if (mode == AccessType::Write) {
                         op.ssaVersion = NewVersion(op.value.reg);
                         pushedCount[op.value.reg]++;
-                    }
+                    //}
                 }
             }
 
