@@ -88,6 +88,7 @@ class IRLifter {
         func->body = std::make_shared<BlockStatementNode>();
 
         // TODO: lift block by block then compose the high level structure back.
+        return func;
     }
 
   public:
@@ -99,8 +100,8 @@ class IRLifter {
     }
 
     RootNode *Lift() {
-        func->name = std::make_shared<Identifier>(m_lpLifted->name);
-        func->body = std::make_shared<BlockStatementNode>();
+        // func->name = std::make_shared<Identifier>(m_lpLifted->name);
+        // func->body = std::make_shared<BlockStatementNode>();
         auto func = LiftFunction(this->m_lpAnalyzed);
         return &m_Root;
     }
