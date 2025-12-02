@@ -79,6 +79,12 @@ struct BasicBlock {
     std::vector<std::uint32_t> predecessors;
 
     std::vector<LiftedInstruction> phiNodes;
+
+    std::optional<uint32_t> ifStatementTrue;  // if expr then --[[ this ]] end
+    std::optional<uint32_t> ifStatementFalse; // if expr then --[[  ]] else --[[ what we care about ]] end
+
+    std::optional<uint32_t> loopHeader; // contains loop header block idx.
+    std::optional<uint32_t> loopExit;   // contains loop exit block idx.
 };
 
 struct AnalyzedFunction {

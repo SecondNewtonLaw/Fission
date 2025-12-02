@@ -132,8 +132,12 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
                 nextInstructions.push_back((currentBlock.lpTail + 1) + offset);
 
+                currentBlock.loopHeader = GetBlockIdAtInstruction((currentBlock.lpTail + 1) + offset, leaderToBlockId);
+                blocks.at(*currentBlock.loopHeader).loopExit = i; // current block is exit for the loop.
+
                 // fallthrough (else)
                 nextInstructions.push_back(currentBlock.lpTail + 1);
+                currentBlock.loopExit = i /* self */;
                 break;
             }
 
@@ -143,21 +147,31 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
                 auto isNot = currentBlock.lpTail->operands[3].value.imm.b;
 
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
-                if (!isNot) // The condition has to be met.
+                if (!isNot) {
+                    // The condition has to be met.
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
+                }
 
                 // fallthrough (else)
                 nextInstructions.push_back(currentBlock.lpTail + 1);
 
-                if (isNot) // push afterward, the condition doesn't have to be met to jump.
+                if (isNot) {
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                    // push afterward, the condition doesn't have to be met to jump.
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
+                }
             } else {
                 // jump (True/False depends on opcode)
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
                 nextInstructions.push_back((currentBlock.lpTail) + offset);
+                currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
 
                 // fallthrough (else)
                 nextInstructions.push_back(currentBlock.lpTail + 1);
+                currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
             }
             break;
         }
@@ -535,6 +549,8 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
             }
 
             if (loopFlag != LoopBlockFlags::WhileLoop) {
+                successor.loopHeader = block.dwBlockId;
+                block.loopExit = successor.dwBlockId;
                 block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
                 successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
             }
@@ -552,7 +568,8 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
                 if (block.lpTail->operation == LiftedOperation::JUMP) {
                     // conditional. This is a while n do end loop!
-
+                    successor.loopExit = block.dwBlockId;
+                    block.loopHeader = successor.dwBlockId;
                     block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                     successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                 } else {
@@ -572,6 +589,8 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
 
                         ASSERT(flags != LoopBlockFlags::WhileLoop, "Impossible.");
 
+                        successor.loopExit = block.dwBlockId;
+                        block.loopHeader = successor.dwBlockId;
                         block.dwBlockFlags |= static_cast<uint32_t>(flags);
                         successor.dwBlockFlags |= static_cast<uint32_t>(flags);
                     } else {
