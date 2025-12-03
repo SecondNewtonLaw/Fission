@@ -148,7 +148,7 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     const auto deserializeStart = std::chrono::steady_clock::now();
     const auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
-    if (!deserializedBytecode)
+    if (!deserializedBytecode || deserializedBytecode->functions.empty())
         return DecompileResult::FailedToDeserialize;
 
     auto bytecodeLifter = BytecodeLifter{decoder};
