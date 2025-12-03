@@ -39,7 +39,7 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
         return AccessType::Read;
 
     case LiftedOperation::CALL:
-        if ((op.operands.at(/* retn pos */ 2).value.imm.n - 1u) >= operandIndex)
+        if (operandIndex == 0)
             return AccessType::ReadWrite;
         return AccessType::Read; // RO.
 
@@ -219,9 +219,9 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
-                    //if (mode == AccessType::Write) {
-                        op.ssaVersion = NewVersion(op.value.reg);
-                        pushedCount[op.value.reg]++;
+                    // if (mode == AccessType::Write) {
+                    op.ssaVersion = NewVersion(op.value.reg);
+                    pushedCount[op.value.reg]++;
                     //}
                 }
             }
@@ -237,7 +237,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 int32_t retCount = inst->operands[2].value.imm.n;
                 if (retCount > 1) {
                     int32_t baseReg = inst->operands[0].value.reg;
-                    for (int32_t i = 1; i < retCount; ++i) {
+                    for (int32_t i = 0; i < retCount - 1; ++i) {
                         NewVersion(baseReg + i);
                     }
                 }
