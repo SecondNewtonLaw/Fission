@@ -330,7 +330,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                                 "kTable is corrupted";
             }
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_SETGLOBAL: {
@@ -352,7 +353,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             }
 
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_GETUPVAL: {
@@ -417,7 +419,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             finalComment << "'";
 
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_GETTABLE: {
@@ -463,7 +466,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             }
 
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_SETTABLEKS: {
@@ -487,7 +491,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             }
 
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_GETTABLEN: {
@@ -543,7 +548,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             }
 
             instr.instructionRemarks = finalComment.str();
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_CALL: {
@@ -566,13 +572,16 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 if (instr.operands[1].value.imm.n - 1 > 1)
                     argsText = std::format(
                         "{} arguments (R{} to R{})", instr.operands[1].value.imm.n - 1, instr.operands[0].value.reg + 1,
-                        instr.operands[0].value.reg + 1 + (instr.operands[1].value.imm.n - 1) // args are after the function, just like lua_call/lua_pcall in C.
+                        instr.operands[0].value.reg + (instr.operands[1].value.imm.n - 1) // args are after the function, just like lua_call/lua_pcall in C.
                     );
-                else
+                else if (instr.operands[1].value.imm.n - 1 == 1) {
                     argsText = std::format(
                         "1 argument (R{})",
                         instr.operands[0].value.reg + 1 // args are after the function, just like lua_call/lua_pcall in C.
                     );
+                } else {
+                    argsText = "no arguments";
+                }
             }
 
             std::string retsText;
@@ -688,7 +697,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 
             if (instruction.GetD() == 1) {
                 auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                instr.instructionRemarks = "WARNING: Op Code simplified, ignored by interpreter (JUMPIFEQ/JUMPIFLE/JUMPIFLT/JUMPIFNOTEQ/JUMPIFNOTLE/JUMPIFNOTLT)";
+                instr.instructionRemarks =
+                    "WARNING: Op Code simplified, ignored by interpreter (JUMPIFEQ/JUMPIFLE/JUMPIFLT/JUMPIFNOTEQ/JUMPIFNOTLE/JUMPIFNOTLT)";
                 liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                     "INFO: padding due to the original instruction requiring an auxiliary.";
                 break;
@@ -702,7 +712,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.n = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::Register;
             instr.operands[2].value.reg = function->instructions.at(currentIndex + 1).instruction;
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_ADD:
@@ -858,7 +869,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_DUPTABLE: {
@@ -881,7 +893,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::ImmediateInteger;
             instr.operands[3].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_FORNPREP: {
@@ -911,7 +924,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.n = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_FORGPREP_INEXT: {
@@ -938,8 +952,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[4].type = LiftedOperandType::Register;
             instr.operands[4].value.imm.n = LUAU_INSN_AUX_B(aux);
 
-            instr.instructionRemarks = std::format("INFO: Perform FastCall3 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            instr.instructionRemarks =
+                std::format("INFO: Perform FastCall3 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_FORGPREP_NEXT: {
@@ -984,7 +1000,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
 
-            instr.instructionRemarks = std::format("INFO: Perform FastCall of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
+            instr.instructionRemarks =
+                std::format("INFO: Perform FastCall of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_COVERAGE: {
@@ -1023,7 +1040,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
 
-            instr.instructionRemarks = std::format("INFO: Perform FastCall1 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
+            instr.instructionRemarks =
+                std::format("INFO: Perform FastCall1 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
         case LOP_FASTCALL2: {
@@ -1038,8 +1056,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[3].type = LiftedOperandType::Register;
             instr.operands[3].value.reg = LUAU_INSN_AUX_A(function->instructions.at(currentIndex + 1).instruction);
 
-            instr.instructionRemarks = std::format("INFO: Perform FastCall2 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            instr.instructionRemarks =
+                std::format("INFO: Perform FastCall2 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_FASTCALL2K: {
@@ -1056,7 +1076,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 
             instr.instructionRemarks =
                 std::format("INFO: Perform FastCall2K of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_FORGPREP: {
@@ -1125,7 +1146,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 
             instr.instructionRemarks =
                 std::format("INFO: Jump PC to {} if the value at register {} is{} equal to '{}'.", jumpTarget, targetRegister, equal, constantAsString);
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
 
@@ -1172,7 +1194,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "INFO: Jump PC to {} if the value at register {} is{} equal to the number/string '{}'.", jumpTarget, targetRegister, equal, constantAsString
             );
 
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks = "INFO: padding due to the original instruction requiring an auxiliary.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
 
