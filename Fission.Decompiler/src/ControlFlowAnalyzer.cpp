@@ -5,6 +5,7 @@
 #include "ControlFlowAnalyzer.hpp"
 
 #include "DenominatorAnalysis.hpp"
+#include "Deserializer.hpp"
 
 bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     switch (operation) {
@@ -745,7 +746,6 @@ std::string GraphVisualizer::FormatOperand(const LiftedOperand &operand, bool is
         return "?";
     }
 }
-
 std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const LiftedFunction *func, bool isSsa) {
     std::stringstream ss;
 
@@ -796,6 +796,18 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
     }
 
     if (block.lpHead && block.lpTail) {
+        if (block.dwBlockId == 0) {
+            std::stringstream line;
+            line << "; Function Debug Name: " << func->name << "\n";
+            line << "; Number of Upvalues: " << static_cast<int>(func->lpDeserialized->nups) << "\n";
+            line << "; Number of Arguments: " << static_cast<int>(func->lpDeserialized->numparams);
+
+            if (func->lpDeserialized->numparams > 0) {
+                line << " (R0 - R" << static_cast<int>(func->lpDeserialized->numparams) - 1 << ")";
+            }
+            line << ".";
+            ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><FONT COLOR=\"#005500\">" << EscapeHtml(line.str()) << "</FONT></TD></TR>";
+        }
         const LiftedInstruction *current = block.lpHead;
         while (true) {
             if (current < func->instructions.data() || current >= func->instructions.data() + func->instructions.size()) {
