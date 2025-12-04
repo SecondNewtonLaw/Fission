@@ -125,7 +125,6 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
         }
 
         case BlockTerminator::Conditional: {
-
             if ((currentBlock.lpTail->operation == LiftedOperation::FORNLOOP || currentBlock.lpTail->operation == LiftedOperation::FORNLOOP) &&
                 currentBlock.bType == BlockType::LoopLatch) {
                 // loop header. adjust logic.
@@ -134,11 +133,11 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
                 nextInstructions.push_back((currentBlock.lpTail + 1) + offset);
 
                 currentBlock.loopHeader = GetBlockIdAtInstruction((currentBlock.lpTail + 1) + offset, leaderToBlockId);
-                blocks.at(*currentBlock.loopHeader).loopExit = i; // current block is exit for the loop.
+                blocks.at(*currentBlock.loopHeader).loopLatch = i; // current block is exit for the loop.
 
                 // fallthrough (else)
                 nextInstructions.push_back(currentBlock.lpTail + 1);
-                currentBlock.loopExit = i /* self */;
+                currentBlock.loopLatch = i /* self */;
                 break;
             }
 
@@ -551,12 +550,22 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
 
             if (loopFlag != LoopBlockFlags::WhileLoop) {
                 successor.loopHeader = block.dwBlockId;
-                block.loopExit = successor.dwBlockId;
+                block.loopLatch = successor.dwBlockId;
                 block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
                 successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+
+                for (uint32_t succId2 : successor.successors) {
+                    if (dominates(successor.dwBlockId, succId2)) {
+                        // exit path.
+                        block.loopExit = succId2;
+                        successor.loopExit = succId2;
+                        break;
+                    }
+                }
             }
         }
     }
+
     for (BasicBlock &block : blocks) {
         if (block.bType != BlockType::LoopLatch)
             continue; // we only need loop latches to fix the determination and mark the loop type.
@@ -569,7 +578,7 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
                 if (block.lpTail->operation == LiftedOperation::JUMP) {
                     // conditional. This is a while n do end loop!
-                    successor.loopExit = block.dwBlockId;
+                    successor.loopLatch = block.dwBlockId;
                     block.loopHeader = successor.dwBlockId;
                     block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                     successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
@@ -590,14 +599,25 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
 
                         ASSERT(flags != LoopBlockFlags::WhileLoop, "Impossible.");
 
-                        successor.loopExit = block.dwBlockId;
+                        successor.loopLatch = block.dwBlockId;
                         block.loopHeader = successor.dwBlockId;
                         block.dwBlockFlags |= static_cast<uint32_t>(flags);
                         successor.dwBlockFlags |= static_cast<uint32_t>(flags);
                     } else {
+                        successor.loopLatch = block.dwBlockId;
+                        block.loopHeader = successor.dwBlockId;
                         block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                     }
+                }
+                if (dominates(successor.ifStatementFalse.value(), block.dwBlockId)) {
+                    // true statement is loop exit.
+                    block.loopExit = successor.ifStatementTrue.value();
+                    successor.loopExit = successor.ifStatementTrue.value();
+                } else {
+                    // false statement is loop exit.
+                    block.loopExit = successor.ifStatementFalse.value();
+                    successor.loopExit = successor.ifStatementFalse.value();
                 }
             }
         }

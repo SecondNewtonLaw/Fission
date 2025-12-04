@@ -175,9 +175,17 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     SSABuilder.Build(controlFlowAnalyzedFunction);
     const auto ssaEnd = std::chrono::steady_clock::now();
 
-    // const auto astStart = std::chrono::steady_clock::now();
+    const auto astStart = std::chrono::steady_clock::now();
     const auto liftedAST = ASTLifter.LiftFunction(&controlFlowAnalyzedFunction);
-    // const auto astEnd = std::chrono::steady_clock::now();
+    const auto astEnd = std::chrono::steady_clock::now();
+
+    RootNode root{liftedAST.statements};
+
+    const auto sgenStart = std::chrono::steady_clock::now();
+    const auto generator = SourceGenerator.GenerateSource(&root);
+    const auto sgenEnd = std::chrono::steady_clock::now();
+
+    std::println("generated source code:\n{}", generator);
 
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;
@@ -217,12 +225,15 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
             "\tBlock Pruning: {}\n\t"
             "\tStructure Identification: {}\n\t"
             "IR -> SSA Form: {}\n\t"
+            "IR (SSA) -> AST: {}\n\t"
+            "AST -> Source Code: {}\n\t"
             "Optimization: {}s",
             std::chrono::duration<float>(deserializeEnd - deserializeStart), std::chrono::duration<float>(bytecodeLiftEnd - bytecodeLiftStart),
             std::chrono::duration<float>(controlFlowAnalyzeEnd - controlFlowAnalyzeStart),
             std::chrono::duration<float>(basicBlockIdentificationEnd - basicBlockIdentificationStart),
             std::chrono::duration<float>(optimizeGraphEnd - optimizeGraphStart), std::chrono::duration<float>(unreachablePruningEnd - unreachablePruningStart),
-            std::chrono::duration<float>(controlFlowAnalyzeEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart), 0
+            std::chrono::duration<float>(controlFlowAnalyzeEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart),
+            std::chrono::duration<float>(astEnd - astStart), std::chrono::duration<float>(sgenEnd - sgenStart), 0
         );
     }
 

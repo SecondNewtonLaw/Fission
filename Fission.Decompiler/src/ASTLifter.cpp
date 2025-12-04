@@ -3,28 +3,94 @@
 //
 #include "ASTLifter.hpp"
 
+#include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+
 #include "Deserializer.hpp"
+#include <algorithm>
+#include <format>
+#include <queue>
+#include <set>
+
+static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::shared_ptr<Statement>> &stmts) {
+    auto block = std::make_shared<BlockStatementNode>();
+    block->body = stmts;
+    return block;
+}
+
+static int32_t FindMergeBlock(const AnalyzedFunction *func, uint32_t branchA, uint32_t branchB) {
+    if (branchA == branchB)
+        return (int32_t)branchA;
+
+    std::set<uint32_t> reachableFromA;
+    std::queue<uint32_t> q;
+
+    q.push(branchA);
+    reachableFromA.insert(branchA);
+    while (!q.empty()) {
+        uint32_t curr = q.front();
+        q.pop();
+
+        if (reachableFromA.size() > 2000u)
+            break;
+
+        const auto &block = func->basicBlocks[curr];
+        for (uint32_t succ : block.successors) {
+            if (block.bType == BlockType::LoopLatch && succ < curr)
+                continue;
+
+            if (!reachableFromA.contains(succ)) {
+                reachableFromA.insert(succ);
+                q.push(succ);
+            }
+        }
+    }
+
+    std::queue<uint32_t> q2;
+    q2.push(branchB);
+    std::set<uint32_t> visitedB;
+    visitedB.insert(branchB);
+
+    if (reachableFromA.contains(branchB))
+        return static_cast<int32_t>(branchB);
+
+    while (!q2.empty()) {
+        const uint32_t curr = q2.front();
+        q2.pop();
+
+        for (const auto &block = func->basicBlocks[curr]; uint32_t succ : block.successors) {
+            if (block.bType == BlockType::LoopLatch && succ < curr)
+                continue;
+
+            if (reachableFromA.contains(succ))
+                return static_cast<int32_t>(succ); // found merge point
+
+            if (!visitedB.contains(succ)) {
+                visitedB.insert(succ);
+                q2.push(succ);
+            }
+        }
+    }
+
+    return -1;
+}
 
 std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand) {
     const auto definitionInstruction = func->GetDefinition(operand);
-    if (!definitionInstruction) {
-        // Likely upvalue or argument
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", std::to_string(operand.value.reg))));
-    }
+
+    if (!definitionInstruction)
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", operand.value.reg)));
 
     switch (definitionInstruction->operation) {
     case LiftedOperation::LOAD: {
-        if (definitionInstruction->operands[1].type == LiftedOperandType::ImmediateNil) {
+        auto type = definitionInstruction->operands[1].type;
+        if (type == LiftedOperandType::ImmediateNil) {
             return std::make_shared<NilLiteralNode>();
-        }
-        if (definitionInstruction->operands[1].type == LiftedOperandType::ImmediateBool) {
+        } else if (type == LiftedOperandType::ImmediateBool) {
             return std::make_shared<BooleanLiteralNode>(definitionInstruction->operands[1].value.imm.b);
-        }
-        if (definitionInstruction->operands[1].type == LiftedOperandType::ImmediateInteger) {
+        } else if (type == LiftedOperandType::ImmediateInteger) {
             return std::make_shared<NumberLiteralNode>(definitionInstruction->operands[1].value.imm.n);
-        }
-        if (definitionInstruction->operands[1].type == LiftedOperandType::ImmediateConstant) {
+        } else if (type == LiftedOperandType::ImmediateConstant) {
             const auto &k = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[1].value.imm.k];
             switch (k.kType) {
             case LUA_TNIL:
@@ -35,172 +101,88 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
                 return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
             case LUA_TSTRING:
                 return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-
             default:
-                return std::make_shared<CommentNode>("<!-- complex constant -->");
+                return std::make_shared<NilLiteralNode>(); // fallback
             }
         }
+        break;
     }
-    case LiftedOperation::MOVE: {
+    case LiftedOperation::MOVE:
         return LiftExpression(func, definitionInstruction->operands[1]);
-    }
-    case LiftedOperation::ADD: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
 
-        return std::make_shared<BinaryExpressionNode>("+", left, right);
-    }
-    case LiftedOperation::SUB: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<BinaryExpressionNode>("-", left, right);
-    }
-    case LiftedOperation::MUL: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<BinaryExpressionNode>("*", left, right);
-    }
-    case LiftedOperation::DIV: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<BinaryExpressionNode>("/", left, right);
-    }
-    case LiftedOperation::MOD: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<BinaryExpressionNode>("%", left, right);
-    }
-    case LiftedOperation::POW: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        auto right = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<BinaryExpressionNode>("^", left, right);
-    }
-    case LiftedOperation::ADDK: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
+    // Arithmetic
+    case LiftedOperation::ADD:
+        return std::make_shared<BinaryExpressionNode>(
+            "+", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
+    case LiftedOperation::SUB:
+        return std::make_shared<BinaryExpressionNode>(
+            "-", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
+    case LiftedOperation::MUL:
+        return std::make_shared<BinaryExpressionNode>(
+            "*", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
+    case LiftedOperation::DIV:
+        return std::make_shared<BinaryExpressionNode>(
+            "/", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
+    case LiftedOperation::MOD:
+        return std::make_shared<BinaryExpressionNode>(
+            "%", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
+    case LiftedOperation::POW:
+        return std::make_shared<BinaryExpressionNode>(
+            "^", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
 
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
-
-        return std::make_shared<BinaryExpressionNode>("+", left, right);
-    }
-    case LiftedOperation::SUBK: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
-
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
-
-        return std::make_shared<BinaryExpressionNode>("-", left, right);
-    }
-    case LiftedOperation::MULK: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
-
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
-
-        return std::make_shared<BinaryExpressionNode>("*", left, right);
-    }
-    case LiftedOperation::DIVK: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
-
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
-
-        return std::make_shared<BinaryExpressionNode>("/", left, right);
-    }
-    case LiftedOperation::MODK: {
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
-
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
-
-        return std::make_shared<BinaryExpressionNode>("%", left, right);
-    }
+    case LiftedOperation::ADDK:
+    case LiftedOperation::SUBK:
+    case LiftedOperation::MULK:
+    case LiftedOperation::DIVK:
+    case LiftedOperation::MODK:
     case LiftedOperation::POWK: {
+        std::string op = "+";
+        if (definitionInstruction->operation == LiftedOperation::SUBK)
+            op = "-";
+        if (definitionInstruction->operation == LiftedOperation::MULK)
+            op = "*";
+        if (definitionInstruction->operation == LiftedOperation::DIVK)
+            op = "/";
+        if (definitionInstruction->operation == LiftedOperation::MODK)
+            op = "%";
+        if (definitionInstruction->operation == LiftedOperation::POWK)
+            op = "^";
+
         auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        std::shared_ptr<Expression> right = nullptr;
-
         const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TNUMBER) {
-            right = std::make_shared<CommentNode>("Invalid constant");
-        } else {
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-        }
 
-        return std::make_shared<BinaryExpressionNode>("^", left, right);
+        ASSERT(constant.kType == LUA_TNUMBER, "we are cooked dev");
+        std::shared_ptr<Expression> right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
+
+        return std::make_shared<BinaryExpressionNode>(op, left, right);
     }
-    case LiftedOperation::NOT: {
-        auto expr = LiftExpression(func, definitionInstruction->operands[1]);
-        return std::make_shared<UnaryExpressionNode>("not", expr);
-    }
-    case LiftedOperation::MINUS: {
-        auto expr = LiftExpression(func, definitionInstruction->operands[1]);
-        return std::make_shared<UnaryExpressionNode>("-", expr);
-    }
-    case LiftedOperation::LENGTH: {
-        auto expr = LiftExpression(func, definitionInstruction->operands[1]);
-        return std::make_shared<UnaryExpressionNode>("#", expr);
-    }
-    case LiftedOperation::GETTABLE: {
-        auto table = LiftExpression(func, definitionInstruction->operands[1]);
-        auto key = LiftExpression(func, definitionInstruction->operands[2]);
-        return std::make_shared<IndexExpressionNode>(table, key);
-    }
+
+    case LiftedOperation::NOT:
+        return std::make_shared<UnaryExpressionNode>("not", LiftExpression(func, definitionInstruction->operands[1]));
+    case LiftedOperation::MINUS:
+        return std::make_shared<UnaryExpressionNode>("-", LiftExpression(func, definitionInstruction->operands[1]));
+    case LiftedOperation::LENGTH:
+        return std::make_shared<UnaryExpressionNode>("#", LiftExpression(func, definitionInstruction->operands[1]));
+
+    case LiftedOperation::GETTABLE:
+        return std::make_shared<IndexExpressionNode>(
+            LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
+        );
     case LiftedOperation::GETTABLEKS: {
         auto table = LiftExpression(func, definitionInstruction->operands[1]);
-        std::string keyName;
-
         const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        if (constant.kType != LUA_TSTRING) {
-            keyName = "Invalid constant";
-        } else {
-            keyName = std::get<std::string>(constant.constantData);
-        }
-
-        return std::make_shared<MemberExpressionNode>(table, keyName);
-    }
-    case LiftedOperation::GETTABLEN: {
-        auto table = LiftExpression(func, definitionInstruction->operands[1]);
-
-        auto indexVal = definitionInstruction->operands[2].value.imm.n;
-        auto key = std::make_shared<NumberLiteralNode>(indexVal);
-
-        return std::make_shared<IndexExpressionNode>(table, key);
+        std::string key = (constant.kType == LUA_TSTRING) ? std::get<std::string>(constant.constantData) : "ERR";
+        return std::make_shared<MemberExpressionNode>(table, key);
     }
     case LiftedOperation::GETGLOBAL: {
-        std::string name;
-
         const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[1].value.imm.k];
-        if (constant.kType != LUA_TSTRING) {
-            name = "Invalid constant";
-        } else {
-            name = std::get<std::string>(constant.constantData);
-        }
-
+        std::string name = (constant.kType == LUA_TSTRING) ? std::get<std::string>(constant.constantData) : "ERR";
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
     }
     case LiftedOperation::GETIMPORT: {
@@ -263,160 +245,428 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
 
         // If we ever change the logic inside the bytecode lifter, this only needs to changed too, thx.
         auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
-        auto functionArguments = duplicatedFunction->isvararg ? -1 : duplicatedFunction->numparams;
+        auto functionArguments = duplicatedFunction->numparams;
         auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-        if (!duplicatedFunction->isvararg) {
-            for (int i = 1; i < functionArguments; i++) {
-                functionArgumentNames[i] = std::format("v{}", i);
-            }
+        for (int i = 0; i < functionArguments; i++) {
+            functionArgumentNames[i] = std::format("v{}", i);
         }
 
-        return std::make_shared<FunctionDeclarationNode>(functionName, functionArguments, functionArgumentNames);
+        const AnalyzedFunction *lpFunc = nullptr;
+        for (const auto &ffunc : func->innerFunctions) {
+            if (ffunc.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId)
+                lpFunc = &ffunc;
+        }
+        ASSERT(lpFunc != nullptr, "lpFunc == nullptr");
+        std::set<uint32_t> visited;
+        return std::make_shared<FunctionDeclarationNode>(
+            functionName, functionArguments, functionArgumentNames, duplicatedFunction->isvararg,
+            CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)), !duplicatedFunction->debugName.has_value()
+        );
     }
     case LiftedOperation::NEWCLOSURE: {
-        const auto protoUsed = func->lpLiftedFunction->lpDeserialized->subfunctions[definitionInstruction->operands[1].value.imm.k];
+        const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[definitionInstruction->operands[1].value.imm.k];
+        std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
+        std::unordered_map<int32_t, std::string> args;
+        for (int i = 0; i < proto->numparams; i++)
+            args[i] = std::format("v{}", i);
 
-        // If we ever change the logic inside the bytecode lifter, this only needs to changed too, thx.
-        auto functionName = protoUsed->debugName ? protoUsed->debugName.value() : std::format("f{}", protoUsed->bytecodeId);
-        auto functionArguments = protoUsed->isvararg ? -1 : protoUsed->numparams;
-        auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-        if (!protoUsed->isvararg) {
-            for (int i = 1; i < functionArguments; i++) {
-                functionArgumentNames[i] = std::format("v{}", i);
-            }
-        }
-
-        return std::make_shared<FunctionDeclarationNode>(functionName, functionArguments, functionArgumentNames);
+        auto *lpFunc = &func->innerFunctions[definitionInstruction->operands[1].value.imm.k];
+        std::set<uint32_t> visited;
+        return std::make_shared<FunctionDeclarationNode>(
+            name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
+            !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
+        );
     }
 
     default:
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("reg_" + std::to_string(operand.value.reg)));
+        break;
     }
+
+    return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("reg_" + std::to_string(operand.value.reg)));
+}
+
+std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const AnalyzedFunction *func, const BasicBlock &block) {
+    std::vector<std::shared_ptr<Statement>> statements;
+
+    if (!block.lpHead || !block.lpTail)
+        return statements;
+
+    int32_t startIdx = block.lpHead->instructionIndex;
+    int32_t endIdx = block.lpTail->instructionIndex;
+
+    for (int i = startIdx; i <= endIdx; ++i) {
+        const auto &inst = func->lpLiftedFunction->instructions[i];
+
+        switch (inst.operation) {
+            // control flow handled by the LiftTree structure
+
+        case LiftedOperation::NEWTABLE: {
+            auto nSize = inst.operands[2];
+            if (nSize.value.imm.n == 0) {
+                statements.push_back(
+                    std::make_shared<VariableDeclarationNode>(
+                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg))),
+                        std::make_shared<TableLiteralNode>()
+                    )
+                );
+                break;
+            }
+
+            int tableReg = inst.operands[0].value.reg;
+            std::vector<std::shared_ptr<Expression>> setListWhat;
+
+            int32_t setlistId = i;
+            while (func->lpLiftedFunction->instructions[++setlistId].operation != LiftedOperation::SETLIST) {
+                ASSERT(func->lpLiftedFunction->instructions.size() > setlistId);
+            }
+
+            if (func->implicitUses.contains(&func->lpLiftedFunction->instructions[setlistId])) {
+                if (tableReg == func->lpLiftedFunction->instructions[setlistId].operands[0].value.imm.n) {
+                    auto itemsIdx = func->lpLiftedFunction->instructions[setlistId].operands[1].value.imm.n;
+                    size_t nItemsCount = inst.operands[2].value.imm.n;
+                    const auto &versions = func->implicitUses.at(&func->lpLiftedFunction->instructions[setlistId]);
+                    for (size_t k = 0; k < nItemsCount && k < versions.size(); ++k) {
+                        LiftedOperand op;
+                        op.type = LiftedOperandType::Register;
+                        op.value.reg = itemsIdx + k;
+                        op.ssaVersion = versions[k];
+                        setListWhat.push_back(LiftExpression(func, op));
+                    }
+                } // different table, don't set.
+            }
+
+            statements.push_back(
+                std::make_shared<VariableDeclarationNode>(
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg))),
+                    std::make_shared<TableLiteralNode>(setListWhat)
+                )
+            );
+            break;
+        }
+
+        case LiftedOperation::JUMP:
+        case LiftedOperation::JUMPIF:
+        case LiftedOperation::JUMPIFNOT:
+        case LiftedOperation::JUMPIFEQ:
+        case LiftedOperation::JUMPIFLE:
+        case LiftedOperation::JUMPIFLT:
+        case LiftedOperation::JUMPIFNOTEQ:
+        case LiftedOperation::JUMPIFNOTLE:
+        case LiftedOperation::JUMPIFNOTLT:
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORGPREP: {
+            continue;
+        }
+
+            // stmts
+        case LiftedOperation::CALL: {
+            // TODO: Handle vararg properly later.
+            int regFunc = inst.operands[0].value.reg;
+            size_t argCount = inst.operands[1].value.imm.n - 1;
+            auto callee = LiftExpression(func, inst.operands[0]);
+
+            std::vector<std::shared_ptr<Expression>> args;
+            if (func->implicitUses.contains(&inst)) {
+                const auto &versions = func->implicitUses.at(&inst);
+                for (size_t k = 0; k < argCount && k < versions.size(); ++k) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = regFunc + 1 + k;
+                    op.ssaVersion = versions[k];
+                    args.push_back(LiftExpression(func, op));
+                }
+            }
+            statements.push_back(std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(callee, args)));
+            break;
+        }
+        case LiftedOperation::SETGLOBAL: {
+            int kIndex = inst.operands[1].value.imm.k;
+            const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIndex];
+            std::string name = (k.kType == LUA_TSTRING) ? std::get<std::string>(k.constantData) : "ERR";
+
+            auto right = LiftExpression(func, inst.operands[0]);
+            if (func->GetDefinition(inst.operands[0]) == nullptr) {
+                statements.push_back(
+                    std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), right)
+                );
+            } else {
+                auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
+                statements.push_back(std::make_shared<AssignmentStatementNode>(left, right));
+            }
+            break;
+        }
+        case LiftedOperation::SETTABLE: {
+            auto table = LiftExpression(func, inst.operands[1]);
+            auto key = LiftExpression(func, inst.operands[2]);
+            auto val = LiftExpression(func, inst.operands[0]);
+
+            auto idxExpr = std::make_shared<IndexExpressionNode>(table, key);
+            statements.push_back(std::make_shared<AssignmentStatementNode>(idxExpr, val));
+            break;
+        }
+        case LiftedOperation::SETTABLEKS: {
+            int kIndex = inst.operands[2].value.imm.k;
+            const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIndex];
+            std::string name = (k.kType == LUA_TSTRING) ? std::get<std::string>(k.constantData) : "ERR";
+
+            auto table = LiftExpression(func, inst.operands[1]);
+            auto val = LiftExpression(func, inst.operands[0]);
+            auto memberExpr = std::make_shared<MemberExpressionNode>(table, name);
+            statements.push_back(std::make_shared<AssignmentStatementNode>(memberExpr, val));
+            break;
+        }
+        case LiftedOperation::RETURN: {
+            // TODO: vararg return, this pmos!
+            int regStart = inst.operands[0].value.reg;
+            size_t count = inst.operands[1].value.imm.n - 1;
+            std::vector<std::shared_ptr<Expression>> rets;
+
+            if (func->implicitUses.contains(&inst)) {
+                const auto &versions = func->implicitUses.at(&inst);
+                for (size_t k = 0; k < count && k < versions.size(); ++k) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = regStart + k;
+                    op.ssaVersion = versions[k];
+                    rets.push_back(LiftExpression(func, op));
+                }
+            }
+            statements.push_back(std::make_shared<ReturnStatementNode>(rets));
+            break;
+        }
+        case LiftedOperation::LOAD:
+        case LiftedOperation::NOP:
+        case LiftedOperation::GETGLOBAL:
+        case LiftedOperation::MOVE: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
+            break;
+        }
+        default:
+            if (nullptr == func->GetDefinition(inst.operands[0])) {
+                // auto targetIdentifier = std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg));
+                // statements.push_back(std::make_shared<VariableDeclarationNode>(targetIdentifier));
+            } else {
+                auto expression = LiftExpression(func, inst.operands[0]);
+
+                auto targetIdentifier = std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg));
+                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+
+                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
+            }
+            break;
+        }
+    }
+    return statements;
+}
+
+std::vector<std::shared_ptr<Statement>>
+ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited) {
+    std::vector<std::shared_ptr<Statement>> nodes;
+
+    if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= func->basicBlocks.size())
+        return nodes;
+    if (currentBlockId == stopBlockId)
+        return nodes;
+
+    if (visited.contains(currentBlockId))
+        return nodes;
+    visited.insert(currentBlockId);
+
+    const auto &block = func->basicBlocks[currentBlockId];
+
+    auto blockStatements = LiftBlockInstructions(func, block);
+    nodes.insert(nodes.end(), blockStatements.begin(), blockStatements.end());
+
+    switch (block.bType) {
+    case BlockType::IfHeader: {
+        if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
+            uint32_t trueIdx = block.ifStatementTrue.value();
+            uint32_t falseIdx = block.ifStatementFalse.value();
+
+            std::shared_ptr<Expression> condition = nullptr;
+            if (block.lpTail) {
+                switch (block.lpTail->operation) {
+                case LiftedOperation::JUMPIFNOTEQ: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        "==", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFEQ: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        "~=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFLT: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFNOTLE: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        ">=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                default:
+                    condition = LiftExpression(func, block.lpTail->operands[0]);
+                    break;
+                }
+            }
+
+            ASSERT(condition, "failed to determine conditional for if branch.");
+
+            const uint32_t mergeIdx = FindMergeBlock(func, trueIdx, falseIdx);
+
+            std::set<uint32_t> branchVisited = visited;
+            auto thenStmts = LiftTree(func, trueIdx, mergeIdx, branchVisited);
+
+            branchVisited = visited;
+            auto elseStmts = LiftTree(func, falseIdx, mergeIdx, branchVisited);
+
+            auto ifNode = std::make_shared<IfStatementNode>();
+            ifNode->condition = condition;
+            if (!thenStmts.empty()) {
+                ifNode->thenBranch = CreateBlock(thenStmts);
+            }
+            if (!elseStmts.empty()) {
+                ifNode->elseBranch = CreateBlock(elseStmts);
+            }
+            nodes.push_back(ifNode);
+
+            // continue from merge point
+            if (mergeIdx != static_cast<uint32_t>(-1) && mergeIdx != stopBlockId) {
+                auto nextNodes = LiftTree(func, mergeIdx, stopBlockId, visited);
+                nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
+            }
+        } else {
+            nodes.push_back(std::make_shared<CommentNode>("Broken If Header"));
+        }
+        break;
+    }
+
+    case BlockType::LoopHeader: {
+        if (block.loopLatch.has_value()) {
+            uint32_t exitIdx = block.loopExit.value();
+
+            // assume the first non-exit successor is the loop body start
+            int32_t bodyIdx = -1;
+            for (auto succ : block.successors) {
+                if (succ != exitIdx) {
+                    bodyIdx = succ;
+                    break;
+                }
+            }
+
+            if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
+                auto whileNode = std::make_shared<WhileStatementNode>();
+
+                // try to extract condition
+                if (block.bTerminator == BlockTerminator::Conditional && block.lpTail) {
+                    switch (block.lpTail->operation) {
+                    case LiftedOperation::JUMPIFNOTEQ: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            "==", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIFEQ: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            "~=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIFLT: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIFNOTLE: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            ">=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIF: {
+                    case LiftedOperation::JUMPIFNOT: {
+                        whileNode->condition = this->LiftExpression(func, block.lpTail->operands[0]);
+                        break;
+                    }
+                    }
+                    default:
+                        whileNode->condition = LiftExpression(func, block.lpTail->operands[0]);
+                        break;
+                    }
+                } else {
+                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                }
+
+                ASSERT(bodyIdx != -1, "control flow analysis failed");
+                std::set<uint32_t> loopVisited = visited;
+                auto loopBody = LiftTree(func, bodyIdx, exitIdx, loopVisited);
+                whileNode->body = CreateBlock(loopBody);
+
+                nodes.push_back(whileNode);
+
+                // continue after loop
+                if (exitIdx != stopBlockId) {
+                    auto nextNodes = LiftTree(func, exitIdx, stopBlockId, visited);
+                    nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
+                }
+            }
+        }
+        break;
+    }
+
+    case BlockType::Break:
+        nodes.push_back(std::make_shared<BreakStatementNode>());
+        break;
+
+    case BlockType::Continue:
+        nodes.push_back(std::make_shared<ContinueStatementNode>());
+        break;
+
+    case BlockType::Return:
+        break;
+
+    case BlockType::Standard:
+    case BlockType::LoopLatch:
+    default: {
+        if (!block.successors.empty()) {
+            const uint32_t next = block.successors[0];
+
+            if (func->basicBlocks[next].bType == BlockType::LoopHeader && block.bType == BlockType::LoopLatch)
+                break;
+
+            auto nextNodes = LiftTree(func, next, stopBlockId, visited);
+            nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
+        }
+        break;
+    }
+    }
+
+    return nodes;
 }
 
 ASTFunction ASTLifter::LiftFunctionInternal(AnalyzedFunction *analyzedFunction) {
-    auto liftedFunction = ASTFunction{};
+    ASTFunction astFunc;
+    astFunc.backingFunction = analyzedFunction;
 
-    // We have to look for "roots", these are instructions that have side effects (e.g. modifying registers)
-    // Then from those, we look at it's register and analyze where it's registers came from to build an AST Statement
-    // We will not consider operations like GETIMPORT/GETGLOBAL to be these because they load stuff, not change stuff
-    // Doing so would result in having expressions like v1 = print, v1(stuff), which we don't want
-    for (const auto &instruction : analyzedFunction->lpLiftedFunction->instructions) {
-
-        switch (instruction.operation) {
-        case LiftedOperation::CALL: {
-            int regFunc = instruction.operands[0].value.reg;
-            size_t argCount = instruction.operands[1].value.imm.n - 1;
-
-            auto callee = LiftExpression(analyzedFunction, instruction.operands[0]);
-
-            std::vector<std::shared_ptr<Expression>> args;
-
-            if (analyzedFunction->implicitUses.contains(&instruction)) {
-                const auto &versions = analyzedFunction->implicitUses.at(&instruction);
-                for (size_t i = 0; i < argCount && i < versions.size(); ++i) {
-                    int regArg = regFunc + 1 + i;
-
-                    LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
-                    op.value.reg = regArg;
-                    op.ssaVersion = versions[i];
-                    args.push_back(LiftExpression(analyzedFunction, op));
-                }
-            } else {
-                args.push_back(std::make_shared<CommentNode>("ERROR: Missing SSA versions for arguments"));
-            }
-
-            auto callExpr = std::make_shared<CallExpressionNode>(callee, args);
-            liftedFunction.statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
-            break;
-        }
-
-        case LiftedOperation::SETGLOBAL: {
-            int kIndex = instruction.operands[1].value.imm.k;
-
-            std::string name;
-            const auto &constant = analyzedFunction->lpLiftedFunction->lpDeserialized->constants[kIndex];
-            if (constant.kType == LUA_TSTRING) {
-                name = std::get<std::string>(constant.constantData);
-            } else {
-                name = "INVALID_GLOBAL";
-            }
-
-            auto left = std::make_shared<Identifier>(name);
-            auto leftSide = std::make_shared<IdentifierExpressionNode>(left);
-
-            auto rightSide = LiftExpression(analyzedFunction, instruction.operands[0]);
-
-            liftedFunction.statements.push_back(std::make_shared<AssignmentStatementNode>(leftSide, rightSide));
-            break;
-        }
-
-        case LiftedOperation::SETTABLE: {
-            auto table = LiftExpression(analyzedFunction, instruction.operands[1]);
-            auto key = LiftExpression(analyzedFunction, instruction.operands[2]);
-            auto value = LiftExpression(analyzedFunction, instruction.operands[0]);
-
-            liftedFunction.statements.push_back(std::make_shared<AssignmentStatementNode>(std::make_shared<IndexExpressionNode>(table, key), value));
-            break;
-        }
-
-        case LiftedOperation::SETTABLEKS: {
-            int kIndex = instruction.operands[2].value.imm.k;
-
-            std::string keyName;
-            const auto &constant = analyzedFunction->lpLiftedFunction->lpDeserialized->constants[kIndex];
-            if (constant.kType == LUA_TSTRING) {
-                keyName = std::get<std::string>(constant.constantData);
-            } else {
-                keyName = "INVALID_GLOBAL";
-            }
-
-            auto table = LiftExpression(analyzedFunction, instruction.operands[1]);
-            auto value = LiftExpression(analyzedFunction, instruction.operands[0]);
-
-            auto left = std::make_shared<MemberExpressionNode>(table, keyName);
-            liftedFunction.statements.push_back(std::make_shared<AssignmentStatementNode>(left, value));
-            break;
-        }
-
-        case LiftedOperation::RETURN: {
-            int regStart = instruction.operands[0].value.reg;
-            size_t count = instruction.operands[1].value.imm.n - 1;
-
-            std::vector<std::shared_ptr<Expression>> rets;
-
-            if (analyzedFunction->implicitUses.contains(&instruction)) {
-                const auto &versions = analyzedFunction->implicitUses.at(&instruction);
-
-                for (size_t i = 0; i < count && i < versions.size(); ++i) {
-                    LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
-                    op.value.reg = regStart + i;
-                    op.ssaVersion = versions[i];
-
-                    rets.push_back(LiftExpression(analyzedFunction, op));
-                }
-            } else {
-                if (count > 0) {
-                    rets.push_back(std::make_shared<CommentNode>("CRITICAL: Missing SSA versions for RETURN statement"));
-                }
-            }
-
-            liftedFunction.statements.push_back(std::make_shared<ReturnStatementNode>(rets));
-            break;
-        }
-
-        default:
-            break;
-        }
+    if (!analyzedFunction->basicBlocks.empty()) {
+        std::set<uint32_t> visited;
+        astFunc.statements = LiftTree(analyzedFunction, 0, -1, visited);
     }
 
-    for (auto &subFunction : analyzedFunction->innerFunctions) {
-        liftedFunction.subFunctions.emplace_back(LiftFunctionInternal(&subFunction));
+    for (auto &inner : analyzedFunction->innerFunctions) {
+        astFunc.subFunctions.push_back(LiftFunctionInternal(&inner));
     }
 
-    return liftedFunction;
+    return astFunc;
 }
 
-ASTFunction ASTLifter::LiftFunction(AnalyzedFunction *analyzedFunction) { return LiftFunctionInternal(analyzedFunction); }
+ASTFunction ASTLifter::LiftFunction(AnalyzedFunction *analyzedFunction) {
+    this->m_lpRootFunction = analyzedFunction; // set root for internal traversal.
+    return LiftFunctionInternal(analyzedFunction);
+}

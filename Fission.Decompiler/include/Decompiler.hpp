@@ -11,6 +11,7 @@
 #pragma clang diagnostic pop
 #include "ASTLifter.hpp"
 #include "SSABuilder.hpp"
+#include "SourceGenerator/Generator.hpp"
 
 enum class DecompileResult : uint8_t {
     Success,
@@ -51,6 +52,7 @@ class Decompiler {
     ControlFlowAnalyzer controlFlowAnalyzer{};
     SSABuilder SSABuilder{};
     ASTLifter ASTLifter{};
+    SourceGenerator SourceGenerator{};
     GraphVisualizer visualizer{};
 
     DecompileResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);

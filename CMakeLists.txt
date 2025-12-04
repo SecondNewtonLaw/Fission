@@ -199,7 +199,6 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/include/AbstractSyntaxTree/ASTNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/RootNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
-        Fission.Decompiler/include/AbstractSyntaxTree/Nodes/FunctionDeclarationNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/CommentNode.hpp
         Fission.Decompiler/src/ASTLifter.cpp
 )

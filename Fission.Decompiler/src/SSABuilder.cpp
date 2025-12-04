@@ -272,6 +272,31 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
 
                 func.implicitUses[inst] = std::move(retVersions);
+            } else if (inst->operation == LiftedOperation::SETLIST) {
+                // int tableReg = inst->operands[0].value.reg;
+                int newItemsStartReg = inst->operands[1].value.reg;
+                int newItemsCount = inst->operands[2].value.imm.n;
+                // unused.
+                // int startFrom = inst->operands[3].value.imm.n;
+
+                std::vector<int32_t> itemVersions;
+                itemVersions.reserve(newItemsCount > 0 ? newItemsCount : 0);
+
+                if (newItemsCount > 0) {
+                    for (int32_t k = 0; k < newItemsCount; ++k) {
+                        int32_t argReg = newItemsStartReg + k;
+
+                        int32_t v = CurrentVersion(argReg);
+
+                        if (v == -1) {
+                            v = NewVersion(argReg);
+                        }
+
+                        itemVersions.push_back(v);
+                    }
+                }
+
+                func.implicitUses[inst] = std::move(itemVersions);
             } else if (inst->operation == LiftedOperation::GETVARARGS) {
                 int32_t count = inst->operands[1].value.imm.n;
                 if (count > 1) {

@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include "ASTNode.hpp"
 
 class ExpressionStatementNode;
 class ReturnStatementNode;
@@ -14,6 +15,20 @@ class RootNode;
 class Identifier;
 class FunctionDeclarationNode;
 class CommentNode;
+class BreakStatementNode;
+class ContinueStatementNode;
+class BlockStatementNode;
+class WhileStatementNode;
+class IfStatementNode;
+class AssignmentStatementNode;
+class BinaryExpressionNode;
+class StringLiteralNode;
+class NumberLiteralNode;
+class BooleanLiteralNode;
+class IdentifierExpressionNode;
+class VariableDeclarationNode;
+class NilLiteralNode;
+class TableLiteralNode;
 
 class Visitor {
   public:
@@ -27,4 +42,18 @@ class Visitor {
     virtual void Visit(MemberExpressionNode *lpNode) = 0;
     virtual void Visit(ReturnStatementNode *lpNode) = 0;
     virtual void Visit(ExpressionStatementNode *lpNode) = 0;
+    virtual void Visit(BreakStatementNode *lpNode) = 0;
+    virtual void Visit(ContinueStatementNode *lpNode) = 0;
+    virtual void Visit(BlockStatementNode *lpNode) = 0;
+    virtual void Visit(WhileStatementNode *lpNode) = 0;
+    virtual void Visit(IfStatementNode *lpNode) = 0;
+    virtual void Visit(AssignmentStatementNode *lpNode) = 0;
+    virtual void Visit(BinaryExpressionNode *lpNode) = 0;
+    virtual void Visit(StringLiteralNode *lpNode) = 0;
+    virtual void Visit(NumberLiteralNode *lpNode) = 0;
+    virtual void Visit(BooleanLiteralNode *lpNode) = 0;
+    virtual void Visit(IdentifierExpressionNode *lpNode) = 0;
+    virtual void Visit(VariableDeclarationNode *lpNode) = 0;
+    virtual void Visit(NilLiteralNode *lpNode) = 0;
+    virtual void Visit(TableLiteralNode *lpNode) = 0;
 };

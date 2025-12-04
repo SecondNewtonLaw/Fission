@@ -84,6 +84,7 @@ struct BasicBlock {
     std::optional<uint32_t> ifStatementFalse; // if expr then --[[  ]] else --[[ what we care about ]] end
 
     std::optional<uint32_t> loopHeader; // contains loop header block idx.
+    std::optional<uint32_t> loopLatch;   // contains loop latch block idx.
     std::optional<uint32_t> loopExit;   // contains loop exit block idx.
 };
 
