@@ -933,7 +933,15 @@ void GraphVisualizer::GenerateFunctionGraph(std::stringstream &dot, const Analyz
                     if (curr->operands.size() >= 2 && curr->operands[1].type == LiftedOperandType::ImmediateConstant) {
                         int protoIndex = (curr->operands[1].value.imm.k);
                         std::string childEntryId = std::format("{}_SUB_{}_BLK_0", funcPrefix, protoIndex);
-                        dot << "        " << srcId << " -> " << childEntryId << " [label=\"NewClosure\", style=dotted, color=purple, fontcolor=purple];\n";
+                        dot << "        " << srcId << " -> " << childEntryId
+                            << " [label=\"Create a New Instance of Closure\", style=dotted, color=purple, fontcolor=purple];\n";
+                    }
+                } else if (curr->operation == LiftedOperation::DUPCLOSURE) {
+                    if (curr->operands.size() >= 3 && curr->operands[2].type == LiftedOperandType::ImmediateInteger) {
+                        int protoIndex = (curr->operands[2].value.imm.n);
+                        std::string childEntryId = std::format("{}_SUB_{}_BLK_0", funcPrefix, protoIndex);
+                        dot << "        " << srcId << " -> " << childEntryId
+                            << " [label=\"Attempt to Duplicate Instance of Closure\", style=dotted, color=purple, fontcolor=purple];\n";
                     }
                 }
                 if (curr == block.lpTail)

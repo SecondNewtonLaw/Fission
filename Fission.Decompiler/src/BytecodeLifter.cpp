@@ -978,11 +978,19 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_DUPCLOSURE: {
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::DUPCLOSURE);
-            instr.operands.resize(2);
+            instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant;
             instr.operands[1].value.imm.k = instruction.GetD();
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = std::get<LuauProto>(function->constants.at(instruction.GetD()).constantData)->bytecodeId; // Bytecode Identifier
+
+            instr.instructionRemarks = std::format(
+                "INFO: Attempt to create a duplicate of the closure at K{} (bytecode id of {}, with name '{}').", instruction.GetD(),
+                instr.operands[2].value.imm.n,
+                std::get<LuauProto>(function->constants.at(instruction.GetD()).constantData)->debugName.value_or("anonymous closure")
+            );
             break;
         }
         case LOP_PREPVARARGS: {
