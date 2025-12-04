@@ -448,9 +448,12 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::Register;
             instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
 
+            std::string additionalRemark = "";
+            if (instr.operands[0].value.reg == instr.operands[1].value.reg)
+                additionalRemark = ". Instruction self references table and value. Potential polymorphic pattern";
             instr.instructionRemarks = std::format(
-                "INFO: Setting the index (which is present at R{}) of a table at R{} to R{}", instr.operands[2].value.reg, instr.operands[1].value.reg,
-                instr.operands[0].value.reg
+                "INFO: Setting the index (which is present at R{}) of a table at R{} to R{}{}", instr.operands[2].value.reg, instr.operands[1].value.reg,
+                instr.operands[0].value.reg, additionalRemark
             );
             break;
         }
@@ -468,8 +471,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
 
             if (k0.kType == LUA_TSTRING) {
-                finalComment << "INFO: Getting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R" << instr.operands[1].value.reg
-                             << " into R" << instr.operands[0].value.reg;
+                finalComment << "INFO: Getting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R"
+                             << static_cast<int32_t>(instr.operands[1].value.reg) << " into R" << static_cast<int32_t>(instr.operands[0].value.reg);
             } else {
                 finalComment << "WARNING: Getting a table index which cannot be represented. This should never happen unless the bytecode is absolutely "
                                 "toasted or the kTable is corrupted";
@@ -494,8 +497,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
 
             if (k0.kType == LUA_TSTRING) {
-                finalComment << "INFO: Setting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R" << instr.operands[1].value.reg
-                             << " to the value in R" << instr.operands[0].value.reg;
+                std::string additionalRemark = "";
+                if (instr.operands[0].value.reg == instr.operands[1].value.reg)
+                    additionalRemark = ". Instruction self references table and value. Potential polymorphic pattern";
+
+                finalComment << "INFO: Setting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R"
+                             << static_cast<int32_t>(instr.operands[1].value.reg) << " to the value in R" << static_cast<int32_t>(instr.operands[0].value.reg)
+                             << additionalRemark;
             } else {
                 finalComment << "WARNING: The index of the table cannot be represented. This should never happen unless the bytecode is absolutely toasted or "
                                 "the kTable is corrupted";
