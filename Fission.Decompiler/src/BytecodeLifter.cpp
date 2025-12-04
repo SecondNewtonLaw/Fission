@@ -366,7 +366,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
 
             instr.instructionRemarks =
-                std::format("INFO: Loading upvalue at index 0x{:X} of the function into R{}.", instr.operands[1].value.imm.u, instr.operands[0].value.reg);
+                std::format("INFO: Loading upvalue at index {} of the function into R{}.", instr.operands[1].value.imm.u, instr.operands[0].value.reg);
             break;
         }
         case LOP_SETUPVAL: {
@@ -432,6 +432,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::Register;
             instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.instructionRemarks = std::format(
+                "INFO: Getting the index (which is present at R{}) of a table at R{} into R{}", instr.operands[2].value.reg, instr.operands[1].value.reg,
+                instr.operands[0].value.reg
+            );
             break;
         }
         case LOP_SETTABLE: {
@@ -443,6 +447,11 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::Register;
             instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+
+            instr.instructionRemarks = std::format(
+                "INFO: Setting the index (which is present at R{}) of a table at R{} to R{}", instr.operands[2].value.reg, instr.operands[1].value.reg,
+                instr.operands[0].value.reg
+            );
             break;
         }
         case LOP_GETTABLEKS: {
@@ -459,7 +468,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
 
             if (k0.kType == LUA_TSTRING) {
-                finalComment << "INFO: Getting Table Index (Constant with known hash) '" << std::get<std::string>(k0.constantData) << "'";
+                finalComment << "INFO: Getting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R" << instr.operands[1].value.reg
+                             << " into R" << instr.operands[0].value.reg;
             } else {
                 finalComment << "WARNING: Getting a table index which cannot be represented. This should never happen unless the bytecode is absolutely "
                                 "toasted or the kTable is corrupted";
@@ -484,7 +494,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
 
             if (k0.kType == LUA_TSTRING) {
-                finalComment << "INFO: Setting Table Index (Constant with known hash) '" << std::get<std::string>(k0.constantData) << "'";
+                finalComment << "INFO: Setting the index '" << std::get<std::string>(k0.constantData) << "' of a table at R" << instr.operands[1].value.reg
+                             << " to the value in R" << instr.operands[0].value.reg;
             } else {
                 finalComment << "WARNING: The index of the table cannot be represented. This should never happen unless the bytecode is absolutely toasted or "
                                 "the kTable is corrupted";
@@ -504,7 +515,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
-            instr.instructionRemarks = std::format("INFO: Get Table index {}", instr.operands[2].value.imm.n);
+            instr.instructionRemarks = std::format(
+                "INFO: Get the value of the numeric index '{}' of the table present at R{} and save it to R{}", instr.operands[2].value.imm.n + 1,
+                instr.operands[1].value.reg, instr.operands[0].value.reg
+            );
             break;
         }
         case LOP_SETTABLEN: {
@@ -516,7 +530,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
-            instr.instructionRemarks = std::format("INFO: Set Table at index {}", instr.operands[2].value.imm.n);
+            instr.instructionRemarks = std::format(
+                "INFO: Set the value of the numeric index '{}' of the table present at R{} to the value of R{}", instr.operands[2].value.imm.n + 1,
+                instr.operands[1].value.reg, instr.operands[0].value.reg
+            );
             break;
         }
         case LOP_NEWCLOSURE: {
