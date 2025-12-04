@@ -17,18 +17,11 @@ class SSABuilder {
     /*
      *  Stack of active SSA versions.
      */
-    std::map<int, std::stack<int>> versionStack;
+    std::vector<std::vector<int>> versionStack;
     /*
      *  RegID to next available SSA version.
      */
-    std::map<int, int> versionCounter;
-
-    /*
-     *  Used for tracking Phi insertions (Register ID -> Set<Block Ids>)
-     */
-    std::map<int, std::set<int>> blocksDefining;
-
-    std::map<int, std::set<int>> globals;
+    std::vector<int> versionCounter;
 
     static AccessType GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex);
 
