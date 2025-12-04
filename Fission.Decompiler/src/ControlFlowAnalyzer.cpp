@@ -799,13 +799,16 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
         if (block.dwBlockId == 0) {
             std::stringstream line;
             line << "; Function Debug Name: " << func->name << "\n";
-            line << "; Number of Upvalues: " << static_cast<int>(func->lpDeserialized->nups) << "\n";
-            line << "; Number of Arguments: " << static_cast<int>(func->lpDeserialized->numparams);
-
-            if (func->lpDeserialized->numparams > 0) {
+            line << "; Bytecode ID: " << static_cast<int32_t>(func->lpDeserialized->bytecodeId) << "\n";
+            line << "; Defined at line: " << static_cast<int32_t>(func->lpDeserialized->lineDefined) << "\n";
+            line << "; Total Registers Used: " << static_cast<int32_t>(func->lpDeserialized->maxstacksize) << "\n";
+            line << "; Number of Upvalues: " << static_cast<int32_t>(func->lpDeserialized->nups) << "\n";
+            line << "; Number of Arguments: " << static_cast<int32_t>(func->lpDeserialized->numparams);
+            if (func->lpDeserialized->numparams > 0)
                 line << " (R0 - R" << static_cast<int>(func->lpDeserialized->numparams) - 1 << ")";
-            }
-            line << ".";
+            line << "\n" << "; Is Variadic: " << (func->lpDeserialized->isvararg ? "Yes" : "No") << ".\n";
+
+            line << "";
             ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><FONT COLOR=\"#005500\">" << EscapeHtml(line.str()) << "</FONT></TD></TR>";
         }
         const LiftedInstruction *current = block.lpHead;
