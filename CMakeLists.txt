@@ -197,7 +197,6 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/Decompiler.cpp
         Fission.Decompiler/include/SourceGenerator/Generator.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/ASTNode.hpp
-        Fission.Decompiler/include/IRLifter.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/RootNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/FunctionDeclarationNode.hpp
