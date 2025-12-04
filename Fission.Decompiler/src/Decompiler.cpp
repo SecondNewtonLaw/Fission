@@ -3,8 +3,6 @@
 //
 #include "Decompiler.hpp"
 
-#include "IRLifter.hpp"
-
 #include <chrono>
 #include <filesystem>
 #include <fstream>
@@ -177,6 +175,10 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     SSABuilder.Build(controlFlowAnalyzedFunction);
     const auto ssaEnd = std::chrono::steady_clock::now();
 
+    // const auto astStart = std::chrono::steady_clock::now();
+    const auto liftedAST = ASTLifter.LiftFunction(&controlFlowAnalyzedFunction);
+    // const auto astEnd = std::chrono::steady_clock::now();
+
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;
     if (printIR || writeIR) {
@@ -204,8 +206,6 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
         std::println("Generated cfg.dot, use graph_generator to turn it into viewable .svg");
     }
 
-    IRLifter lifter(&controlFlowAnalyzedFunction);
-    lifter.Lift();
     if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown) {
         std::println(
             "Decompilation Breakdown:\n\t"

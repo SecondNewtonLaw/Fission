@@ -7,6 +7,7 @@
 
 #include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class Visitor;
@@ -16,6 +17,7 @@ enum class ASTNodeKind {
     NumberLiteral,
     StringLiteral,
     VarargLiteral,
+    FunctionDeclarationNode,
 
     /**
      *  @brief Represents a generic expression.
@@ -55,6 +57,10 @@ enum class ASTNodeKind {
      *  represented by dot-indexing.
      ***/
     IndexExpression,
+    /**
+     * @brief Represents a index expression with stuff to return
+     */
+    ReturnExpression,
 
     Unknown
 };
@@ -90,9 +96,9 @@ class BlockStatementNode : public Statement {
 
 class AssignmentStatementNode : public Statement {
   public:
-    std::shared_ptr<Identifier> left;
+    std::shared_ptr<Expression> left;
     std::shared_ptr<Expression> right;
-    AssignmentStatementNode(const std::shared_ptr<Identifier> &l, const std::shared_ptr<Expression> &r) : left(l), right(r) {}
+    AssignmentStatementNode(const std::shared_ptr<Expression> &l, const std::shared_ptr<Expression> &r) : left(l), right(r) {}
 };
 
 class IfStatementNode : public Statement {
@@ -114,6 +120,41 @@ class BinaryExpressionNode : public Expression {
     std::shared_ptr<Expression> left, right;
     BinaryExpressionNode(const std::string &op, const std::shared_ptr<Expression> &left, const std::shared_ptr<Expression> &right)
         : op(op), left(left), right(right) {}
+};
+
+class UnaryExpressionNode : public Expression {
+  public:
+    std::string op;
+    std::shared_ptr<Expression> operand;
+
+    UnaryExpressionNode(std::string op, std::shared_ptr<Expression> operand) : op(std::move(op)), operand(std::move(operand)) {
+        this->nodeKind = ASTNodeKind::UnaryExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class IndexExpressionNode : public Expression {
+  public:
+    std::shared_ptr<Expression> left, right;
+
+    IndexExpressionNode(std::shared_ptr<Expression> left, std::shared_ptr<Expression> right) : left(std::move(left)), right(std::move(right)) {
+        this->nodeKind = ASTNodeKind::IndexExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class MemberExpressionNode : public Expression {
+  public:
+    std::shared_ptr<Expression> table;
+    std::string keyName;
+
+    MemberExpressionNode(std::shared_ptr<Expression> table, std::string keyName) : table(std::move(table)), keyName(std::move(keyName)) {
+        this->nodeKind = ASTNodeKind::MemberExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
 class IdentifierExpressionNode : public Expression {
@@ -142,4 +183,42 @@ class StringLiteralNode : public Expression {
   public:
     std::string value;
     StringLiteralNode(std::string v) : value(v) {}
+};
+
+class FunctionDeclarationNode : public Expression {
+  public:
+    std::string functionName;
+    int32_t argumentCount = 0;                                 // -1 if its var_arg
+    std::unordered_map<int32_t, std::string> argumentsNames{}; // arg1 -> it's name inside syntax
+
+    FunctionDeclarationNode(std::string functionName, const int32_t argumentCount, std::unordered_map<int32_t, std::string> names)
+        : functionName(std::move(functionName)), argumentCount(argumentCount), argumentsNames(std::move(names)) {}
+};
+
+class CallExpressionNode : public Expression {
+  public:
+    std::shared_ptr<Expression> callee;
+    std::vector<std::shared_ptr<Expression>> arguments;
+
+    CallExpressionNode(std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args) : callee(std::move(func)), arguments(std::move(args)) {
+        this->nodeKind = ASTNodeKind::CallExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class ExpressionStatementNode : public Statement {
+  public:
+    std::shared_ptr<Expression> expression;
+    ExpressionStatementNode(std::shared_ptr<Expression> expr) : expression(std::move(expr)) { this->nodeKind = ASTNodeKind::ExpressionStatement; }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class ReturnStatementNode : public Statement {
+  public:
+    std::vector<std::shared_ptr<Expression>> returnValues;
+    ReturnStatementNode(std::vector<std::shared_ptr<Expression>> values) : returnValues(std::move(values)) { this->nodeKind = ASTNodeKind::ReturnExpression; }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

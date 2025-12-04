@@ -54,11 +54,10 @@ std::string DecodeBase64FileToBinary(const std::wstring &filepath) {
 }
 
 int main() {
-    auto data = DecodeBase64FileToBinary(L"bytecode_encoded.txt");
     Decompiler decompiler{};
     ASSERT(
-        decompiler.DecompileRobloxBytecode(
-            data,
+        decompiler.DecompileTestCodeFromFile(
+            "text.txt",
             DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::GenerateIRGraph
         ) == DecompileResult::Success,
         "Decompilation failed."

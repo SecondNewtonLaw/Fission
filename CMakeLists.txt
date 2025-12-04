@@ -202,6 +202,7 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/FunctionDeclarationNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/CommentNode.hpp
+        Fission.Decompiler/src/ASTLifter.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
@@ -213,6 +214,7 @@ add_executable(Fission.CLI
         Fission.CLI/src/main.cpp
         Fission.Decompiler/include/BytecodeLifter.hpp
         Fission.Decompiler/include/Decompiler.hpp
+        Fission.Decompiler/include/ASTLifter.hpp
 )
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})

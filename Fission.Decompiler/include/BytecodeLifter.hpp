@@ -124,8 +124,6 @@ struct LiftedFunction {
 };
 
 class BytecodeLifter {
-    uint64_t functionCounter = 0;
-
     LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
 
     Fission::InstructionDecoder *lpDecoder = nullptr;

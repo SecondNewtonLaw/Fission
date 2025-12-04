@@ -4,7 +4,6 @@
 
 #pragma once
 #include "BytecodeLifter.hpp"
-#include "ControlFlowAnalyzer.hpp"
 #include "DenominatorAnalysis.hpp"
 
 #include <map>

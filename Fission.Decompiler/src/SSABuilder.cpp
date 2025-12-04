@@ -37,7 +37,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
         set(op, AccessType::Write);
     }
 
-    set(LiftedOperation::CALL, AccessType::ReadWrite);
+    set(LiftedOperation::CALL, AccessType::Read); // THIS NEEDS TO BE CHANGED, READWRITE BREAKS AST LIFTING FOR CALLS.
 
     return table;
 }();
@@ -215,27 +215,72 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 AccessType mode = GetRegisterAccess(*inst, i);
                 if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
-                    op.ssaVersion = NewVersion(op.value.reg);
+                    int32_t newVer = NewVersion(op.value.reg);
+                    op.ssaVersion = newVer;
                     varsDefinedHere.push_back(op.value.reg);
+
+                    func.definitionMap[{op.value.reg, newVer}] = inst;
                 }
             }
 
             if (inst->operation == LiftedOperation::CALL) {
+                int32_t regFunc = inst->operands[0].value.reg;
+                int32_t argCount = inst->operands[1].value.imm.n - 1;
+
+                std::vector<int32_t> argVersions;
+                argVersions.reserve(argCount > 0 ? argCount : 0);
+
+                if (argCount > 0) {
+                    for (int32_t k = 0; k < argCount; ++k) {
+                        int32_t argReg = regFunc + 1 + k;
+
+                        int32_t v = CurrentVersion(argReg);
+
+                        if (v == -1) {
+                            v = NewVersion(argReg);
+                        }
+
+                        argVersions.push_back(v);
+                    }
+                }
+
+                func.implicitUses[inst] = std::move(argVersions);
                 int32_t retCount = inst->operands[2].value.imm.n;
+
                 if (retCount > 1) {
                     int32_t baseReg = inst->operands[0].value.reg;
                     for (int32_t k = 0; k < retCount - 1; ++k) {
-                        NewVersion(baseReg + k);
-                        varsDefinedHere.push_back(baseReg + k);
+                        uint8_t retReg = baseReg + k;
+
+                        int32_t newVer = NewVersion(retReg);
+                        varsDefinedHere.push_back(retReg);
+
+                        func.definitionMap[{retReg, newVer}] = inst;
                     }
                 }
+            } else if (inst->operation == LiftedOperation::RETURN) {
+                int regStart = inst->operands[0].value.reg;
+                int count = inst->operands[1].value.imm.n - 1;
+
+                std::vector<int32_t> retVersions;
+                for (int i = 0; i < count; ++i) {
+                    int reg = regStart + i;
+                    int32_t v = CurrentVersion(reg);
+                    if (v == -1)
+                        v = NewVersion(reg);
+                    retVersions.push_back(v);
+                }
+
+                func.implicitUses[inst] = std::move(retVersions);
             } else if (inst->operation == LiftedOperation::GETVARARGS) {
                 int32_t count = inst->operands[1].value.imm.n;
                 if (count > 1) {
-                    int32_t baseReg = inst->operands[0].value.reg;
-                    for (int32_t k = 1; k < count; ++k) {
-                        NewVersion(baseReg + k);
+                    uint8_t baseReg = inst->operands[0].value.reg;
+                    for (uint8_t k = 1; k < count; ++k) {
+                        int32_t newVer = NewVersion(baseReg + k);
                         varsDefinedHere.push_back(baseReg + k);
+
+                        func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
                     }
                 }
             }

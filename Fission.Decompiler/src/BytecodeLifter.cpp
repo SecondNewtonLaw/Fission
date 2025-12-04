@@ -214,7 +214,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         if (bIsMain)
             liftedFunction.name = "_start";
         else
-            liftedFunction.name = std::format("f{}", functionCounter++);
+            liftedFunction.name = std::format("f{}", function->bytecodeId);
     }
 
     for (size_t currentIndex = 0; currentIndex < function->instructions.size();) {

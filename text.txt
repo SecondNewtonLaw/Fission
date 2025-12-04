@@ -1,13 +1,2 @@
-local x = y
-local z = x
-print(z)  --> print(y)  (and x,z eliminated)
-
-local temp = getValue()
-local result = temp
-
-function a()
-    local ad = g
-    local d = n
-    local b = aa
-    return b, d, ad
-end
+--!optimize 0
+print(5 + 10 * 25)

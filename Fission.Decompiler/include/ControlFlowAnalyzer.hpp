@@ -87,11 +87,40 @@ struct BasicBlock {
     std::optional<uint32_t> loopExit;   // contains loop exit block idx.
 };
 
+struct SSARef {
+    uint8_t regIndex;
+    int version;
+
+    bool operator==(const SSARef &other) const { return regIndex == other.regIndex && version == other.version; }
+};
+
+namespace std {
+    template <> struct hash<SSARef> {
+        std::size_t operator()(const SSARef &k) const {
+            std::size_t h1 = std::hash<uint8_t>{}(k.regIndex);
+            std::size_t h2 = std::hash<int32_t>{}(k.version);
+
+            return h1 ^ (h2 << 1);
+        }
+    };
+} // namespace std
+
 struct AnalyzedFunction {
     LiftedFunction *lpLiftedFunction; // not owned by structure.
     std::vector<BasicBlock> basicBlocks;
 
+    std::unordered_map<SSARef, LiftedInstruction *> definitionMap;
+    std::unordered_map<const LiftedInstruction *, std::vector<int32_t>> implicitUses;
+
     std::vector<AnalyzedFunction> innerFunctions;
+
+    [[nodiscard]] LiftedInstruction *GetDefinition(const LiftedOperand &operand) const {
+        const auto ssaRef = SSARef{operand.value.reg, operand.ssaVersion};
+        if (!definitionMap.contains(ssaRef))
+            return nullptr;
+
+        return definitionMap.at(ssaRef);
+    }
 };
 
 inline std::string BlockTypeToString(BlockType type) {
