@@ -27,6 +27,8 @@ class SourceGenerator : public Visitor {
         this->dwIndentationLevel--;
     }
 
+    void Visit(NoExpressionNode *lpNode) override { (void)lpNode; }
+
     void Visit(RootNode *lpNode) override {
         (void)lpNode;
         for (const auto &body : lpNode->programBody)
@@ -65,7 +67,28 @@ class SourceGenerator : public Visitor {
 
     void Visit(CallExpressionNode *lpNode) override {
         (void)lpNode;
-        buffer << "--[[TODO]]";
+        buffer << this->GetIndentation();
+        if (!lpNode->rets.empty()) {
+            buffer << "local ";
+            for (size_t i = 0; i < lpNode->rets.size(); i++) {
+                lpNode->rets.at(i)->Accept(this);
+                if (i < lpNode->rets.size() - 1)
+                    buffer << ", ";
+            }
+            buffer << " = ";
+        }
+        lpNode->callee->Accept(this);
+        buffer << "(";
+        for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+            lpNode->arguments.at(i)->Accept(this);
+            if (i < lpNode->arguments.size() - 1)
+                buffer << ", ";
+        }
+
+        if (lpNode->bIsVariadicCall)
+            buffer << ", ...";
+        buffer << ")";
+        this->NextLine();
     }
 
     void Visit(UnaryExpressionNode *lpNode) override { (void)lpNode; }
@@ -240,5 +263,32 @@ class SourceGenerator : public Visitor {
                 buffer << ", ";
         }
         buffer << " }";
+    }
+
+    void Visit(NameCallExpressionNode *lpNode) override {
+        buffer << this->GetIndentation();
+        if (!lpNode->rets.empty()) {
+            buffer << "local ";
+            for (size_t i = 0; i < lpNode->rets.size(); i++) {
+                lpNode->rets.at(i)->Accept(this);
+                if (i < lpNode->rets.size() - 1)
+                    buffer << ", ";
+            }
+            buffer << " = ";
+        }
+        lpNode->calledOn->Accept(this);
+        buffer << ":";
+        lpNode->callWhat->Accept(this);
+        buffer << "(";
+        for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+            lpNode->arguments.at(i)->Accept(this);
+            if (i < lpNode->arguments.size() - 1)
+                buffer << ", ";
+        }
+
+        if (lpNode->bIsVariadicCall)
+            buffer << ", ...";
+        buffer << ")";
+        this->NextLine();
     }
 };

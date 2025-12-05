@@ -201,7 +201,6 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     int reg = op.value.reg;
                     if (CurrentVersion(reg) == -1) {
                         op.ssaVersion = NewVersion(reg);
-                        varsDefinedHere.push_back(reg);
                     } else {
                         op.ssaVersion = CurrentVersion(reg);
                     }
@@ -230,18 +229,25 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 std::vector<int32_t> argVersions;
                 argVersions.reserve(argCount > 0 ? argCount : 0);
 
-                if (argCount > 0) {
-                    for (int32_t k = 0; k < argCount; ++k) {
-                        int32_t argReg = regFunc + 1 + k;
-
-                        int32_t v = CurrentVersion(argReg);
-
-                        if (v == -1) {
-                            v = NewVersion(argReg);
-                        }
-
-                        argVersions.push_back(v);
+                if (argCount == -1 /* var arg */) {
+                    // get previous instruction, almost guaranteed always to be a GETVARARGS
+                    if ((inst - 1)->operation == LiftedOperation::GETVARARGS) {
+                        // ASSERT((inst - 1)->operation == LiftedOperation::GETVARARGS, "no GETVARARGS previous to a call that uses a VARARG argument count!");
+                        auto topCallRegister = (inst - 1)->operands[0];
+                        argCount = topCallRegister.value.reg;
                     }
+                }
+
+                for (int32_t k = 0; k < argCount; ++k) {
+                    int32_t argReg = regFunc + 1 + k;
+
+                    int32_t v = CurrentVersion(argReg);
+
+                    if (v == -1) {
+                        v = NewVersion(argReg);
+                    }
+
+                    argVersions.push_back(v);
                 }
 
                 func.implicitUses[inst] = std::move(argVersions);

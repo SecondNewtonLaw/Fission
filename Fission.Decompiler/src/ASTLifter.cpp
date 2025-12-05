@@ -79,7 +79,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
     const auto definitionInstruction = func->GetDefinition(operand);
 
     if (!definitionInstruction)
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", operand.value.reg)));
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
 
     switch (definitionInstruction->operation) {
     case LiftedOperation::LOAD: {
@@ -278,6 +278,13 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         );
     }
 
+    case LiftedOperation::CALL: {
+    case LiftedOperation::NAMECALL: {
+        // namecall currently simply does v{} (rid), we'll just do the same.
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
+    }
+    }
+
     default:
         break;
     }
@@ -305,7 +312,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             if (nSize.value.imm.n == 0) {
                 statements.push_back(
                     std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg))),
+                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(inst.operands[0]))),
                         std::make_shared<TableLiteralNode>()
                     )
                 );
@@ -337,7 +344,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
             statements.push_back(
                 std::make_shared<VariableDeclarationNode>(
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg))),
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(inst.operands[0]))),
                     std::make_shared<TableLiteralNode>(setListWhat)
                 )
             );
@@ -362,21 +369,40 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         case LiftedOperation::CALL: {
             // TODO: Handle vararg properly later.
             int regFunc = inst.operands[0].value.reg;
-            size_t argCount = inst.operands[1].value.imm.n - 1;
+            int32_t argCount = inst.operands[1].value.imm.n - 1;
+            // int32_t retCount = inst.operands[2].value.imm.n;
             auto callee = LiftExpression(func, inst.operands[0]);
 
             std::vector<std::shared_ptr<Expression>> args;
             if (func->implicitUses.contains(&inst)) {
                 const auto &versions = func->implicitUses.at(&inst);
-                for (size_t k = 0; k < argCount && k < versions.size(); ++k) {
+                for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
                     LiftedOperand op;
                     op.type = LiftedOperandType::Register;
                     op.value.reg = regFunc + 1 + k;
                     op.ssaVersion = versions[k];
+
+                    if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
+                        break;
                     args.push_back(LiftExpression(func, op));
                 }
             }
-            statements.push_back(std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(callee, args)));
+
+            std::vector<SSARef> refs;
+
+            for (const auto &ret : func->definitionMap) {
+                if (ret.second != func->lpLiftedFunction->instructions.data() + i)
+                    continue;
+                refs.emplace_back(ret.first);
+            }
+
+            std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
+
+            std::vector<std::shared_ptr<Expression>> rets;
+            for (const auto &ref : refs)
+                rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
+
+            statements.push_back(std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(callee, args, rets, argCount == (int32_t)-1)));
             break;
         }
         case LiftedOperation::SETGLOBAL: {
@@ -434,9 +460,61 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             statements.push_back(std::make_shared<ReturnStatementNode>(rets));
             break;
         }
+        case LiftedOperation::NAMECALL: {
+            auto &callInsn = func->lpLiftedFunction->instructions[i + 2];
+            int regFunc = callInsn.operands[0].value.reg;
+            int32_t argCount = callInsn.operands[1].value.imm.n - 1;
+
+            std::vector<std::shared_ptr<Expression>> args;
+            if (func->implicitUses.contains(&callInsn)) {
+                const auto &versions = func->implicitUses.at(&callInsn);
+                for (int32_t k = 1; k < static_cast<int32_t>(versions.size()); ++k) { // skip arg0 (which is self).
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = regFunc + 1 + k;
+                    op.ssaVersion = versions[k];
+
+                    if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
+                        break;
+                    args.push_back(LiftExpression(func, op));
+                }
+            }
+
+            std::vector<SSARef> refs;
+
+            for (const auto &ret : func->definitionMap) {
+                if (ret.second != func->lpLiftedFunction->instructions.data() + i)
+                    continue;
+                refs.emplace_back(ret.first);
+            }
+
+            std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
+
+            std::vector<std::shared_ptr<Expression>> rets;
+            for (const auto &ref : refs)
+                rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
+
+            auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(func->lpLiftedFunction->instructions[i].operands[2].value.imm.k);
+            ASSERT(kIdx.kType == LUA_TSTRING, "ktt != LUA_TSTRING (NAMECALL)");
+            auto fakeOp = LiftedOperand{};
+            fakeOp.type = LiftedOperandType::Register;
+            fakeOp.value.reg = func->lpLiftedFunction->instructions[i].operands[1].value.reg;
+            fakeOp.ssaVersion = func->lpLiftedFunction->instructions[i].operands[1].ssaVersion-1;
+            statements.push_back(
+                std::make_shared<ExpressionStatementNode>(std::make_shared<NameCallExpressionNode>(
+                    LiftExpression(func, fakeOp),
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(kIdx.constantData))), args, rets,
+                    argCount == (int32_t)-1
+                ))
+            );
+            i += 2; // skip NOP (aux) and CALL
+            break;
+        }
         case LiftedOperation::LOAD:
         case LiftedOperation::NOP:
+        case LiftedOperation::GETIMPORT:
         case LiftedOperation::GETGLOBAL:
+        case LiftedOperation::GETVARARGS:
         case LiftedOperation::MOVE: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
             break;
         }
@@ -447,7 +525,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             } else {
                 auto expression = LiftExpression(func, inst.operands[0]);
 
-                auto targetIdentifier = std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg));
+                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
                 auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
 
                 statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));

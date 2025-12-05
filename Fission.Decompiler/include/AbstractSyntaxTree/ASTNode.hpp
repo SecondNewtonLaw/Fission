@@ -241,12 +241,41 @@ class FunctionDeclarationNode : public Expression {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class NoExpressionNode : public Expression {
+  public:
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class NameCallExpressionNode : public Expression {
+  public:
+    std::shared_ptr<Expression> calledOn;
+    std::shared_ptr<Expression> callWhat;
+    std::vector<std::shared_ptr<Expression>> arguments;
+    std::vector<std::shared_ptr<Expression>> rets;
+    bool bIsVariadicCall;
+
+    NameCallExpressionNode(
+        std::shared_ptr<Expression> calledOn, std::shared_ptr<Expression> calledWhat, std::vector<std::shared_ptr<Expression>> args,
+        std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall
+    )
+        : calledOn(std::move(calledOn)), callWhat(std::move(calledWhat)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall) {
+        this->nodeKind = ASTNodeKind::CallExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class CallExpressionNode : public Expression {
   public:
     std::shared_ptr<Expression> callee;
     std::vector<std::shared_ptr<Expression>> arguments;
+    std::vector<std::shared_ptr<Expression>> rets;
+    bool bIsVariadicCall;
 
-    CallExpressionNode(std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args) : callee(std::move(func)), arguments(std::move(args)) {
+    CallExpressionNode(
+        std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args, std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall
+    )
+        : callee(std::move(func)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall) {
         this->nodeKind = ASTNodeKind::CallExpression;
     }
 

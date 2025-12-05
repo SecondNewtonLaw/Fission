@@ -3,7 +3,6 @@
 //
 
 #pragma once
-#include "ASTNode.hpp"
 
 class ExpressionStatementNode;
 class ReturnStatementNode;
@@ -29,6 +28,8 @@ class IdentifierExpressionNode;
 class VariableDeclarationNode;
 class NilLiteralNode;
 class TableLiteralNode;
+class NoExpressionNode;
+class NameCallExpressionNode;
 
 class Visitor {
   public:
@@ -56,4 +57,6 @@ class Visitor {
     virtual void Visit(VariableDeclarationNode *lpNode) = 0;
     virtual void Visit(NilLiteralNode *lpNode) = 0;
     virtual void Visit(TableLiteralNode *lpNode) = 0;
+    virtual void Visit(NoExpressionNode *lpNode) = 0;
+    virtual void Visit(NameCallExpressionNode *lpNode) = 0;
 };
