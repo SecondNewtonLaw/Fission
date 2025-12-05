@@ -164,7 +164,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCallLikeInstruction(const AnalyzedFun
     return node;
 }
 
-std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand) {
+std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand, bool forceExpression) {
     if (operand.type == LiftedOperandType::Register && this->m_pinnedRegisters.contains(operand.value.reg))
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
 
@@ -173,7 +173,45 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
     if (!definitionInstruction)
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
 
+    if (!forceExpression) {
+        switch (definitionInstruction->operation) {
+        case LiftedOperation::ADD:
+        case LiftedOperation::SUB:
+        case LiftedOperation::MUL:
+        case LiftedOperation::DIV:
+        case LiftedOperation::MOD:
+        case LiftedOperation::POW:
+        case LiftedOperation::ADDK:
+        case LiftedOperation::SUBK:
+        case LiftedOperation::MULK:
+        case LiftedOperation::DIVK:
+        case LiftedOperation::MODK:
+        case LiftedOperation::POWK:
+        case LiftedOperation::NOT:
+        case LiftedOperation::MINUS:
+        case LiftedOperation::LENGTH:
+        case LiftedOperation::MOVE:
+        case LiftedOperation::LOAD:
+        case LiftedOperation::GETTABLE:
+        case LiftedOperation::GETTABLEKS:
+        case LiftedOperation::GETTABLEN:
+            if (!IsInstructionConsumed(func, definitionInstruction->instructionIndex)) {
+                return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
+            }
+            break;
+        case LiftedOperation::CALL:
+        case LiftedOperation::NAMECALL:
+            if (IsInstructionConsumed(func, definitionInstruction->instructionIndex))
+                return LiftCallLikeInstruction(func, definitionInstruction->instructionIndex, true);
+            return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
+        default:
+            break;
+        }
+    }
+
     switch (definitionInstruction->operation) {
+    case LiftedOperation::NEWTABLE:
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
     case LiftedOperation::LOAD: {
         auto type = definitionInstruction->operands[1].type;
         if (type == LiftedOperandType::ImmediateNil) {
@@ -286,7 +324,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         int count = importData >> 30;
 
         if (count == 0) {
-            return std::make_shared<CommentNode>("Corrupted GETIMPORT (count 0)");
+            return std::make_shared<CommentNode>("Corrupted GETIMPORT (count 0)", true);
         }
 
         std::vector<std::string> parts;
@@ -435,8 +473,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
             auto functionArguments = duplicatedFunction->numparams;
             auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-            for (uint8_t i = 0; i < functionArguments; i++) {
-                functionArgumentNames[i] = std::format("v{}", i);
+            for (uint8_t aN = 0; aN < functionArguments; aN++) {
+                functionArgumentNames[aN] = std::format("v{}_0", aN);
             }
 
             const AnalyzedFunction *lpFunc = nullptr;
@@ -459,8 +497,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[inst.operands[1].value.imm.k];
             std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
             std::unordered_map<int32_t, std::string> args;
-            for (uint8_t i = 0; i < proto->numparams; i++)
-                args[i] = std::format("v{}", i);
+            for (uint8_t pN = 0; pN < proto->numparams; pN++)
+                args[pN] = std::format("v{}_0", pN);
 
             auto *lpFunc = &func->innerFunctions[inst.operands[1].value.imm.k];
             std::set<uint32_t> visited;
@@ -495,6 +533,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
             if (func->implicitUses.contains(&func->lpLiftedFunction->instructions[setlistId])) {
                 if (tableReg == func->lpLiftedFunction->instructions[setlistId].operands[0].value.imm.n) {
+                    skippedIndices.insert(setlistId);
                     auto itemsIdx = func->lpLiftedFunction->instructions[setlistId].operands[1].value.imm.n;
                     size_t nItemsCount = inst.operands[2].value.imm.n;
                     const auto &versions = func->implicitUses.at(&func->lpLiftedFunction->instructions[setlistId]);
@@ -594,7 +633,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
                     }
                     // we'll see if namecall needs this later on.
 
-                    rets.push_back(LiftExpression(func, op));
+                    rets.push_back(LiftExpression(func, op, false));
                 }
             }
             statements.push_back(std::make_shared<ReturnStatementNode>(rets));
@@ -640,24 +679,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             }
             break;
         }
-        case LiftedOperation::ADD:
-        case LiftedOperation::SUB:
-        case LiftedOperation::MUL:
-        case LiftedOperation::DIV:
-        case LiftedOperation::MOD:
-        case LiftedOperation::POW:
-        case LiftedOperation::ADDK:
-        case LiftedOperation::SUBK:
-        case LiftedOperation::MULK:
-        case LiftedOperation::DIVK:
-        case LiftedOperation::MODK:
-        case LiftedOperation::POWK:
-        case LiftedOperation::LOAD:
         case LiftedOperation::NOP:
-        case LiftedOperation::GETVARARGS:
-        case LiftedOperation::MOVE: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
             break;
-        }
         case LiftedOperation::GETIMPORT:
         case LiftedOperation::GETGLOBAL: {
             int32_t reg = inst.operands[0].value.reg;
@@ -679,6 +702,46 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
             if (uses > 0 /* if we have more than 0 refs, then we don't care. We inline these */ && !m_pinnedRegisters.contains(reg))
                 break;
+
+            break;
+        }
+        case LiftedOperation::LOAD: {
+            if (func->GetDefinition(inst.operands[0]) == nullptr) {
+                // while this will be self, we want to know if there was a previous definition.
+                // if no previous definition, push it, as this may be used to mutate variables.
+                auto expression = LiftExpression(func, inst.operands[0], true);
+
+                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
+                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+
+                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
+            }
+        case LiftedOperation::MOVE:
+            break; // LOAD and MOVE are suppressed.
+        }
+        case LiftedOperation::ADD:
+        case LiftedOperation::SUB:
+        case LiftedOperation::MUL:
+        case LiftedOperation::DIV:
+        case LiftedOperation::MOD:
+        case LiftedOperation::POW:
+        case LiftedOperation::ADDK:
+        case LiftedOperation::SUBK:
+        case LiftedOperation::MULK:
+        case LiftedOperation::DIVK:
+        case LiftedOperation::MODK:
+        case LiftedOperation::POWK: {
+        }
+        case LiftedOperation::GETVARARGS: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
+            if (func->GetDefinition(inst.operands[0])) {
+                auto expression = LiftExpression(func, inst.operands[0], true);
+
+                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
+                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+
+                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
+            }
+            break;
         }
         default:
             if (nullptr == func->GetDefinition(inst.operands[0])) {
@@ -721,6 +784,8 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
+            auto blockId = std::make_shared<CommentNode>(std::format("IfHeader (true: {}, false: {}, thisblock: {})", trueIdx, falseIdx, currentBlockId), true);
+            nodes.insert(nodes.end(), blockId);
 
             std::shared_ptr<Expression> condition = nullptr;
             if (block.lpTail) {
@@ -798,7 +863,9 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
 
             ASSERT(condition, "failed to determine conditional for if branch.");
 
-            const uint32_t mergeIdx = FindMergeBlock(func, trueIdx, falseIdx);
+            uint32_t mergeIdx = FindMergeBlock(func, trueIdx, falseIdx);
+            if (mergeIdx == static_cast<uint32_t>(-1) && stopBlockId != static_cast<uint32_t>(-1))
+                mergeIdx = (int32_t)stopBlockId;
 
             std::set<uint32_t> branchVisited = visited;
             auto thenStmts = LiftTree(func, trueIdx, mergeIdx, branchVisited);
@@ -822,7 +889,7 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                 nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
             }
         } else {
-            nodes.push_back(std::make_shared<CommentNode>("Broken If Header"));
+            nodes.push_back(std::make_shared<CommentNode>("Broken If Header", true));
         }
         break;
     }

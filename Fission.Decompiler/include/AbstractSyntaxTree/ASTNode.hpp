@@ -12,11 +12,7 @@
 
 class Visitor;
 enum class ASTNodeKind {
-    NilLiteral,
-    BooleanLiteral,
-    NumberLiteral,
-    StringLiteral,
-    VarargLiteral,
+    LiteralValue,
     FunctionDeclarationNode,
 
     /**

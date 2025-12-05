@@ -64,6 +64,8 @@ class SourceGenerator : public Visitor {
     void Visit(CommentNode *lpNode) override {
         (void)lpNode;
         buffer << this->GetIndentation() << "--[=[" << lpNode->comment << "]=]";
+        if (lpNode->bNewLine)
+            this->NextLine();
     }
 
     void Visit(CallExpressionNode *lpNode) override {
@@ -105,13 +107,18 @@ class SourceGenerator : public Visitor {
         }
     }
 
-    void Visit(UnaryExpressionNode *lpNode) override { (void)lpNode; }
+    void Visit(UnaryExpressionNode *lpNode) override {
+        (void)lpNode;
+        buffer << lpNode->op;
+        lpNode->operand->Accept(this);
+    }
 
     void Visit(IndexExpressionNode *lpNode) override {
         (void)lpNode;
         lpNode->left->Accept(this);
-        buffer << ".";
+        buffer << "[";
         lpNode->right->Accept(this);
+        buffer << "]";
     }
 
     void Visit(MemberExpressionNode *lpNode) override {

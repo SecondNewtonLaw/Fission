@@ -8,7 +8,8 @@
 class CommentNode final : public Expression {
   public:
     std::string comment;
-    CommentNode(const std::string &commentContent) : comment(commentContent) {}
+    bool bNewLine=true;
+    CommentNode(const std::string &commentContent, bool newline) : comment(commentContent),bNewLine(newline) {}
     void Accept(Visitor *visitor) override {
         visitor->Visit(this);
     }

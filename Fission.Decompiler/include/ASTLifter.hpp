@@ -57,50 +57,96 @@ class ASTLifter {
 
     bool IsInstructionConsumed(const AnalyzedFunction *func, int index) {
         const auto &inst = func->lpLiftedFunction->instructions[index];
-        if (inst.operation != LiftedOperation::CALL && inst.operation != LiftedOperation::NAMECALL)
-            return false;
 
         if (inst.operation == LiftedOperation::CALL) {
             if (inst.operands[2].value.imm.n == 0)
                 return true;
-        } else {
+        } else if (inst.operation == LiftedOperation::NAMECALL) {
             if (static_cast<size_t>(index) + 2 < func->lpLiftedFunction->instructions.size()) {
-                const auto &callInst = func->lpLiftedFunction->instructions[index + 2];
-                if (callInst.operation == LiftedOperation::CALL && callInst.operands[2].value.imm.n == 0)
+                const auto &call = func->lpLiftedFunction->instructions[index + 2];
+                if (call.operation == LiftedOperation::CALL && call.operands[2].value.imm.n == 0)
                     return true;
             }
         }
 
-        int reg = inst.operands[0].value.reg;
-        const auto *callInfoInst = &inst;
-        if (inst.operation == LiftedOperation::NAMECALL) {
-            if (static_cast<size_t>(index) + 2 < func->lpLiftedFunction->instructions.size())
-                callInfoInst = &func->lpLiftedFunction->instructions[index + 2];
-            else
-                return false;
+        if (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::NAMECALL) {
+            const auto *callInfo = &inst;
+            if (inst.operation == LiftedOperation::NAMECALL) {
+                if (static_cast<size_t>(index) + 2 < func->lpLiftedFunction->instructions.size())
+                    callInfo = &func->lpLiftedFunction->instructions[index + 2];
+                else
+                    return false;
+            }
+
+            if (callInfo->operands[2].value.imm.n == 2) {
+                int reg = inst.operands[0].value.reg;
+                for (const auto &[ref, instrPtr] : func->definitionMap) {
+                    if (instrPtr->instructionIndex == callInfo->instructionIndex && ref.regIndex == reg) {
+                        if (func->useCounts.contains({reg, ref.version}) && func->useCounts.at({reg, ref.version}) == 1)
+                            return true;
+                        break;
+                    }
+                }
+            }
+            return false;
         }
 
-        int nResults = callInfoInst->operands[2].value.imm.n;
-        if (nResults == 2) {
+        switch (inst.operation) {
+        case LiftedOperation::ADD:
+        case LiftedOperation::SUB:
+        case LiftedOperation::MUL:
+        case LiftedOperation::DIV:
+        case LiftedOperation::MOD:
+        case LiftedOperation::POW:
+        case LiftedOperation::ADDK:
+        case LiftedOperation::SUBK:
+        case LiftedOperation::MULK:
+        case LiftedOperation::DIVK:
+        case LiftedOperation::MODK:
+        case LiftedOperation::POWK:
+        case LiftedOperation::NOT:
+        case LiftedOperation::MINUS:
+        case LiftedOperation::LENGTH:
+        case LiftedOperation::AND:
+        case LiftedOperation::OR:
+        case LiftedOperation::ANDK:
+        case LiftedOperation::ORK:
+        case LiftedOperation::CONCAT:
+        case LiftedOperation::GETTABLE:
+        case LiftedOperation::GETTABLEKS:
+        case LiftedOperation::GETTABLEN:
+        case LiftedOperation::GETGLOBAL:
+        case LiftedOperation::GETIMPORT:
+        case LiftedOperation::GETUPVAL:
+        case LiftedOperation::LOAD:
+        case LiftedOperation::MOVE: {
+            int reg = inst.operands[0].value.reg;
+
             int definedVersion = -1;
             for (const auto &[ref, instrPtr] : func->definitionMap) {
-                if (instrPtr == callInfoInst && ref.regIndex == reg) {
+                if (instrPtr->instructionIndex == inst.instructionIndex && ref.regIndex == reg) {
                     definedVersion = ref.version;
                     break;
                 }
             }
 
             if (definedVersion != -1) {
-                if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) == 1)
+                if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 0) {
                     return true;
+                }
             }
+            return false;
         }
+        default:
+            break;
+        }
+
         return false;
     }
 
     std::shared_ptr<Expression> LiftCallLikeInstruction(const AnalyzedFunction *func, int32_t index, bool isNested = false);
 
-    std::shared_ptr<Expression> LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand);
+    std::shared_ptr<Expression> LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand, bool forceExpression = false);
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const AnalyzedFunction *func, const BasicBlock &block);
     std::vector<std::shared_ptr<Statement>> LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited);
     ASTFunction LiftFunctionInternal(AnalyzedFunction *analyzedFunction);
