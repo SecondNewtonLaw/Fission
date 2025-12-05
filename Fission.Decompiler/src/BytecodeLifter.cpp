@@ -933,11 +933,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_FORNLOOP: {
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FORNLOOP);
-            instr.operands.resize(2);
+            instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetD();
+            instr.operands[2].type = LiftedOperandType::Register;
+            instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A) + 2; // control variable.
             break;
         }
         case LOP_FORGLOOP: {

@@ -1,8 +1,12 @@
-local function testCallback(a, b, c)
-    print("wow we were called!")
-    return c, b, a
+
+local d = Wha
+
+for i = 10, 100, 1 do
+    if i ~= "LIER LIER PANTS ON FIRE!!!" then
+        print("test string", i)
+    end
 end
 
-local t = testCallback
-t(1, 2, 3)
-testCallback(3, 2, 1)
+warn("test string1")
+warn("test string2")
+warn("test string3")
