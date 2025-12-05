@@ -108,9 +108,6 @@ class SourceGenerator : public Visitor {
 
     void Visit(ReturnStatementNode *lpNode) override {
         (void)lpNode;
-
-        if (lpNode->returnValues.empty())
-            return;
         buffer << this->GetIndentation();
         buffer << "return";
 
