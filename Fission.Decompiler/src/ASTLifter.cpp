@@ -866,24 +866,41 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
     case BlockType::LoopHeader: {
         if (block.loopLatch.has_value()) {
             uint32_t exitIdx = block.loopExit.value_or(-1);
+            ASSERT(
+                exitIdx != -1 || ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop && exitIdx == static_cast<uint32_t>(-1)),
+                "other loop type than while without an exit block."
+            );
 
             if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
-                if (exitIdx == static_cast<uint32_t>(-1))
-                    exitIdx = block.loopLatch.value(
-                    ); // in while loops, there may be no exit. Thus, if there's none, set it to the latch. This should get things going.
-
-                // assume the first non-exit successor is the loop body start
+                auto whileNode = std::make_shared<WhileStatementNode>();
                 int32_t bodyIdx = -1;
-                if (block.loopExit)
+                if (exitIdx == static_cast<uint32_t>(-1)) {
+                    // in while loops, depending on the optimization level, we may have no exit block.
+                    // this is because the compiler will remove any conditional jumps, as they evaluate to a constant.
+                    // The way to solve this is to assume that the path that comes next will always be the body. Realistically, we have no choice!
+                    ASSERT(block.successors.size() == 1); // this loop type only has 1 successor.
+                    bodyIdx = block.successors.at(0);     // grab first.
+
+                    if (static_cast<uint32_t>(bodyIdx) == currentBlockId || func->basicBlocks.at(bodyIdx).bType == BlockType::LoopLatch) {
+                        whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                    }
+                    whileNode->body = CreateBlock(blockStatements);
+                    // remove last block (us)
+                    nodes.pop_back(); // remove last node.
+                    nodes.push_back(whileNode);
+                    // we are the loop body.
+                    break;
+                } else {
                     for (auto succ : block.successors) {
-                        if (succ != exitIdx) {
+                        if (succ != exitIdx) { // determine body by != exit.
                             bodyIdx = succ;
                             break;
                         }
                     }
-                else
-                    bodyIdx = exitIdx; // kind of no option.
-                auto whileNode = std::make_shared<WhileStatementNode>();
+                }
+                // in while loops, there may be no exit. Thus, if there's none, set it to the latch. This should get things going.
+
+                // assume the first non-exit successor is the loop body start
 
                 // try to extract condition
                 if (block.bTerminator == BlockTerminator::Conditional && block.lpTail) {
