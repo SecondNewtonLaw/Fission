@@ -865,7 +865,7 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
 
     case BlockType::LoopHeader: {
         if (block.loopLatch.has_value()) {
-            uint32_t exitIdx = block.loopExit.value();
+            uint32_t exitIdx = block.loopExit.value_or(-1);
 
             if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
                 if (exitIdx == static_cast<uint32_t>(-1))
@@ -874,12 +874,15 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
 
                 // assume the first non-exit successor is the loop body start
                 int32_t bodyIdx = -1;
-                for (auto succ : block.successors) {
-                    if (succ != exitIdx) {
-                        bodyIdx = succ;
-                        break;
+                if (block.loopExit)
+                    for (auto succ : block.successors) {
+                        if (succ != exitIdx) {
+                            bodyIdx = succ;
+                            break;
+                        }
                     }
-                }
+                else
+                    bodyIdx = exitIdx; // kind of no option.
                 auto whileNode = std::make_shared<WhileStatementNode>();
 
                 // try to extract condition
@@ -965,7 +968,7 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                     whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
                 }
 
-                ASSERT(bodyIdx != -1, "control flow analysis failed");
+                ASSERT(bodyIdx != -1, "control flow analysis failed"); // TODO: properly handle while true do end loops.
                 std::set<uint32_t> loopVisited = visited;
                 auto loopBody = LiftTree(func, bodyIdx, exitIdx, loopVisited);
                 whileNode->body = CreateBlock(loopBody);

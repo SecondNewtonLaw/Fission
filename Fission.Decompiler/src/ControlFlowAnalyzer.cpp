@@ -215,7 +215,8 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             // logic may jump to them for branching and control-flow such as loop skipping.
             if (instruction->operation == LiftedOperation::FORNLOOP || instruction->operation == LiftedOperation::FORGLOOP ||
                 instruction->operation == LiftedOperation::FORNPREP || instruction->operation == LiftedOperation::FORGPREP ||
-                instruction->operation == LiftedOperation::FORGPREP_INEXT || instruction->operation == LiftedOperation::FORGPREP_NEXT) {
+                instruction->operation == LiftedOperation::FORGPREP_INEXT || instruction->operation == LiftedOperation::FORGPREP_NEXT ||
+                instruction->operation == LiftedOperation::JUMP) {
                 leaderIndexes.insert(currentIndex);
             }
 
