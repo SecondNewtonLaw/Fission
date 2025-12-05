@@ -465,7 +465,61 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             for (const auto &ref : refs)
                 rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
 
-            statements.push_back(std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(callee, args, rets, argCount == (int32_t)-1)));
+            auto callExpr = std::make_shared<CallExpressionNode>(callee, args, rets, argCount == (int32_t)-1, false);
+            const auto &nextInst = func->lpLiftedFunction->instructions[i + 1];
+
+            if (nextInst.operation == LiftedOperation::CALL) {
+                if ((nextInst.operands[1].value.imm.n - 1) == -1) /*var arg*/ {
+                    // inject the function call in place.
+                    int regFuncNew = nextInst.operands[0].value.reg;
+                    // int32_t retCount = inst.operands[2].value.imm.n;
+                    auto calleeNext = LiftExpression(func, nextInst.operands[0]);
+
+                    std::vector<std::shared_ptr<Expression>> argsNext;
+                    if (func->implicitUses.contains(&nextInst)) {
+                        const auto &versions = func->implicitUses.at(&nextInst);
+                        for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
+                            LiftedOperand op;
+                            op.type = LiftedOperandType::Register;
+                            op.value.reg = regFuncNew + 1 + k;
+                            op.ssaVersion = versions[k];
+
+                            if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
+                                break;
+                            argsNext.push_back(LiftExpression(func, op));
+                        }
+                    }
+
+                    std::vector<SSARef> refsNew;
+
+                    for (const auto &ret : func->definitionMap) {
+                        if (ret.second != func->lpLiftedFunction->instructions.data() + i + 1)
+                            continue;
+                        refsNew.emplace_back(ret.first);
+                    }
+
+                    std::ranges::sort(refsNew, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
+
+                    std::vector<std::shared_ptr<Expression>> retsNew;
+                    for (const auto &ref : refsNew)
+                        retsNew.push_back(
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version)))
+                        );
+
+                    argsNext.push_back(callExpr);
+                    callExpr->inlineCall = true;
+                    statements.push_back(
+                        std::make_shared<ExpressionStatementNode>(
+                            std::make_shared<CallExpressionNode>(calleeNext, argsNext, retsNew, argCount == (int32_t)-1, false)
+                        )
+                    );   // inject call.
+                    i++; // skip next call.
+                } else {
+                    statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
+                }
+            } else {
+                statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
+            }
             break;
         }
         case LiftedOperation::SETGLOBAL: {
@@ -526,31 +580,35 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         case LiftedOperation::NAMECALL: {
             auto &callInsn = func->lpLiftedFunction->instructions[i + 2];
             int regFunc = callInsn.operands[0].value.reg;
-            int32_t argCount = callInsn.operands[1].value.imm.n - 1;
+            // int32_t argCount = callInsn.operands[1].value.imm.n - 1; // Unused for logic now
 
             std::vector<std::shared_ptr<Expression>> args;
+            bool isVararg = false;
+
             if (func->implicitUses.contains(&callInsn)) {
                 const auto &versions = func->implicitUses.at(&callInsn);
-                for (int32_t k = 1; k < static_cast<int32_t>(versions.size()); ++k) { // skip arg0 (which is self).
+                for (int32_t k = 1; k < static_cast<int32_t>(versions.size()); ++k) { // skip self
                     LiftedOperand op;
                     op.type = LiftedOperandType::Register;
                     op.value.reg = regFunc + 1 + k;
                     op.ssaVersion = versions[k];
 
-                    if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
+                    auto def = func->GetDefinition(op);
+                    if (def != nullptr && def->operation == LiftedOperation::GETVARARGS) {
+                        isVararg = true;
                         break;
+                    }
+
                     args.push_back(LiftExpression(func, op));
                 }
             }
 
             std::vector<SSARef> refs;
-
             for (const auto &ret : func->definitionMap) {
-                if (ret.second != func->lpLiftedFunction->instructions.data() + i)
+                if (ret.second != func->lpLiftedFunction->instructions.data() + (i + 2))
                     continue;
                 refs.emplace_back(ret.first);
             }
-
             std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
 
             std::vector<std::shared_ptr<Expression>> rets;
@@ -558,19 +616,72 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
                 rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
 
             auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(func->lpLiftedFunction->instructions[i].operands[2].value.imm.k);
-            ASSERT(kIdx.kType == LUA_TSTRING, "ktt != LUA_TSTRING (NAMECALL)");
+
             auto fakeOp = LiftedOperand{};
             fakeOp.type = LiftedOperandType::Register;
             fakeOp.value.reg = func->lpLiftedFunction->instructions[i].operands[1].value.reg;
             fakeOp.ssaVersion = func->lpLiftedFunction->instructions[i].operands[1].ssaVersion;
-            statements.push_back(
-                std::make_shared<ExpressionStatementNode>(std::make_shared<NameCallExpressionNode>(
-                    LiftExpression(func, fakeOp),
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(kIdx.constantData))), args, rets,
-                    argCount == (int32_t)-1
-                ))
+
+            const auto &nextInst = func->lpLiftedFunction->instructions[i + 3];
+
+            auto futureStatement = std::make_shared<NameCallExpressionNode>(
+                LiftExpression(func, fakeOp),
+                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(kIdx.constantData))), args, rets, isVararg, false
             );
-            i += 2; // skip NOP (aux) and CALL
+
+            if (nextInst.operation == LiftedOperation::CALL) {
+                if ((nextInst.operands[1].value.imm.n - 1) == -1) /*var arg*/ {
+                    // inject the function call in place.
+                    int regFuncNew = nextInst.operands[0].value.reg;
+                    int32_t argc = nextInst.operands[1].value.imm.n;
+                    // int32_t retCount = inst.operands[2].value.imm.n;
+                    auto calleeNext = LiftExpression(func, nextInst.operands[0]);
+
+                    std::vector<std::shared_ptr<Expression>> argsNext;
+                    if (func->implicitUses.contains(&nextInst)) {
+                        const auto &versions = func->implicitUses.at(&nextInst);
+                        for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
+                            LiftedOperand op;
+                            op.type = LiftedOperandType::Register;
+                            op.value.reg = regFuncNew + 1 + k;
+                            op.ssaVersion = versions[k];
+
+                            if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
+                                break;
+                            argsNext.push_back(LiftExpression(func, op));
+                        }
+                    }
+
+                    std::vector<SSARef> refsNew;
+
+                    for (const auto &ret : func->definitionMap) {
+                        if (ret.second != func->lpLiftedFunction->instructions.data() + i + 3)
+                            continue;
+                        refsNew.emplace_back(ret.first);
+                    }
+
+                    std::ranges::sort(refsNew, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
+
+                    std::vector<std::shared_ptr<Expression>> retsNew;
+                    for (const auto &ref : refsNew)
+                        retsNew.push_back(
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version)))
+                        );
+
+                    futureStatement->inlineCall = true;
+                    argsNext.push_back(futureStatement);
+                    i++;
+                    statements.push_back(std::make_shared<CallExpressionNode>(calleeNext, argsNext, retsNew, argc == (int32_t)-1, false)); // skip next call.
+                } else {
+                    for (const auto &ref : refs)
+                        rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
+                    statements.push_back(futureStatement);
+                }
+            } else {
+                statements.push_back(futureStatement);
+            }
+
+            i += 2;
             break;
         }
         case LiftedOperation::LOAD:

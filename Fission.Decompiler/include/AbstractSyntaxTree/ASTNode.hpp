@@ -253,12 +253,14 @@ class NameCallExpressionNode : public Expression {
     std::vector<std::shared_ptr<Expression>> arguments;
     std::vector<std::shared_ptr<Expression>> rets;
     bool bIsVariadicCall;
+    bool inlineCall = false;
 
     NameCallExpressionNode(
         std::shared_ptr<Expression> calledOn, std::shared_ptr<Expression> calledWhat, std::vector<std::shared_ptr<Expression>> args,
-        std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall
+        std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall, bool inlineCall
     )
-        : calledOn(std::move(calledOn)), callWhat(std::move(calledWhat)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall) {
+        : calledOn(std::move(calledOn)), callWhat(std::move(calledWhat)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall),
+          inlineCall(inlineCall) {
         this->nodeKind = ASTNodeKind::CallExpression;
     }
 
@@ -271,11 +273,13 @@ class CallExpressionNode : public Expression {
     std::vector<std::shared_ptr<Expression>> arguments;
     std::vector<std::shared_ptr<Expression>> rets;
     bool bIsVariadicCall;
+    bool inlineCall;
 
     CallExpressionNode(
-        std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args, std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall
+        std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args, std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall,
+        bool inlineCall
     )
-        : callee(std::move(func)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall) {
+        : callee(std::move(func)), arguments(std::move(args)), rets(std::move(rets)), bIsVariadicCall(bIsVariadicCall), inlineCall(inlineCall) {
         this->nodeKind = ASTNodeKind::CallExpression;
     }
 

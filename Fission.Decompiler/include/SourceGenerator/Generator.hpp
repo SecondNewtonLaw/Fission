@@ -89,7 +89,8 @@ class SourceGenerator : public Visitor {
         if (lpNode->bIsVariadicCall)
             buffer << ", ...";
         buffer << ")";
-        this->NextLine();
+        if (!lpNode->inlineCall)
+            this->NextLine();
     }
 
     void Visit(UnaryExpressionNode *lpNode) override { (void)lpNode; }
@@ -289,7 +290,9 @@ class SourceGenerator : public Visitor {
         if (lpNode->bIsVariadicCall)
             buffer << ", ...";
         buffer << ")";
-        this->NextLine();
+
+        if (!lpNode->inlineCall)
+            this->NextLine();
     }
 
     void Visit(ForNumericNode *lpNode) override {
