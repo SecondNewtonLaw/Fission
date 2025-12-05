@@ -261,10 +261,15 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         }
         ASSERT(lpFunc != nullptr, "lpFunc == nullptr");
         std::set<uint32_t> visited;
-        return std::make_shared<FunctionDeclarationNode>(
+
+        /*
+        *  std::make_shared<FunctionDeclarationNode>(
             functionName, functionArguments, functionArgumentNames, duplicatedFunction->isvararg,
             CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)), !duplicatedFunction->debugName.has_value()
         );
+
+         */
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(functionName));
     }
     case LiftedOperation::NEWCLOSURE: {
         const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[definitionInstruction->operands[1].value.imm.k];
@@ -273,12 +278,13 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         for (int i = 0; i < proto->numparams; i++)
             args[i] = std::format("v{}", i);
 
-        auto *lpFunc = &func->innerFunctions[definitionInstruction->operands[1].value.imm.k];
-        std::set<uint32_t> visited;
-        return std::make_shared<FunctionDeclarationNode>(
-            name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
-            !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
-        );
+        // auto *lpFunc = &func->innerFunctions[definitionInstruction->operands[1].value.imm.k];
+        // std::set<uint32_t> visited;
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
+        // return std::make_shared<FunctionDeclarationNode>(
+        //     name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
+        //     !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
+        // );
     }
 
     case LiftedOperation::CALL: {
@@ -309,6 +315,56 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
         switch (inst.operation) {
             // control flow handled by the LiftTree structure
+
+        case LiftedOperation::DUPCLOSURE: {
+            const auto &duplicatedClosure = func->lpLiftedFunction->lpDeserialized->constants[inst.operands[1].value.imm.k];
+            if (duplicatedClosure.kType != LUA_TFUNCTION) {
+                ASSERT(false, "dupclosure constant wasnt function"); // no way to really handle
+            }
+
+            const auto duplicatedFunction = std::get<LuauProto>(duplicatedClosure.constantData);
+
+            // If we ever change the logic inside the bytecode lifter, this only needs to changed too, thx.
+            auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
+            auto functionArguments = duplicatedFunction->numparams;
+            auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
+            for (int i = 0; i < functionArguments; i++) {
+                functionArgumentNames[i] = std::format("v{}", i);
+            }
+
+            const AnalyzedFunction *lpFunc = nullptr;
+            for (const auto &ffunc : func->innerFunctions) {
+                if (ffunc.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId)
+                    lpFunc = &ffunc;
+            }
+            ASSERT(lpFunc != nullptr, "lpFunc == nullptr");
+            std::set<uint32_t> visited;
+
+            statements.push_back(
+                std::make_shared<FunctionDeclarationNode>(
+                    functionName, functionArguments, functionArgumentNames, duplicatedFunction->isvararg,
+                    CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)), !duplicatedFunction->debugName.has_value()
+                )
+            );
+            break;
+        }
+        case LiftedOperation::NEWCLOSURE: {
+            const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[inst.operands[1].value.imm.k];
+            std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
+            std::unordered_map<int32_t, std::string> args;
+            for (int i = 0; i < proto->numparams; i++)
+                args[i] = std::format("v{}", i);
+
+            auto *lpFunc = &func->innerFunctions[inst.operands[1].value.imm.k];
+            std::set<uint32_t> visited;
+            statements.push_back(
+                std::make_shared<FunctionDeclarationNode>(
+                    name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
+                    !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
+                )
+            );
+            break;
+        }
 
         case LiftedOperation::NEWTABLE: {
             auto nSize = inst.operands[2];
@@ -373,7 +429,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
             // stmts
         case LiftedOperation::CALL: {
-            // TODO: Handle vararg properly later.
+            // TODO: Handle vararg properly. This is causing issues.
+            // we will need to somehow track the stack??? This will be painful.
             int regFunc = inst.operands[0].value.reg;
             int32_t argCount = inst.operands[1].value.imm.n - 1;
             // int32_t retCount = inst.operands[2].value.imm.n;
