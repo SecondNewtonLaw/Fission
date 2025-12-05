@@ -610,7 +610,11 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                     }
                 }
-                if (dominates(successor.ifStatementFalse.value(), block.dwBlockId)) {
+
+                if (!successor.ifStatementFalse && !successor.ifStatementTrue)
+                    continue;
+
+                if (!successor.ifStatementFalse || dominates(successor.ifStatementFalse.value(), block.dwBlockId)) {
                     // true statement is loop exit.
                     block.loopExit = successor.ifStatementTrue.value();
                     successor.loopExit = successor.ifStatementTrue.value();
