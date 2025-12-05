@@ -103,7 +103,7 @@ class SourceGenerator : public Visitor {
     void Visit(MemberExpressionNode *lpNode) override {
         (void)lpNode;
         lpNode->table->Accept(this);
-        buffer << "[\"" << lpNode->keyName << "\"]";
+        buffer << "." << lpNode->keyName;
     }
 
     void Visit(ReturnStatementNode *lpNode) override {
@@ -289,6 +289,26 @@ class SourceGenerator : public Visitor {
         if (lpNode->bIsVariadicCall)
             buffer << ", ...";
         buffer << ")";
+        this->NextLine();
+    }
+
+    void Visit(ForNumericNode *lpNode) override {
+        buffer << this->GetIndentation();
+        buffer << "for ";
+        lpNode->loopVariable->Accept(this);
+        buffer << " = ";
+        lpNode->startVariable->Accept(this);
+        buffer << ", ";
+        lpNode->maxIncreased->Accept(this);
+        buffer << ", ";
+        lpNode->increaseBy->Accept(this);
+        buffer << " do";
+        this->NextLine();
+        this->IncreaseIndentation();
+        if (lpNode->lpLoopBody != nullptr)
+            lpNode->lpLoopBody->Accept(this);
+        this->DecreaseIndentation();
+        buffer << "end";
         this->NextLine();
     }
 };

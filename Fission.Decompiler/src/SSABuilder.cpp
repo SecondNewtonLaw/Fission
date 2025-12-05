@@ -314,6 +314,10 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                         func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
                     }
                 }
+            } else if (inst->operation == LiftedOperation::FORNLOOP) {
+                // numeric loops mutate their control variable. We must mark this as a R/W.
+                int32_t baseRegister = inst->operands[0].value.reg;
+                NewVersion(baseRegister + 2);
             }
 
             if (inst == block.lpTail)

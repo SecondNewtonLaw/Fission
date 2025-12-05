@@ -309,3 +309,21 @@ class ContinueStatementNode : public Statement {
     ~ContinueStatementNode() override = default;
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
+
+class ForNumericNode : public Statement {
+  public:
+    std::shared_ptr<Expression> loopVariable = nullptr;
+    std::shared_ptr<Expression> startVariable = nullptr;
+    std::shared_ptr<Expression> increaseBy = nullptr;
+    std::shared_ptr<Expression> maxIncreased = nullptr;
+    std::shared_ptr<BlockStatementNode> lpLoopBody = nullptr;
+    ForNumericNode() {}
+
+    ForNumericNode(
+        std::shared_ptr<Expression> loopVariable, std::shared_ptr<Expression> startVariable, std::shared_ptr<Expression> increaseBy,
+        std::shared_ptr<Expression> maxIncreased, std::shared_ptr<BlockStatementNode> lpLoopBody
+    )
+        : loopVariable(loopVariable), startVariable(startVariable), increaseBy(increaseBy), maxIncreased(maxIncreased), lpLoopBody(lpLoopBody) {}
+    ~ForNumericNode() override = default;
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};

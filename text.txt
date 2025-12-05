@@ -1,2 +1,8 @@
---!optimize 0
-print(5 + 10 * 25)
+local function testCallback(a, b, c)
+    print("wow we were called!")
+    return c, b, a
+end
+
+local t = testCallback
+t(1, 2, 3)
+testCallback(3, 2, 1)

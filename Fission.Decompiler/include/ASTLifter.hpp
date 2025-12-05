@@ -15,12 +15,12 @@ struct ASTFunction {
 };
 
 class ASTLifter {
-
     std::string GetVarName(const LiftedOperand &op) { return GetVarName(op.value.reg, op.ssaVersion); }
 
     std::string GetVarName(int reg, int ver) {
         if (ver != -1)
             return std::format("v{}_{}", reg, ver);
+
         return std::format("v{}", reg);
     }
 
