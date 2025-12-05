@@ -294,6 +294,10 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
     }
     }
 
+    case LiftedOperation::GETUPVAL: {
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("uv_{}", operand.value.imm.n)));
+    }
+
     default:
         break;
     }
