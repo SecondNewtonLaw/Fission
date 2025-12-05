@@ -14,30 +14,29 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
     auto set = [&](LiftedOperation op, AccessType type) { table[static_cast<size_t>(op)] = type; };
 
     for (auto op :
-         {LiftedOperation::SETGLOBAL,  LiftedOperation::SETUPVAL, LiftedOperation::SETTABLE,    LiftedOperation::SETTABLEKS,  LiftedOperation::SETTABLEN,
-          LiftedOperation::SETLIST,    LiftedOperation::RETURN,   LiftedOperation::JUMPIF,      LiftedOperation::JUMPIFNOT,   LiftedOperation::JUMPIFEQ,
-          LiftedOperation::JUMPIFLE,   LiftedOperation::JUMPIFLT, LiftedOperation::JUMPIFNOTEQ, LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,
-          LiftedOperation::JUMPXEQK,   LiftedOperation::CAPTURE,  LiftedOperation::FASTCALL,    LiftedOperation::FASTCALL1,   LiftedOperation::FASTCALL2,
-          LiftedOperation::FASTCALL2K, LiftedOperation::FASTCALL3}) {
+         {LiftedOperation::SETGLOBAL,  LiftedOperation::SETUPVAL, LiftedOperation::SETTABLE,      LiftedOperation::SETTABLEKS,  LiftedOperation::SETTABLEN,
+          LiftedOperation::SETLIST,    LiftedOperation::RETURN,   LiftedOperation::JUMPIF,        LiftedOperation::JUMPIFNOT,   LiftedOperation::JUMPIFEQ,
+          LiftedOperation::JUMPIFLE,   LiftedOperation::JUMPIFLT, LiftedOperation::JUMPIFNOTEQ,   LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,
+          LiftedOperation::JUMPXEQK,   LiftedOperation::CAPTURE,  LiftedOperation::FASTCALL,      LiftedOperation::FASTCALL1,   LiftedOperation::FASTCALL2,
+          LiftedOperation::FASTCALL2K, LiftedOperation::FORGLOOP, LiftedOperation::FORGPREP_NEXT, LiftedOperation::FORGPREP,    LiftedOperation::FORGPREP_INEXT,
+          LiftedOperation::FORNPREP,   LiftedOperation::FASTCALL3}) {
         set(op, AccessType::Read);
     }
 
-    for (auto op : {LiftedOperation::LOAD,         LiftedOperation::LOADNJUMP,  LiftedOperation::MOVE,       LiftedOperation::GETGLOBAL,
-                    LiftedOperation::GETUPVAL,     LiftedOperation::GETIMPORT,  LiftedOperation::GETTABLE,   LiftedOperation::GETTABLEKS,
-                    LiftedOperation::GETTABLEN,    LiftedOperation::NEWCLOSURE, LiftedOperation::NAMECALL,   LiftedOperation::ADD,
-                    LiftedOperation::SUB,          LiftedOperation::MUL,        LiftedOperation::DIV,        LiftedOperation::MOD,
-                    LiftedOperation::POW,          LiftedOperation::ADDK,       LiftedOperation::SUBK,       LiftedOperation::MULK,
-                    LiftedOperation::DIVK,         LiftedOperation::MODK,       LiftedOperation::POWK,       LiftedOperation::AND,
-                    LiftedOperation::OR,           LiftedOperation::ANDK,       LiftedOperation::ORK,        LiftedOperation::CONCAT,
-                    LiftedOperation::NOT,          LiftedOperation::MINUS,      LiftedOperation::LENGTH,     LiftedOperation::NEWTABLE,
-                    LiftedOperation::DUPTABLE,     LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
-                    LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNPREP,
-                    LiftedOperation::FORNLOOP,     LiftedOperation::FORGLOOP,   LiftedOperation::FORGPREP,   LiftedOperation::FORGPREP_INEXT,
-                    LiftedOperation::FORGPREP_NEXT}) {
+    for (auto op :
+         {LiftedOperation::LOAD,      LiftedOperation::LOADNJUMP, LiftedOperation::MOVE,       LiftedOperation::GETGLOBAL,  LiftedOperation::GETUPVAL,
+          LiftedOperation::GETIMPORT, LiftedOperation::GETTABLE,  LiftedOperation::GETTABLEKS, LiftedOperation::GETTABLEN,  LiftedOperation::NEWCLOSURE,
+          LiftedOperation::NAMECALL,  LiftedOperation::ADD,       LiftedOperation::SUB,        LiftedOperation::MUL,        LiftedOperation::DIV,
+          LiftedOperation::MOD,       LiftedOperation::POW,       LiftedOperation::ADDK,       LiftedOperation::SUBK,       LiftedOperation::MULK,
+          LiftedOperation::DIVK,      LiftedOperation::MODK,      LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
+          LiftedOperation::ANDK,      LiftedOperation::ORK,       LiftedOperation::CONCAT,     LiftedOperation::NOT,        LiftedOperation::MINUS,
+          LiftedOperation::LENGTH,    LiftedOperation::NEWTABLE,  LiftedOperation::DUPTABLE,   LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE,
+          LiftedOperation::SUBRK,     LiftedOperation::DIVRK,     LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
         set(op, AccessType::Write);
     }
 
     set(LiftedOperation::CALL, AccessType::Read); // THIS NEEDS TO BE CHANGED, READWRITE BREAKS AST LIFTING FOR CALLS.
+    set(LiftedOperation::RETURN, AccessType::Read);
 
     return table;
 }();
@@ -204,6 +203,9 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     } else {
                         op.ssaVersion = CurrentVersion(reg);
                     }
+
+                    auto ref = SSARef{reg, CurrentVersion(reg)};
+                    func.useCounts[ref]++;
                 }
             }
 
@@ -248,6 +250,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     }
 
                     argVersions.push_back(v);
+                    func.useCounts[{argReg, v}]++;
                 }
 
                 func.implicitUses[inst] = std::move(argVersions);
@@ -275,6 +278,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     if (v == -1)
                         v = NewVersion(reg);
                     retVersions.push_back(v);
+                    func.useCounts[{reg, v}]++;
                 }
 
                 func.implicitUses[inst] = std::move(retVersions);
@@ -299,6 +303,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                         }
 
                         itemVersions.push_back(v);
+                        func.useCounts[{argReg, v}]++;
                     }
                 }
 
@@ -314,11 +319,26 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                         func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
                     }
                 }
+            } else if (inst->operation == LiftedOperation::FORNPREP) {
+                int32_t baseReg = inst->operands[0].value.reg;
+                std::vector<int32_t> loopInputs;
+                loopInputs.reserve(3);
+
+                for (int i = 0; i < 3; ++i) {
+                    int32_t r = baseReg + i;
+                    int32_t v = CurrentVersion(r);
+
+                    if (v == -1)
+                        v = NewVersion(r);
+                    loopInputs.push_back(v);
+                    func.useCounts[{r, v}]++;
+                }
+
+                func.implicitUses[inst] = std::move(loopInputs);
             } else if (inst->operation == LiftedOperation::FORNLOOP) {
                 // numeric loops mutate their control variable. We must mark this as a R/W.
                 NewVersion(inst->operands[2].value.reg);
             }
-
             if (inst == block.lpTail)
                 break;
         }
@@ -340,6 +360,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 int reg = phi.operands[0].value.reg;
                 if (size_t(predIndex + 1) < phi.operands.size()) {
                     phi.operands[predIndex + 1].ssaVersion = CurrentVersion(reg);
+                    func.useCounts[SSARef{reg, CurrentVersion(reg)}]++;
                 }
             }
         }

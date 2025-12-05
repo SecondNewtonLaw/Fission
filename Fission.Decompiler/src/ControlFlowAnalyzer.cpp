@@ -364,7 +364,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         subfuncs.push_back(analyzed);
     }
 
-    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs};
+    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs, {}};
 }
 
 void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks) {
@@ -618,6 +618,24 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
                     // false statement is loop exit.
                     block.loopExit = successor.ifStatementFalse.value();
                     successor.loopExit = successor.ifStatementFalse.value();
+                }
+            }
+        }
+    }
+
+    for (BasicBlock &block : blocks) {
+        if (block.bType != BlockType::Break)
+            continue;
+
+        // we need to calculate if this branch is truly a break branch. To do this we must simply look at where it's jumping.
+        // if the jump we are jumping to leads to block that is dominant to us, then that means it is not a break, if anything, a continue block.
+
+        for (auto succ : block.successors) {
+            auto succBlock = blocks.at(succ);
+            for (auto mSucc : succBlock.successors) {
+                if (!dominates(mSucc, block.dwBlockId)) {
+                    // dominates us.
+                    block.bType = BlockType::IfHeader;
                 }
             }
         }

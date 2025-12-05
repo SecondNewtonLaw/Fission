@@ -10,7 +10,7 @@
 #include <set>
 #include <stack>
 
-enum class AccessType { NoAccess, Read, Write, ReadWrite };
+enum class AccessType { NoAccess, Read, Write, ReadWrite, Deferred /* calculated during second pass */ };
 
 class SSABuilder {
     /*

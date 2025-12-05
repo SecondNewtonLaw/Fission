@@ -5,6 +5,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "ControlFlowAnalyzer.hpp"
 
+#include <unordered_set>
 #include <vector>
 
 struct ASTFunction {
@@ -15,9 +16,39 @@ struct ASTFunction {
 };
 
 class ASTLifter {
+    std::unordered_set<int32_t> m_pinnedRegisters;
+
+    struct PinnedRegisterScope {
+        ASTLifter *m_lpLifter;
+        int32_t dwReg;
+
+        PinnedRegisterScope(ASTLifter *lifter, int32_t reg) : m_lpLifter(lifter), dwReg(reg) { m_lpLifter->m_pinnedRegisters.insert(reg); }
+
+        ~PinnedRegisterScope() { m_lpLifter->m_pinnedRegisters.erase(dwReg); }
+
+        PinnedRegisterScope(const PinnedRegisterScope &) = delete;
+        PinnedRegisterScope &operator=(const PinnedRegisterScope &) = delete;
+    };
+
+    bool bLoopEnter = false;
+    int32_t loopRegister = 0;
+    void EnterLoop(int32_t reg) {
+        loopRegister = reg;
+        bLoopEnter = true;
+    }
+
+    void ExitLoop() {
+        bLoopEnter = false;
+        loopRegister = 0;
+    }
+
     std::string GetVarName(const LiftedOperand &op) { return GetVarName(op.value.reg, op.ssaVersion); }
 
     std::string GetVarName(int reg, int ver) {
+        if (bLoopEnter && reg == loopRegister) {
+            return std::format("i_{}", reg);
+        }
+
         if (ver != -1)
             return std::format("v{}_{}", reg, ver);
 

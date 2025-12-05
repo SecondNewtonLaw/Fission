@@ -84,7 +84,7 @@ struct BasicBlock {
     std::optional<uint32_t> ifStatementFalse; // if expr then --[[  ]] else --[[ what we care about ]] end
 
     std::optional<uint32_t> loopHeader; // contains loop header block idx.
-    std::optional<uint32_t> loopLatch;   // contains loop latch block idx.
+    std::optional<uint32_t> loopLatch;  // contains loop latch block idx.
     std::optional<uint32_t> loopExit;   // contains loop exit block idx.
 };
 
@@ -92,11 +92,26 @@ struct SSARef {
     uint8_t regIndex;
     int version;
 
+    bool operator<(const SSARef &other) const {
+        if (regIndex != other.regIndex) {
+            return regIndex < other.regIndex;
+        }
+        return version < other.version;
+    }
+
     bool operator==(const SSARef &other) const { return regIndex == other.regIndex && version == other.version; }
+    SSARef() = default;
+    SSARef(int32_t reg, int32_t ver) : regIndex(reg), version(ver) {}
 };
 
 namespace std {
     template <> struct hash<SSARef> {
+        std::size_t operator()(SSARef &k) const {
+            std::size_t h1 = std::hash<uint8_t>{}(k.regIndex);
+            std::size_t h2 = std::hash<int32_t>{}(k.version);
+
+            return h1 ^ (h2 << 1);
+        }
         std::size_t operator()(const SSARef &k) const {
             std::size_t h1 = std::hash<uint8_t>{}(k.regIndex);
             std::size_t h2 = std::hash<int32_t>{}(k.version);
@@ -114,6 +129,8 @@ struct AnalyzedFunction {
     std::unordered_map<const LiftedInstruction *, std::vector<int32_t>> implicitUses;
 
     std::vector<AnalyzedFunction> innerFunctions;
+
+    std::map<SSARef, int32_t> useCounts;
 
     [[nodiscard]] LiftedInstruction *GetDefinition(const LiftedOperand &operand) const {
         const auto ssaRef = SSARef{operand.value.reg, operand.ssaVersion};

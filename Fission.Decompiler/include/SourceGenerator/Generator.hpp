@@ -132,12 +132,14 @@ class SourceGenerator : public Visitor {
 
     void Visit(BreakStatementNode *lpNode) override {
         (void)lpNode;
-        buffer << "break";
+        buffer << this->GetIndentation() << "break";
+        this->NextLine();
     }
 
     void Visit(ContinueStatementNode *lpNode) override {
         (void)lpNode;
-        buffer << "continue";
+        buffer << this->GetIndentation() << "continue";
+        this->NextLine();
     }
 
     void Visit(BlockStatementNode *lpNode) override {

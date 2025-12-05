@@ -76,6 +76,9 @@ static int32_t FindMergeBlock(const AnalyzedFunction *func, uint32_t branchA, ui
 }
 
 std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand) {
+    if (operand.type == LiftedOperandType::Register && this->m_pinnedRegisters.contains(operand.value.reg))
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
+
     const auto definitionInstruction = func->GetDefinition(operand);
 
     if (!definitionInstruction)
@@ -354,6 +357,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         case LiftedOperation::JUMP:
         case LiftedOperation::JUMPIF:
         case LiftedOperation::JUMPIFNOT:
+        case LiftedOperation::JUMPXEQK:
         case LiftedOperation::JUMPIFEQ:
         case LiftedOperation::JUMPIFLE:
         case LiftedOperation::JUMPIFLT:
@@ -361,6 +365,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         case LiftedOperation::JUMPIFNOTLE:
         case LiftedOperation::JUMPIFNOTLT:
         case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORNLOOP:
+        case LiftedOperation::FORGLOOP:
         case LiftedOperation::FORGPREP: {
             continue;
         }
@@ -512,11 +518,31 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         }
         case LiftedOperation::LOAD:
         case LiftedOperation::NOP:
-        case LiftedOperation::GETIMPORT:
-        case LiftedOperation::GETGLOBAL:
         case LiftedOperation::GETVARARGS:
         case LiftedOperation::MOVE: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
             break;
+        }
+        case LiftedOperation::GETIMPORT:
+        case LiftedOperation::GETGLOBAL: {
+            int32_t reg = inst.operands[0].value.reg;
+            int32_t ver = inst.operands[0].ssaVersion;
+            int uses = 0;
+            if (func->useCounts.contains({reg, ver})) {
+                uses = func->useCounts.at({reg, ver});
+            }
+
+            if (uses == 0 && !m_pinnedRegisters.contains(reg)) {
+                auto expression = LiftExpression(func, inst.operands[0]);
+
+                auto targetIdentifier = std::make_shared<Identifier>("_");
+                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+
+                statements.push_back(std::make_shared<VariableDeclarationNode>(targetExpression, expression));
+                break; // emit an unused variable denoted by _
+            }
+
+            if (uses > 0 /* if we have more than 0 refs, then we don't care. We inline these */ && !m_pinnedRegisters.contains(reg))
+                break;
         }
         default:
             if (nullptr == func->GetDefinition(inst.operands[0])) {
@@ -604,7 +630,7 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                     );
                     break;
                 }
-                case LiftedOperation::JUMPIFLT: {
+                case LiftedOperation::JUMPIFLE: {
                     condition = std::make_shared<BinaryExpressionNode>(
                         "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
                     );
@@ -612,7 +638,19 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                 }
                 case LiftedOperation::JUMPIFNOTLE: {
                     condition = std::make_shared<BinaryExpressionNode>(
-                        ">=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        ">=", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFLT: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        "<", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFNOTLT: {
+                    condition = std::make_shared<BinaryExpressionNode>(
+                        ">", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
                     );
                     break;
                 }
@@ -658,6 +696,10 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
             uint32_t exitIdx = block.loopExit.value();
 
             if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
+                if (exitIdx == static_cast<uint32_t>(-1))
+                    exitIdx = block.loopLatch.value(
+                    ); // in while loops, there may be no exit. Thus, if there's none, set it to the latch. This should get things going.
+
                 // assume the first non-exit successor is the loop body start
                 int32_t bodyIdx = -1;
                 for (auto succ : block.successors) {
@@ -685,6 +727,18 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                     }
                     case LiftedOperation::JUMPIFLT: {
                         whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            "<", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIFNOTLT: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                            ">", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
+                        );
+                        break;
+                    }
+                    case LiftedOperation::JUMPIFLE: {
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
                             "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
                         );
                         break;
@@ -701,6 +755,36 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                         break;
                     }
                     }
+                    case LiftedOperation::JUMPXEQK: {
+                        auto kIdx = block.lpTail->operands[2].value.imm.k;
+                        auto notFlag = block.lpTail->operands[3].value.imm.b;
+                        std::shared_ptr<Expression> rhs;
+                        const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIdx];
+                        switch (k.kType) {
+                        case LUA_TNIL:
+                            rhs = std::make_shared<NilLiteralNode>();
+                            break;
+                        case LUA_TBOOLEAN:
+                            rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                            break;
+                        case LUA_TNUMBER:
+                            rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                            break;
+                        case LUA_TSTRING:
+                            rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                            break;
+                        default:
+                            rhs = std::make_shared<NilLiteralNode>(); // fallback
+                            break;
+                        }
+
+                        if (notFlag)
+                            whileNode->condition = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
+                        else
+                            whileNode->condition = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
+                        break;
+                    }
+
                     default:
                         whileNode->condition = LiftExpression(func, block.lpTail->operands[0]);
                         break;
@@ -738,20 +822,31 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                     }
                 ASSERT(bodyIdx != -1, "bodyIdx == -1");
                 std::set<uint32_t> loopVisited = visited;
-                auto loopBody = LiftTree(func, bodyIdx, *block.loopLatch, loopVisited);
-                numericForNode->lpLoopBody = CreateBlock(loopBody);
                 LiftedOperand op;
-                op.value.reg = increaseBy;
                 op.type = LiftedOperandType::Register;
+                {
+                    PinnedRegisterScope pinScope(this, dwStartValueReg);
+
+                    this->EnterLoop(dwStartValueReg);
+
+                    auto loopBody = LiftTree(func, bodyIdx, *block.loopLatch, loopVisited);
+                    numericForNode->lpLoopBody = CreateBlock(loopBody);
+
+                    op.value.reg = increaseBy;
+                    op.ssaVersion = block.lpTail->operands[0].ssaVersion;
+                    numericForNode->increaseBy = LiftExpression(func, op);
+                    op.value.reg = increaseUntilReg;
+                    numericForNode->maxIncreased = LiftExpression(func, op);
+                    op.value.reg = dwStartValueReg;
+                    op.ssaVersion = block.lpTail->operands[0].ssaVersion + 1;
+                    numericForNode->loopVariable = LiftExpression(func, op);
+
+                    this->ExitLoop();
+                }
+
+                op.value.reg = dwStartValueReg;
                 op.ssaVersion = block.lpTail->operands[0].ssaVersion;
-                numericForNode->increaseBy = LiftExpression(func, op);
-                op.value.reg = dwStartValueReg;
                 numericForNode->startVariable = LiftExpression(func, op);
-                op.value.reg = increaseUntilReg;
-                numericForNode->maxIncreased = LiftExpression(func, op);
-                op.value.reg = dwStartValueReg;
-                op.ssaVersion = block.lpTail->operands[0].ssaVersion + 1;
-                numericForNode->loopVariable = LiftExpression(func, op);
 
                 nodes.push_back(numericForNode);
 
