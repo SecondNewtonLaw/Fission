@@ -55,6 +55,51 @@ class ASTLifter {
         return std::format("v{}", reg);
     }
 
+    bool IsInstructionConsumed(const AnalyzedFunction *func, int index) {
+        const auto &inst = func->lpLiftedFunction->instructions[index];
+        if (inst.operation != LiftedOperation::CALL && inst.operation != LiftedOperation::NAMECALL)
+            return false;
+
+        if (inst.operation == LiftedOperation::CALL) {
+            if (inst.operands[2].value.imm.n == 0)
+                return true;
+        } else {
+            if (static_cast<size_t>(index) + 2 < func->lpLiftedFunction->instructions.size()) {
+                const auto &callInst = func->lpLiftedFunction->instructions[index + 2];
+                if (callInst.operation == LiftedOperation::CALL && callInst.operands[2].value.imm.n == 0)
+                    return true;
+            }
+        }
+
+        int reg = inst.operands[0].value.reg;
+        const auto *callInfoInst = &inst;
+        if (inst.operation == LiftedOperation::NAMECALL) {
+            if (static_cast<size_t>(index) + 2 < func->lpLiftedFunction->instructions.size())
+                callInfoInst = &func->lpLiftedFunction->instructions[index + 2];
+            else
+                return false;
+        }
+
+        int nResults = callInfoInst->operands[2].value.imm.n;
+        if (nResults == 2) {
+            int definedVersion = -1;
+            for (const auto &[ref, instrPtr] : func->definitionMap) {
+                if (instrPtr == callInfoInst && ref.regIndex == reg) {
+                    definedVersion = ref.version;
+                    break;
+                }
+            }
+
+            if (definedVersion != -1) {
+                if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) == 1)
+                    return true;
+            }
+        }
+        return false;
+    }
+
+    std::shared_ptr<Expression> LiftCallLikeInstruction(const AnalyzedFunction *func, int32_t index, bool isNested = false);
+
     std::shared_ptr<Expression> LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand);
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const AnalyzedFunction *func, const BasicBlock &block);
     std::vector<std::shared_ptr<Statement>> LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited);

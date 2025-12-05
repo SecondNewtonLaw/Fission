@@ -68,29 +68,41 @@ class SourceGenerator : public Visitor {
 
     void Visit(CallExpressionNode *lpNode) override {
         (void)lpNode;
-        buffer << this->GetIndentation();
-        if (!lpNode->rets.empty()) {
-            buffer << "local ";
-            for (size_t i = 0; i < lpNode->rets.size(); i++) {
-                lpNode->rets.at(i)->Accept(this);
-                if (i < lpNode->rets.size() - 1)
+        if (!lpNode->inlineCall) {
+            buffer << this->GetIndentation();
+            if (!lpNode->rets.empty()) {
+                buffer << "local ";
+                for (size_t i = 0; i < lpNode->rets.size(); i++) {
+                    lpNode->rets.at(i)->Accept(this);
+                    if (i < lpNode->rets.size() - 1)
+                        buffer << ", ";
+                }
+                buffer << " = ";
+            }
+            lpNode->callee->Accept(this);
+            buffer << "(";
+            for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+                lpNode->arguments.at(i)->Accept(this);
+                if (i < lpNode->arguments.size() - 1)
                     buffer << ", ";
             }
-            buffer << " = ";
-        }
-        lpNode->callee->Accept(this);
-        buffer << "(";
-        for (size_t i = 0; i < lpNode->arguments.size(); i++) {
-            lpNode->arguments.at(i)->Accept(this);
-            if (i < lpNode->arguments.size() - 1)
-                buffer << ", ";
-        }
 
-        if (lpNode->bIsVariadicCall)
-            buffer << ", ...";
-        buffer << ")";
-        if (!lpNode->inlineCall)
+            if (lpNode->bIsVariadicCall)
+                buffer << ", ...";
+            buffer << ")";
             this->NextLine();
+        } else {
+            lpNode->callee->Accept(this);
+            buffer << "(";
+            for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+                lpNode->arguments.at(i)->Accept(this);
+                if (i < lpNode->arguments.size() - 1)
+                    buffer << ", ";
+            }
+            if (lpNode->bIsVariadicCall)
+                buffer << ", ...";
+            buffer << ")";
+        }
     }
 
     void Visit(UnaryExpressionNode *lpNode) override { (void)lpNode; }
@@ -222,7 +234,16 @@ class SourceGenerator : public Visitor {
 
     void Visit(NumberLiteralNode *lpNode) override {
         (void)lpNode;
-        buffer << lpNode->value;
+        auto num = std::format(
+            "{:.{}f}", std::stod(std::format("{:.{}f}", lpNode->value, std::numeric_limits<double>::max_digits10)), std::numeric_limits<double>::max_digits10
+        );
+        const auto dot = num.find('.');
+        auto resultLength = num.length();
+        if (dot != std::string::npos)
+            if (const auto lastThatIsNotZero = num.find_last_not_of('0'); lastThatIsNotZero != std::string::npos && lastThatIsNotZero >= dot)
+                resultLength = lastThatIsNotZero + (lastThatIsNotZero != dot);
+        num.resize(resultLength);
+        buffer << num;
     }
 
     void Visit(BooleanLiteralNode *lpNode) override {
@@ -267,16 +288,35 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(NameCallExpressionNode *lpNode) override {
-        buffer << this->GetIndentation();
-        if (!lpNode->rets.empty()) {
-            buffer << "local ";
-            for (size_t i = 0; i < lpNode->rets.size(); i++) {
-                lpNode->rets.at(i)->Accept(this);
-                if (i < lpNode->rets.size() - 1)
+        if (lpNode->rets.empty()) {
+            if (!lpNode->inlineCall)
+                buffer << this->GetIndentation();
+            lpNode->calledOn->Accept(this);
+            buffer << ":";
+            lpNode->callWhat->Accept(this);
+            buffer << "(";
+            for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+                lpNode->arguments.at(i)->Accept(this);
+                if (i < lpNode->arguments.size() - 1)
                     buffer << ", ";
             }
-            buffer << " = ";
+
+            if (lpNode->bIsVariadicCall)
+                buffer << ", ...";
+            buffer << ")";
+
+            if (!lpNode->inlineCall)
+                this->NextLine();
+            return;
         }
+        buffer << this->GetIndentation();
+        buffer << "local ";
+        for (size_t i = 0; i < lpNode->rets.size(); i++) {
+            lpNode->rets.at(i)->Accept(this);
+            if (i < lpNode->rets.size() - 1)
+                buffer << ", ";
+        }
+        buffer << " = ";
         lpNode->calledOn->Accept(this);
         buffer << ":";
         lpNode->callWhat->Accept(this);
@@ -311,6 +351,7 @@ class SourceGenerator : public Visitor {
         if (lpNode->lpLoopBody != nullptr)
             lpNode->lpLoopBody->Accept(this);
         this->DecreaseIndentation();
+        buffer << this->GetIndentation();
         buffer << "end";
         this->NextLine();
     }

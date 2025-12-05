@@ -229,50 +229,48 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
                 std::vector<int32_t> argVersions;
-                argVersions.reserve(argCount > 0 ? argCount : 0);
-
-                if (argCount == -1 /* var arg */) {
-                    // get previous instruction, almost guaranteed always to be a GETVARARGS
-                    if ((inst - 1)->operation == LiftedOperation::GETVARARGS) {
-                        // ASSERT((inst - 1)->operation == LiftedOperation::GETVARARGS, "no GETVARARGS previous to a call that uses a VARARG argument count!");
-                        auto topCallRegister = (inst - 1)->operands[0];
-                        argCount = topCallRegister.value.reg;
+                int effectiveArgCount = (argCount == -1) ? 1 : argCount;
+                if (effectiveArgCount > 0) {
+                    argVersions.reserve(effectiveArgCount);
+                    for (int32_t k = 0; k < effectiveArgCount; ++k) {
+                        int32_t argReg = regFunc + 1 + k;
+                        int32_t v = CurrentVersion(argReg);
+                        if (v == -1)
+                            v = NewVersion(argReg);
+                        argVersions.push_back(v);
+                        func.useCounts[{argReg, v}]++;
                     }
                 }
-
-                for (int32_t k = 0; k < argCount; ++k) {
-                    int32_t argReg = regFunc + 1 + k;
-
-                    int32_t v = CurrentVersion(argReg);
-
-                    if (v == -1) {
-                        v = NewVersion(argReg);
-                    }
-
-                    argVersions.push_back(v);
-                    func.useCounts[{argReg, v}]++;
-                }
-
                 func.implicitUses[inst] = std::move(argVersions);
+
                 int32_t retCount = inst->operands[2].value.imm.n;
+                int32_t baseReg = inst->operands[0].value.reg;
 
-                if (retCount > 1) {
-                    int32_t baseReg = inst->operands[0].value.reg;
-                    for (int32_t k = 0; k < retCount - 1; ++k) {
-                        uint8_t retReg = baseReg + k;
+                int effectiveRetCount = (retCount == 0) ? 1 : (retCount - 1);
 
-                        int32_t newVer = NewVersion(retReg);
-                        varsDefinedHere.push_back(retReg);
-
-                        func.definitionMap[{retReg, newVer}] = inst;
-                    }
+                for (int32_t k = 0; k < effectiveRetCount; ++k) {
+                    int32_t retReg = baseReg + k;
+                    int32_t newVer = NewVersion(retReg);
+                    varsDefinedHere.push_back(retReg);
+                    func.definitionMap[{static_cast<uint8_t>(retReg), newVer}] = inst;
                 }
+
+            } else if (inst->operation == LiftedOperation::NAMECALL) {
+                int32_t regA = inst->operands[0].value.reg;
+                int32_t regSelf = regA + 1;
+
+                int32_t newVer = NewVersion(regSelf);
+                varsDefinedHere.push_back(regSelf);
+                func.definitionMap[{static_cast<uint8_t>(regSelf), newVer}] = inst;
+
             } else if (inst->operation == LiftedOperation::RETURN) {
                 int regStart = inst->operands[0].value.reg;
                 int count = inst->operands[1].value.imm.n - 1;
 
                 std::vector<int32_t> retVersions;
-                for (int i = 0; i < count; ++i) {
+                int effectiveCount = (count == -1) ? 1 : count;
+
+                for (int i = 0; i < effectiveCount; ++i) {
                     int reg = regStart + i;
                     int32_t v = CurrentVersion(reg);
                     if (v == -1)

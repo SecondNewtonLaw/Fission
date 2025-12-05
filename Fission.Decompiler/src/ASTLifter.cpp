@@ -75,6 +75,95 @@ static int32_t FindMergeBlock(const AnalyzedFunction *func, uint32_t branchA, ui
     return -1;
 }
 
+std::shared_ptr<Expression> ASTLifter::LiftCallLikeInstruction(const AnalyzedFunction *func, int32_t index, bool isNested) {
+    if (func->lpLiftedFunction->instructions[index].operation == LiftedOperation::CALL && index >= 2) {
+        const auto &prev = func->lpLiftedFunction->instructions[index - 2];
+        if (prev.operation == LiftedOperation::NAMECALL) {
+            index -= 2; // Shift index to the NAMECALL instruction
+        }
+    }
+
+    const auto &inst = func->lpLiftedFunction->instructions[index];
+    bool isNameCall = (inst.operation == LiftedOperation::NAMECALL);
+    int32_t callInfoIndex = isNameCall ? index + 2 : index;
+    const auto &callInfoInst = func->lpLiftedFunction->instructions[callInfoIndex];
+    int regFunc = callInfoInst.operands[0].value.reg;
+
+    std::vector<std::shared_ptr<Expression>> args;
+    std::shared_ptr<Expression> callee;
+    bool isVararg = false;
+
+    if (isNameCall) {
+        auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(inst.operands[2].value.imm.k);
+        std::string method = std::get<std::string>(kIdx.constantData);
+        callee = LiftExpression(func, inst.operands[1]);
+    } else {
+        callee = LiftExpression(func, inst.operands[0]);
+    }
+
+    if (func->implicitUses.contains(&callInfoInst)) {
+        const auto &versions = func->implicitUses.at(&callInfoInst);
+
+        int startIdx = isNameCall ? 1 : 0;
+
+        for (size_t k = startIdx; k < versions.size(); ++k) {
+            LiftedOperand op;
+            op.type = LiftedOperandType::Register;
+            op.value.reg = regFunc + 1 + k; // map implicitUses[k] back to op 1 + 1 + k
+            op.ssaVersion = versions[k];
+
+            auto def = func->GetDefinition(op);
+
+            if (def && (def->operation == LiftedOperation::CALL)) {
+                if (def->operands[2].value.imm.n == 0) { // C=0
+                    args.push_back(LiftCallLikeInstruction(func, def->instructionIndex));
+                    break;
+                }
+            }
+            if (def && def->operation == LiftedOperation::CALL && def->instructionIndex > 2) {
+                const auto &potentialNameCall = func->lpLiftedFunction->instructions[def->instructionIndex - 2];
+                if (potentialNameCall.operation == LiftedOperation::NAMECALL) {
+                    if (def->operands[2].value.imm.n == 0) {
+                        args.push_back(LiftCallLikeInstruction(func, potentialNameCall.instructionIndex));
+                        break;
+                    }
+                }
+            }
+            if (def && def->operation == LiftedOperation::GETVARARGS) {
+                isVararg = true;
+                break;
+            }
+            args.push_back(LiftExpression(func, op));
+        }
+    }
+
+    std::vector<std::shared_ptr<Expression>> rets;
+    std::vector<SSARef> refs;
+    for (const auto &ret : func->definitionMap) {
+        if (ret.second != func->lpLiftedFunction->instructions.data() + callInfoIndex)
+            continue;
+        refs.emplace_back(ret.first);
+    }
+    std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
+    for (const auto &ref : refs)
+        if ((inst.operation == LiftedOperation::NAMECALL && !isNested) || inst.operation == LiftedOperation::CALL)
+            rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
+
+    bool shouldInline = isNested || IsInstructionConsumed(func, index);
+
+    if (isNameCall) {
+        auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(inst.operands[2].value.imm.k);
+        auto methodName = std::get<std::string>(kIdx.constantData);
+        auto node = std::make_shared<NameCallExpressionNode>(
+            callee, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(methodName)), args, rets, isVararg, shouldInline
+        );
+        return node;
+    }
+
+    auto node = std::make_shared<CallExpressionNode>(callee, args, rets, isVararg, shouldInline);
+    return node;
+}
+
 std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand) {
     if (operand.type == LiftedOperandType::Register && this->m_pinnedRegisters.contains(operand.value.reg))
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
@@ -287,11 +376,12 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         // );
     }
 
-    case LiftedOperation::CALL: {
+    case LiftedOperation::CALL:
     case LiftedOperation::NAMECALL: {
-        // namecall currently simply does v{} (rid), we'll just do the same.
+        if (IsInstructionConsumed(func, definitionInstruction->instructionIndex)) {
+            return LiftCallLikeInstruction(func, definitionInstruction->instructionIndex, true);
+        }
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-    }
     }
 
     case LiftedOperation::GETUPVAL: {
@@ -313,8 +403,21 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
 
     int32_t startIdx = block.lpHead->instructionIndex;
     int32_t endIdx = block.lpTail->instructionIndex;
+    std::set<int> skippedIndices;
+    for (int i = startIdx; i <= endIdx; ++i) {
+        if (IsInstructionConsumed(func, i)) {
+            skippedIndices.insert(i);
+            if (func->lpLiftedFunction->instructions[i].operation == LiftedOperation::NAMECALL) {
+                skippedIndices.insert(i + 1); // AUX
+                skippedIndices.insert(i + 2); // CALL
+            }
+        }
+    }
 
     for (int i = startIdx; i <= endIdx; ++i) {
+        if (skippedIndices.contains(i))
+            continue; // skip instructions that will be inlined.
+
         const auto &inst = func->lpLiftedFunction->instructions[i];
 
         switch (inst.operation) {
@@ -332,7 +435,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
             auto functionArguments = duplicatedFunction->numparams;
             auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-            for (int i = 0; i < functionArguments; i++) {
+            for (uint8_t i = 0; i < functionArguments; i++) {
                 functionArgumentNames[i] = std::format("v{}", i);
             }
 
@@ -356,7 +459,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[inst.operands[1].value.imm.k];
             std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
             std::unordered_map<int32_t, std::string> args;
-            for (int i = 0; i < proto->numparams; i++)
+            for (uint8_t i = 0; i < proto->numparams; i++)
                 args[i] = std::format("v{}", i);
 
             auto *lpFunc = &func->innerFunctions[inst.operands[1].value.imm.k];
@@ -432,100 +535,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
         }
 
             // stmts
-        case LiftedOperation::CALL: {
-            // TODO: Handle vararg properly. This is causing issues.
-            // we will need to somehow track the stack??? This will be painful.
-            int regFunc = inst.operands[0].value.reg;
-            int32_t argCount = inst.operands[1].value.imm.n - 1;
-            // int32_t retCount = inst.operands[2].value.imm.n;
-            auto callee = LiftExpression(func, inst.operands[0]);
-
-            std::vector<std::shared_ptr<Expression>> args;
-            if (func->implicitUses.contains(&inst)) {
-                const auto &versions = func->implicitUses.at(&inst);
-                for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
-                    LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
-                    op.value.reg = regFunc + 1 + k;
-                    op.ssaVersion = versions[k];
-
-                    if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
-                        break;
-                    args.push_back(LiftExpression(func, op));
-                }
-            }
-
-            std::vector<SSARef> refs;
-
-            for (const auto &ret : func->definitionMap) {
-                if (ret.second != func->lpLiftedFunction->instructions.data() + i)
-                    continue;
-                refs.emplace_back(ret.first);
-            }
-
-            std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
-
-            std::vector<std::shared_ptr<Expression>> rets;
-            for (const auto &ref : refs)
-                rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
-
-            auto callExpr = std::make_shared<CallExpressionNode>(callee, args, rets, argCount == (int32_t)-1, false);
-            const auto &nextInst = func->lpLiftedFunction->instructions[i + 1];
-
-            if (nextInst.operation == LiftedOperation::CALL) {
-                if ((nextInst.operands[1].value.imm.n - 1) == -1) /*var arg*/ {
-                    // inject the function call in place.
-                    int regFuncNew = nextInst.operands[0].value.reg;
-                    // int32_t retCount = inst.operands[2].value.imm.n;
-                    auto calleeNext = LiftExpression(func, nextInst.operands[0]);
-
-                    std::vector<std::shared_ptr<Expression>> argsNext;
-                    if (func->implicitUses.contains(&nextInst)) {
-                        const auto &versions = func->implicitUses.at(&nextInst);
-                        for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
-                            LiftedOperand op;
-                            op.type = LiftedOperandType::Register;
-                            op.value.reg = regFuncNew + 1 + k;
-                            op.ssaVersion = versions[k];
-
-                            if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
-                                break;
-                            argsNext.push_back(LiftExpression(func, op));
-                        }
-                    }
-
-                    std::vector<SSARef> refsNew;
-
-                    for (const auto &ret : func->definitionMap) {
-                        if (ret.second != func->lpLiftedFunction->instructions.data() + i + 1)
-                            continue;
-                        refsNew.emplace_back(ret.first);
-                    }
-
-                    std::ranges::sort(refsNew, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
-
-                    std::vector<std::shared_ptr<Expression>> retsNew;
-                    for (const auto &ref : refsNew)
-                        retsNew.push_back(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version)))
-                        );
-
-                    argsNext.push_back(callExpr);
-                    callExpr->inlineCall = true;
-                    statements.push_back(
-                        std::make_shared<ExpressionStatementNode>(
-                            std::make_shared<CallExpressionNode>(calleeNext, argsNext, retsNew, argCount == (int32_t)-1, false)
-                        )
-                    );   // inject call.
-                    i++; // skip next call.
-                } else {
-                    statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
-                }
-            } else {
-                statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
-            }
-            break;
-        }
         case LiftedOperation::SETGLOBAL: {
             int kIndex = inst.operands[1].value.imm.k;
             const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIndex];
@@ -563,131 +572,86 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             break;
         }
         case LiftedOperation::RETURN: {
-            // TODO: vararg return, this pmos!
             int regStart = inst.operands[0].value.reg;
-            size_t count = inst.operands[1].value.imm.n - 1;
+            // size_t count = inst.operands[1].value.imm.n - 1;
             std::vector<std::shared_ptr<Expression>> rets;
 
             if (func->implicitUses.contains(&inst)) {
                 const auto &versions = func->implicitUses.at(&inst);
-                for (size_t k = 0; k < count && k < versions.size(); ++k) {
+                for (size_t k = 0; k < versions.size(); ++k) {
                     LiftedOperand op;
                     op.type = LiftedOperandType::Register;
                     op.value.reg = regStart + k;
                     op.ssaVersion = versions[k];
+
+                    auto def = func->GetDefinition(op);
+
+                    if (def && (def->operation == LiftedOperation::CALL)) {
+                        if (def->operands[2].value.imm.n == 0) {
+                            rets.push_back(LiftCallLikeInstruction(func, def->instructionIndex));
+                            break;
+                        }
+                    }
+                    // we'll see if namecall needs this later on.
+
                     rets.push_back(LiftExpression(func, op));
                 }
             }
             statements.push_back(std::make_shared<ReturnStatementNode>(rets));
             break;
         }
+        case LiftedOperation::CALL:
         case LiftedOperation::NAMECALL: {
-            auto &callInsn = func->lpLiftedFunction->instructions[i + 2];
-            int regFunc = callInsn.operands[0].value.reg;
-            // int32_t argCount = callInsn.operands[1].value.imm.n - 1; // Unused for logic now
+            int32_t callInfoIdx = (inst.operation == LiftedOperation::NAMECALL) ? i + 2 : i;
+            const auto &callOp = func->lpLiftedFunction->instructions[callInfoIdx];
 
-            std::vector<std::shared_ptr<Expression>> args;
-            bool isVararg = false;
+            bool isMultRetProducer = (callOp.operands[2].value.imm.n == 0);
 
-            if (func->implicitUses.contains(&callInsn)) {
-                const auto &versions = func->implicitUses.at(&callInsn);
-                for (int32_t k = 1; k < static_cast<int32_t>(versions.size()); ++k) { // skip self
-                    LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
-                    op.value.reg = regFunc + 1 + k;
-                    op.ssaVersion = versions[k];
+            if (isMultRetProducer) {
+                size_t nextIdx = callInfoIdx + 1;
+                if (nextIdx < func->lpLiftedFunction->instructions.size()) {
+                    const auto &nextInst = func->lpLiftedFunction->instructions[nextIdx];
 
-                    auto def = func->GetDefinition(op);
-                    if (def != nullptr && def->operation == LiftedOperation::GETVARARGS) {
-                        isVararg = true;
-                        break;
+                    bool nextConsumes = false;
+
+                    if (nextInst.operation == LiftedOperation::CALL || nextInst.operation == LiftedOperation::NAMECALL) {
+                        nextConsumes = (nextInst.operands[1].value.imm.n == 0);
+                    } else if (nextInst.operation == LiftedOperation::RETURN) {
+                        // RETURN
+                        nextConsumes = (nextInst.operands[1].value.imm.n == 0);
+                    } else if (nextInst.operation == LiftedOperation::SETLIST) {
+                        // SETLIST consumes multret if 0
+                        nextConsumes = (nextInst.operands[2].value.imm.n == 0);
                     }
 
-                    args.push_back(LiftExpression(func, op));
+                    if (nextConsumes) {
+                        if (inst.operation == LiftedOperation::NAMECALL)
+                            i += 2;
+                        continue;
+                    }
                 }
             }
 
-            std::vector<SSARef> refs;
-            for (const auto &ret : func->definitionMap) {
-                if (ret.second != func->lpLiftedFunction->instructions.data() + (i + 2))
-                    continue;
-                refs.emplace_back(ret.first);
+            auto expr = LiftCallLikeInstruction(func, i, false);
+            statements.push_back(std::make_shared<ExpressionStatementNode>(expr));
+
+            if (inst.operation == LiftedOperation::NAMECALL) {
+                i += 2;
             }
-            std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
-
-            std::vector<std::shared_ptr<Expression>> rets;
-            for (const auto &ref : refs)
-                rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
-
-            auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(func->lpLiftedFunction->instructions[i].operands[2].value.imm.k);
-
-            auto fakeOp = LiftedOperand{};
-            fakeOp.type = LiftedOperandType::Register;
-            fakeOp.value.reg = func->lpLiftedFunction->instructions[i].operands[1].value.reg;
-            fakeOp.ssaVersion = func->lpLiftedFunction->instructions[i].operands[1].ssaVersion;
-
-            const auto &nextInst = func->lpLiftedFunction->instructions[i + 3];
-
-            auto futureStatement = std::make_shared<NameCallExpressionNode>(
-                LiftExpression(func, fakeOp),
-                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(kIdx.constantData))), args, rets, isVararg, false
-            );
-
-            if (nextInst.operation == LiftedOperation::CALL) {
-                if ((nextInst.operands[1].value.imm.n - 1) == -1) /*var arg*/ {
-                    // inject the function call in place.
-                    int regFuncNew = nextInst.operands[0].value.reg;
-                    int32_t argc = nextInst.operands[1].value.imm.n;
-                    // int32_t retCount = inst.operands[2].value.imm.n;
-                    auto calleeNext = LiftExpression(func, nextInst.operands[0]);
-
-                    std::vector<std::shared_ptr<Expression>> argsNext;
-                    if (func->implicitUses.contains(&nextInst)) {
-                        const auto &versions = func->implicitUses.at(&nextInst);
-                        for (int32_t k = 0; k < static_cast<int32_t>(versions.size()); ++k) {
-                            LiftedOperand op;
-                            op.type = LiftedOperandType::Register;
-                            op.value.reg = regFuncNew + 1 + k;
-                            op.ssaVersion = versions[k];
-
-                            if (auto def = func->GetDefinition(op); def != nullptr && def->operation == LiftedOperation::GETVARARGS)
-                                break;
-                            argsNext.push_back(LiftExpression(func, op));
-                        }
-                    }
-
-                    std::vector<SSARef> refsNew;
-
-                    for (const auto &ret : func->definitionMap) {
-                        if (ret.second != func->lpLiftedFunction->instructions.data() + i + 3)
-                            continue;
-                        refsNew.emplace_back(ret.first);
-                    }
-
-                    std::ranges::sort(refsNew, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
-
-                    std::vector<std::shared_ptr<Expression>> retsNew;
-                    for (const auto &ref : refsNew)
-                        retsNew.push_back(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version)))
-                        );
-
-                    futureStatement->inlineCall = true;
-                    argsNext.push_back(futureStatement);
-                    i++;
-                    statements.push_back(std::make_shared<CallExpressionNode>(calleeNext, argsNext, retsNew, argc == (int32_t)-1, false)); // skip next call.
-                } else {
-                    for (const auto &ref : refs)
-                        rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
-                    statements.push_back(futureStatement);
-                }
-            } else {
-                statements.push_back(futureStatement);
-            }
-
-            i += 2;
             break;
         }
+        case LiftedOperation::ADD:
+        case LiftedOperation::SUB:
+        case LiftedOperation::MUL:
+        case LiftedOperation::DIV:
+        case LiftedOperation::MOD:
+        case LiftedOperation::POW:
+        case LiftedOperation::ADDK:
+        case LiftedOperation::SUBK:
+        case LiftedOperation::MULK:
+        case LiftedOperation::DIVK:
+        case LiftedOperation::MODK:
+        case LiftedOperation::POWK:
         case LiftedOperation::LOAD:
         case LiftedOperation::NOP:
         case LiftedOperation::GETVARARGS:
@@ -999,12 +963,32 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                 }
             } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
                 auto numericForNode = std::make_shared<ForNumericNode>();
-                // the loop header for this can be at most
-                auto baseRegister = block.lpTail->operands[0].value.reg;
-                // control vars.
+                auto forPrepInst = block.lpTail;
+                auto baseRegister = forPrepInst->operands[0].value.reg;
+
                 auto dwStartValueReg = baseRegister + 2;
                 auto increaseBy = baseRegister + 1;
                 auto increaseUntilReg = baseRegister;
+
+                int32_t limitVer = -1, stepVer = -1, startVer = -1;
+
+                if (func->implicitUses.contains(forPrepInst)) {
+                    const auto &impl = func->implicitUses.at(forPrepInst);
+                    if (impl.size() >= 3) {
+                        limitVer = impl[0];
+                        stepVer = impl[1];
+                        startVer = impl[2];
+                    }
+                }
+
+                // ssa may fail to be generated, we should put a warning, but most of the bugs
+                // on the ssa builder have been evicted, so this is proooobably never going to reach. But just in case.
+                if (limitVer == -1)
+                    limitVer = forPrepInst->operands[0].ssaVersion;
+                if (stepVer == -1)
+                    stepVer = limitVer;
+                if (startVer == -1)
+                    startVer = limitVer;
 
                 uint32_t bodyIdx = -1;
                 for (const auto succ : block.successors)
@@ -1025,24 +1009,26 @@ ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t st
                     numericForNode->lpLoopBody = CreateBlock(loopBody);
 
                     op.value.reg = increaseBy;
-                    op.ssaVersion = block.lpTail->operands[0].ssaVersion;
+                    op.ssaVersion = stepVer;
                     numericForNode->increaseBy = LiftExpression(func, op);
+
                     op.value.reg = increaseUntilReg;
+                    op.ssaVersion = limitVer;
                     numericForNode->maxIncreased = LiftExpression(func, op);
+
                     op.value.reg = dwStartValueReg;
-                    op.ssaVersion = block.lpTail->operands[0].ssaVersion + 1;
+                    op.ssaVersion = startVer;
                     numericForNode->loopVariable = LiftExpression(func, op);
 
                     this->ExitLoop();
                 }
 
                 op.value.reg = dwStartValueReg;
-                op.ssaVersion = block.lpTail->operands[0].ssaVersion;
+                op.ssaVersion = startVer;
                 numericForNode->startVariable = LiftExpression(func, op);
 
                 nodes.push_back(numericForNode);
 
-                // continue after loop
                 if (exitIdx != stopBlockId) {
                     auto nextNodes = LiftTree(func, exitIdx, stopBlockId, visited);
                     nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
