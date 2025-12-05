@@ -58,6 +58,7 @@ class SourceGenerator : public Visitor {
         lpNode->lpFunctionBody->Accept(this);
         this->DecreaseIndentation();
         buffer << this->GetIndentation() << "end";
+        this->NextLine();
     }
 
     void Visit(CommentNode *lpNode) override {
