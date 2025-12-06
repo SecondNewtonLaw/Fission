@@ -24,6 +24,8 @@ enum class ASTNodeKind {
      ***/
     Identifier,
 
+    IdentifierExpression,
+
     /**
      *  @brief Represents function expressions for anonymous functions (functions with no debugname)
      ***/
@@ -122,7 +124,9 @@ class BinaryExpressionNode : public Expression {
     std::string op;
     std::shared_ptr<Expression> left, right;
     BinaryExpressionNode(const std::string &op, const std::shared_ptr<Expression> &left, const std::shared_ptr<Expression> &right)
-        : op(op), left(left), right(right) {}
+        : op(op), left(left), right(right) {
+        this->nodeKind = ASTNodeKind::BinaryExpression;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
@@ -165,7 +169,7 @@ class MemberExpressionNode : public Expression {
 class IdentifierExpressionNode : public Expression {
   public:
     std::shared_ptr<Identifier> identifier;
-    IdentifierExpressionNode(std::shared_ptr<Identifier> id) : identifier(id) {}
+    IdentifierExpressionNode(std::shared_ptr<Identifier> id) : identifier(id) { this->nodeKind = ASTNodeKind::IdentifierExpression; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

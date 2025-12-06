@@ -183,7 +183,9 @@ class SourceGenerator : public Visitor {
     void Visit(IfStatementNode *lpNode) override {
         (void)lpNode;
         if (lpNode->thenBranch == nullptr && lpNode->elseBranch == nullptr) {
-            buffer << this->GetIndentation() << "--[[ Fission: Control Flow Analysis Failed ]]";
+            buffer << this->GetIndentation()
+                   << "--[[ Fission: conditional branches not lifted. This could indicate bad decompilation if the instructions inside these branches modified "
+                      "outer state. ]]";
             this->NextLine();
             return;
         }
@@ -285,7 +287,7 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(TableLiteralNode *lpNode) override {
-        buffer << " { ";
+        buffer << "{ ";
         for (size_t i = 0; i < lpNode->expressions.size(); i++) {
             lpNode->expressions.at(i)->Accept(this);
             if (i < lpNode->expressions.size() - 1)

@@ -46,11 +46,11 @@ class ASTLifter {
 
     std::string GetVarName(int reg, int ver) {
         if (bLoopEnter && reg == loopRegister) {
-            return std::format("i_{}", reg);
+            return std::format("i");
         }
 
         if (ver != -1)
-            return std::format("v{}_{}", reg, ver);
+            return std::format("v{}", reg);
 
         return std::format("v{}", reg);
     }
@@ -97,18 +97,37 @@ class ASTLifter {
         case LiftedOperation::MUL:
         case LiftedOperation::DIV:
         case LiftedOperation::MOD:
+        case LiftedOperation::OR:
         case LiftedOperation::POW:
+        case LiftedOperation::LOAD:
+        case LiftedOperation::AND:
+        case LiftedOperation::NOT:
+        case LiftedOperation::MINUS: {
+            int reg = inst.operands[0].value.reg;
+
+            int definedVersion = inst.operands[0].ssaVersion;
+
+            if (definedVersion <= 1)
+                return false; // first version is initialization, we need it as a variable declaration.
+
+            if (inst.operands[0].value.reg == inst.operands[1].value.reg)
+                return false; // instruction self modifies register, cannot be consumed.
+
+            if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 0)
+                return true;
+
+            if (this->bLoopEnter)
+                return true;
+
+            return false;
+        }
+        case LiftedOperation::LENGTH:
         case LiftedOperation::ADDK:
         case LiftedOperation::SUBK:
         case LiftedOperation::MULK:
         case LiftedOperation::DIVK:
         case LiftedOperation::MODK:
         case LiftedOperation::POWK:
-        case LiftedOperation::NOT:
-        case LiftedOperation::MINUS:
-        case LiftedOperation::LENGTH:
-        case LiftedOperation::AND:
-        case LiftedOperation::OR:
         case LiftedOperation::ANDK:
         case LiftedOperation::ORK:
         case LiftedOperation::CONCAT:
@@ -118,17 +137,10 @@ class ASTLifter {
         case LiftedOperation::GETGLOBAL:
         case LiftedOperation::GETIMPORT:
         case LiftedOperation::GETUPVAL:
-        case LiftedOperation::LOAD:
         case LiftedOperation::MOVE: {
             int reg = inst.operands[0].value.reg;
 
-            int definedVersion = -1;
-            for (const auto &[ref, instrPtr] : func->definitionMap) {
-                if (instrPtr->instructionIndex == inst.instructionIndex && ref.regIndex == reg) {
-                    definedVersion = ref.version;
-                    break;
-                }
-            }
+            int definedVersion = inst.operands[0].ssaVersion;
 
             if (definedVersion != -1) {
                 if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 0) {

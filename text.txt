@@ -1,4 +1,4 @@
-local function CFATestStress(A, B, C)
+local function test(A, B, C)
     local acc = 0
     local t = {10, 20, 30, 40, 50}
     local f = function(x) return x * 3, x - 1 end
@@ -12,11 +12,23 @@ local function CFATestStress(A, B, C)
             if q < 0 then
                 return acc
             end
-            -- This code emits a JUMP after the RETURN present here. The JUMP is unreachable under normal LUAU VM conditions, as there is no label, and return cannot be skipped, since the JUMPIFNOTLT emited by the compiler skips directly to the FORNLOOP instruction.
         elseif v % 4 == 2 then
             acc = acc + (v * 2)
         else
             acc = acc - B
         end
    end
+end
+
+local x = game:FindFirstChild(tostring("an x"))
+if not x then
+    return
+end
+local y = x:FindFirstChild("a y")
+if not y then
+    return
+end
+local z = y:FindFirstChild("a z")
+if not z then
+    return
 end

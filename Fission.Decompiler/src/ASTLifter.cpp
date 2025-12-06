@@ -474,7 +474,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             auto functionArguments = duplicatedFunction->numparams;
             auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
             for (uint8_t aN = 0; aN < functionArguments; aN++) {
-                functionArgumentNames[aN] = std::format("v{}_0", aN);
+                functionArgumentNames[aN] = std::format("v{}", aN);
             }
 
             const AnalyzedFunction *lpFunc = nullptr;
@@ -498,7 +498,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
             std::unordered_map<int32_t, std::string> args;
             for (uint8_t pN = 0; pN < proto->numparams; pN++)
-                args[pN] = std::format("v{}_0", pN);
+                args[pN] = std::format("v{}", pN);
 
             auto *lpFunc = &func->innerFunctions[inst.operands[1].value.imm.k];
             std::set<uint32_t> visited;
@@ -553,6 +553,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
                     std::make_shared<TableLiteralNode>(setListWhat)
                 )
             );
+            i = setlistId; // move after SETLIST.
             break;
         }
 
@@ -690,7 +691,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
                 uses = func->useCounts.at({reg, ver});
             }
 
-            if (uses == 0 && !m_pinnedRegisters.contains(reg)) {
+            if ((uses == 0 || uses > 1) && !m_pinnedRegisters.contains(reg)) {
                 auto expression = LiftExpression(func, inst.operands[0]);
 
                 auto targetIdentifier = std::make_shared<Identifier>("_");
@@ -706,25 +707,38 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const A
             break;
         }
         case LiftedOperation::LOAD: {
-            if (func->GetDefinition(inst.operands[0]) == nullptr) {
-                // while this will be self, we want to know if there was a previous definition.
-                // if no previous definition, push it, as this may be used to mutate variables.
-                auto expression = LiftExpression(func, inst.operands[0], true);
+            if (func->useCounts.at({inst.operands[0].value.reg, inst.operands[0].ssaVersion}) == 1 && inst.operands[0].ssaVersion > 1)
+                break; // one usage isn't enough to matter.
+            // while this will be self, we want to know if there was a previous definition.
+            // if no previous definition, push it, as this may be used to mutate variables.
+            auto expression = LiftExpression(func, inst.operands[0], true);
 
-                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
-                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+            auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
+            auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
 
+            if (inst.operands[0].ssaVersion <= 1)
+                statements.push_back(std::make_shared<VariableDeclarationNode>(targetExpression, expression));
+            else
                 statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
-            }
-        case LiftedOperation::MOVE:
-            break; // LOAD and MOVE are suppressed.
+            break;
         }
+        case LiftedOperation::MOVE:
+            break; // MOVE is suppressed.
         case LiftedOperation::ADD:
         case LiftedOperation::SUB:
         case LiftedOperation::MUL:
         case LiftedOperation::DIV:
         case LiftedOperation::MOD:
-        case LiftedOperation::POW:
+        case LiftedOperation::POW: {
+            // if a SUB/ADD/MUL/DIV/MOD/POW uses rX, rx and rn, then it means that it MUST be emitted and cannot be inlined.
+            auto expression = LiftExpression(func, inst.operands[0], true);
+
+            auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
+            auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
+
+            statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
+            break;
+        }
         case LiftedOperation::ADDK:
         case LiftedOperation::SUBK:
         case LiftedOperation::MULK:

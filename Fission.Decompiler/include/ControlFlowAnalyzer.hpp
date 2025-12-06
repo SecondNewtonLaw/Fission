@@ -139,6 +139,7 @@ struct AnalyzedFunction {
 
         return definitionMap.at(ssaRef);
     }
+
 };
 
 inline std::string BlockTypeToString(BlockType type) {
