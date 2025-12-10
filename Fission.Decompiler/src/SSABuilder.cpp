@@ -56,13 +56,20 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
 }
 
 int32_t SSABuilder::NewVersion(int32_t reg) {
+    if (versionCounter.size() <= static_cast<size_t>(reg))
+        while (versionCounter.size() <= static_cast<size_t>(reg))
+            versionCounter.emplace_back(0);
     const int32_t nVer = versionCounter[reg]++;
     versionStack[reg].push_back(nVer);
     return nVer;
 }
 
 int32_t SSABuilder::CurrentVersion(int32_t reg) {
-    if (versionStack[reg].empty()) {
+    if (versionStack.size() <= static_cast<size_t>(reg) || versionStack[reg].empty()) {
+        if (versionStack.size() <= static_cast<size_t>(reg))
+            while (versionStack.size() <= static_cast<size_t>(reg))
+                versionStack.emplace_back();
+
         return -1;
     }
     return versionStack[reg].back();

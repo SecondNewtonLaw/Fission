@@ -27,6 +27,12 @@ class SourceGenerator : public Visitor {
         this->dwIndentationLevel--;
     }
 
+    bool IsLegalLuauIndex(const std::string &str) {
+        if (str.empty() || isdigit(str[0]))
+            return false;
+        return std::ranges::all_of(str, [](const char c) { return isalnum(c) || c == '_'; });
+    }
+
     void Visit(NoExpressionNode *lpNode) override { (void)lpNode; }
 
     void Visit(RootNode *lpNode) override {
@@ -124,7 +130,13 @@ class SourceGenerator : public Visitor {
     void Visit(MemberExpressionNode *lpNode) override {
         (void)lpNode;
         lpNode->table->Accept(this);
-        buffer << "." << lpNode->keyName;
+        if (this->IsLegalLuauIndex(lpNode->keyName)) {
+            buffer << "." << lpNode->keyName;
+        } else {
+            buffer << "[\"";
+            buffer << lpNode->keyName;
+            buffer << "\"]";
+        }
     }
 
     void Visit(ReturnStatementNode *lpNode) override {

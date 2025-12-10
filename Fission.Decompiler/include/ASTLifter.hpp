@@ -113,7 +113,7 @@ class ASTLifter {
             if (inst.operands[0].value.reg == inst.operands[1].value.reg)
                 return false; // instruction self modifies register, cannot be consumed.
 
-            if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 0)
+            if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 1)
                 return true;
 
             if (this->bLoopEnter)
@@ -138,15 +138,6 @@ class ASTLifter {
         case LiftedOperation::GETIMPORT:
         case LiftedOperation::GETUPVAL:
         case LiftedOperation::MOVE: {
-            int reg = inst.operands[0].value.reg;
-
-            int definedVersion = inst.operands[0].ssaVersion;
-
-            if (definedVersion != -1) {
-                if (func->useCounts.contains({reg, definedVersion}) && func->useCounts.at({reg, definedVersion}) > 0) {
-                    return true;
-                }
-            }
             return false;
         }
         default:

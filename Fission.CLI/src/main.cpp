@@ -56,8 +56,8 @@ std::string DecodeBase64FileToBinary(const std::wstring &filepath) {
 int main() {
     Decompiler decompiler{};
     ASSERT(
-        decompiler.DecompileTestCodeFromFile(
-            "text.txt",
+        decompiler.DecompileRobloxBytecode(
+            DecodeBase64FileToBinary(L"bytecode_encoded.txt"),
             DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::GenerateIRGraph
         ) == DecompileResult::Success,
         "Decompilation failed."
