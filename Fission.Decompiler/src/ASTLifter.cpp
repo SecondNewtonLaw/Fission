@@ -97,11 +97,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     case BlockType::LoopHeader: {
         if (block.loopLatch.has_value()) {
             uint32_t exitIdx = block.loopExit.value_or(block.loopLatch.value_or(-1));
-            uint32_t bodyIdx = block.successors[0] == exitIdx ? block.successors[1] : block.successors[0];
 
             std::set<uint32_t> loopVisited = visited;
 
             if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
+                uint32_t bodyIdx = -1;
                 for (auto succ : block.successors) {
                     if (succ != block.loopLatch.value_or(block.loopExit.value_or(-1))) { // determine body by != exit.
                         bodyIdx = succ;
@@ -227,11 +227,26 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 }
 
                 default:
-                    whileNode->condition = LiftExpression(block.lpTail->operands[0]);
+                    // not a conditional likely, as such, this is a while true do ... end that was potentially simplified during O1+.
+                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
                     break;
                 }
-                whileNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
-                nodes.push_back(whileNode);
+
+                auto bodyIdx = block.successors[0] == exitIdx && block.successors.size() > 1 ? block.successors[1] : block.successors[0];
+                if (bodyIdx != exitIdx) {
+                    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+                    whileNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+                    nodes.push_back(whileNode);
+                } else {
+                    nodes.resize(
+                        nodes.size() - stmts.size()
+                    );                                    // remove current block statements (LoopHeader), we are the body in this case, one of an inf loop.
+                    whileNode->body = CreateBlock(stmts); // this means we are in an infinite loop, with no exit.
+                    nodes.push_back(whileNode);
+                    auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
+                    nodes.insert(nodes.end(), after.begin(), after.end());
+                    return nodes;
+                }
             }
 
             auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
@@ -252,6 +267,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         break;
     }
     }
+
     return nodes;
 }
 

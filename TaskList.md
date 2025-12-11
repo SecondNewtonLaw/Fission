@@ -1,0 +1,3 @@
+- Implement Generic FOR loop.
+- Implement elseif branching properly (no more nasty if block going into another if block, that was hilariously bad.)
+- Cool.
