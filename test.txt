@@ -1,10 +1,11 @@
 --!optimize 0
 
+local game = game
 function test()
     local a = 2
     local b = 3
     local c = 6
-    print(a, b, c)
+    print(a, b, c, game.Name)
     return c, b, a
 end
 
@@ -24,3 +25,9 @@ for i=1, 50, 2 do
     error(i + 1)
 end
 print"hi"
+
+if x then
+    error("if branch")
+end
+
+error("BODY END")

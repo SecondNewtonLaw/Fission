@@ -16,9 +16,10 @@ enum class BlockType {
     Standard,
 
     // structures
-    IfHeader,   // The start of an 'if' (has conditional branches).
-    LoopHeader, // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
-    LoopLatch,  // bottom of a loop (negative jump).
+    IfHeader,     // The start of an 'if' (has conditional branches).
+    IfElseHeader, // The start of an 'elseif' (has conditional branches).
+    LoopHeader,   // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
+    LoopLatch,    // bottom of a loop (negative jump).
 
     // control flow
     Break,    // jumps out of the current loop context.
@@ -243,6 +244,7 @@ struct AnalyzedFunction {
     }
 
     void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }
+    std::string GetUpvalueName(int32_t index) { return upvalueNames.at(index); }
 
     void ClearVersionName(int32_t reg, int32_t ver) { ssaOverrides.erase({static_cast<uint8_t>(reg), ver}); }
 
@@ -258,10 +260,22 @@ struct AnalyzedFunction {
 
     void PopulateNames() {
         auto lpDeserialized = this->lpLiftedFunction->lpDeserialized;
+        this->upvalueNames.clear();
+        this->ssaOverrides.clear();
+        this->variableNames.clear();
+        this->globalRegNames.clear();
 
         int32_t uIdx = 0;
         for (const auto &name : lpDeserialized->upvalueNames)
             this->upvalueNames[uIdx++] = name;
+
+        if (lpDeserialized->upvalueNames.size() != lpDeserialized->nups) {
+            auto missing = lpDeserialized->nups - lpDeserialized->upvalueNames.size();
+
+            for (uint64_t i = lpDeserialized->upvalueNames.size(); i < missing; i++) {
+                this->upvalueNames[i] = std::format("uv_{}", i);
+            }
+        }
 
         for (size_t i = 0; i < lpDeserialized->numparams; i++) {
             this->SetGlobalName(i, std::format("arg{}", i));
@@ -327,7 +341,7 @@ class ControlFlowAnalyzer {
     void OptimiseGraphInternal(std::vector<BasicBlock> &blocks);
 
     bool IsConditional(LiftedOperation operation);
-    void IdentifyLoopStructuresInternal(AnalyzedFunction &func);
+    void IdentifyStructuresInternal(AnalyzedFunction &func);
 
     void PruneUnreachableBlocks(std::vector<BasicBlock> &blocks);
 

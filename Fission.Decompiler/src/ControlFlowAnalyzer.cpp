@@ -465,7 +465,7 @@ bool ControlFlowAnalyzer::IsConditional(LiftedOperation operation) {
     }
 }
 
-void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func) {
+void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     auto &blocks = func.basicBlocks;
     if (blocks.empty())
         return;
@@ -645,6 +645,18 @@ void ControlFlowAnalyzer::IdentifyLoopStructuresInternal(AnalyzedFunction &func)
             }
         }
     }
+
+    for (BasicBlock &block : blocks) {
+        if (block.bType == BlockType::IfHeader) {
+            for (int32_t pred : block.predecessors) {
+                auto &pB = func.basicBlocks.at(pred);
+                if (pB.bType == BlockType::IfHeader) {
+                    block.bType = BlockType::IfElseHeader;
+                    break;
+                }
+            }
+        }
+    }
 }
 
 void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
@@ -702,7 +714,7 @@ void ControlFlowAnalyzer::PruneUnreachable(AnalyzedFunction &func) {
 }
 
 void ControlFlowAnalyzer::IdentifyStructures(AnalyzedFunction &func) {
-    this->IdentifyLoopStructuresInternal(func);
+    this->IdentifyStructuresInternal(func);
     for (auto &f : func.innerFunctions)
         this->IdentifyStructures(f);
 }
@@ -746,6 +758,8 @@ std::string GraphVisualizer::BlockTypeToString(BlockType type) {
         return "Standard";
     case BlockType::IfHeader:
         return "If";
+    case BlockType::IfElseHeader:
+        return "IfElse";
     case BlockType::LoopHeader:
         return "LoopHead";
     case BlockType::LoopLatch:

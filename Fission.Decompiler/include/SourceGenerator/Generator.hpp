@@ -69,7 +69,16 @@ class SourceGenerator : public Visitor {
 
     void Visit(CommentNode *lpNode) override {
         (void)lpNode;
-        buffer << this->GetIndentation() << "--[=[" << lpNode->comment << "]=]";
+
+        if (lpNode->comment.find('\n') == std::string::npos) {
+            buffer << this->GetIndentation() << "-- " << lpNode->comment;
+            if (lpNode->bNewLine)
+                this->NextLine();
+            return;
+        }
+
+        buffer << this->GetIndentation() << "--[[ " << lpNode->comment << " ]]";
+
         if (lpNode->bNewLine)
             this->NextLine();
     }
@@ -250,6 +259,12 @@ class SourceGenerator : public Visitor {
 
     void Visit(StringLiteralNode *lpNode) override {
         (void)lpNode;
+
+        if (lpNode->value.find('\n') != std::string::npos) {
+            buffer << "[[" << lpNode->value << "]]";
+            return;
+        }
+
         buffer << "\"" << lpNode->value << "\"";
     }
 
