@@ -1,16 +1,11 @@
 //
-// Created by Pixeluted on 04/12/2025.
+// Created by Dottik on 10/12/2025.
 //
+
 #include "ASTLifter.hpp"
-
-#include "AbstractSyntaxTree/ASTNode.hpp"
-#include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
-
-#include "Deserializer.hpp"
 #include <algorithm>
-#include <format>
-#include <queue>
-#include <set>
+
+#pragma clang optimize off
 
 static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::shared_ptr<Statement>> &stmts) {
     auto block = std::make_shared<BlockStatementNode>();
@@ -18,164 +13,493 @@ static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::sh
     return block;
 }
 
-static int32_t FindMergeBlock(const AnalyzedFunction *func, uint32_t branchA, uint32_t branchB) {
-    if (branchA == branchB)
-        return (int32_t)branchA;
+ASTLifter::ASTLifter() {}
 
-    std::set<uint32_t> reachableFromA;
-    std::queue<uint32_t> q;
+ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
+    this->m_currentFunction = &analyzedFunction;
+    this->m_definedRegisters.clear();
+    this->m_pinnedRegisters.clear();
+    this->m_processedInstructions.clear();
+    this->m_phiConsumers.clear();
 
-    q.push(branchA);
-    reachableFromA.insert(branchA);
-    while (!q.empty()) {
-        uint32_t curr = q.front();
-        q.pop();
-
-        if (reachableFromA.size() > 2000u)
-            break;
-
-        const auto &block = func->basicBlocks[curr];
-        for (uint32_t succ : block.successors) {
-            if (block.bType == BlockType::LoopLatch && succ < curr)
-                continue;
-
-            if (!reachableFromA.contains(succ)) {
-                reachableFromA.insert(succ);
-                q.push(succ);
-            }
-        }
-    }
-
-    std::queue<uint32_t> q2;
-    q2.push(branchB);
-    std::set<uint32_t> visitedB;
-    visitedB.insert(branchB);
-
-    if (reachableFromA.contains(branchB))
-        return static_cast<int32_t>(branchB);
-
-    while (!q2.empty()) {
-        const uint32_t curr = q2.front();
-        q2.pop();
-
-        for (const auto &block = func->basicBlocks[curr]; uint32_t succ : block.successors) {
-            if (block.bType == BlockType::LoopLatch && succ < curr)
-                continue;
-
-            if (reachableFromA.contains(succ))
-                return static_cast<int32_t>(succ); // found merge point
-
-            if (!visitedB.contains(succ)) {
-                visitedB.insert(succ);
-                q2.push(succ);
-            }
-        }
-    }
-
-    return -1;
-}
-
-std::shared_ptr<Expression> ASTLifter::LiftCallLikeInstruction(const AnalyzedFunction *func, int32_t index, bool isNested) {
-    if (func->lpLiftedFunction->instructions[index].operation == LiftedOperation::CALL && index >= 2) {
-        const auto &prev = func->lpLiftedFunction->instructions[index - 2];
-        if (prev.operation == LiftedOperation::NAMECALL) {
-            index -= 2; // Shift index to the NAMECALL instruction
-        }
-    }
-
-    const auto &inst = func->lpLiftedFunction->instructions[index];
-    bool isNameCall = (inst.operation == LiftedOperation::NAMECALL);
-    int32_t callInfoIndex = isNameCall ? index + 2 : index;
-    const auto &callInfoInst = func->lpLiftedFunction->instructions[callInfoIndex];
-    int regFunc = callInfoInst.operands[0].value.reg;
-
-    std::vector<std::shared_ptr<Expression>> args;
-    std::shared_ptr<Expression> callee;
-    bool isVararg = false;
-
-    if (isNameCall) {
-        auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(inst.operands[2].value.imm.k);
-        std::string method = std::get<std::string>(kIdx.constantData);
-        callee = LiftExpression(func, inst.operands[1]);
-    } else {
-        callee = LiftExpression(func, inst.operands[0]);
-    }
-
-    if (func->implicitUses.contains(&callInfoInst)) {
-        const auto &versions = func->implicitUses.at(&callInfoInst);
-
-        int startIdx = isNameCall ? 1 : 0;
-
-        for (size_t k = startIdx; k < versions.size(); ++k) {
-            LiftedOperand op;
-            op.type = LiftedOperandType::Register;
-            op.value.reg = regFunc + 1 + k; // map implicitUses[k] back to op 1 + 1 + k
-            op.ssaVersion = versions[k];
-
-            auto def = func->GetDefinition(op);
-
-            if (def && (def->operation == LiftedOperation::CALL)) {
-                if (def->operands[2].value.imm.n == 0) { // C=0
-                    args.push_back(LiftCallLikeInstruction(func, def->instructionIndex, true));
-                    break;
+    for (const auto &block : analyzedFunction.basicBlocks) {
+        for (const auto &phi : block.phiNodes) {
+            for (size_t i = 1; i < phi.operands.size(); ++i) {
+                const auto &op = phi.operands[i];
+                if (op.type == LiftedOperandType::Register) {
+                    m_phiConsumers.insert({op.value.reg, op.ssaVersion});
                 }
             }
-            if (def && def->operation == LiftedOperation::CALL && def->instructionIndex > index + 2) {
-                const auto &potentialNameCall = func->lpLiftedFunction->instructions[def->instructionIndex - 2];
-                if (potentialNameCall.operation == LiftedOperation::NAMECALL) {
-                    if (def->operands[2].value.imm.n == 0) {
-                        args.push_back(LiftCallLikeInstruction(func, potentialNameCall.instructionIndex, true));
+        }
+    }
+
+    ASTFunction ast;
+    ast.backingFunction = &analyzedFunction;
+
+    if (!analyzedFunction.basicBlocks.empty()) {
+        std::set<uint32_t> visited;
+        ast.statements = LiftControlFlow(0, -1, visited);
+    }
+
+    for (auto &subFunc : analyzedFunction.innerFunctions) {
+        ASTLifter subLifter;
+        ast.subFunctions.push_back(subLifter.Lift(subFunc));
+    }
+
+    return ast;
+}
+
+std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited) {
+    std::vector<std::shared_ptr<Statement>> nodes;
+
+    if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= m_currentFunction->basicBlocks.size())
+        return nodes;
+    if (currentBlockId == stopBlockId || visited.contains(currentBlockId))
+        return nodes;
+
+    visited.insert(currentBlockId);
+    const auto &block = m_currentFunction->basicBlocks[currentBlockId];
+
+    auto stmts = LiftBlockInstructions(block);
+    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+
+    switch (block.bType) {
+    case BlockType::IfHeader: {
+        if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
+            uint32_t trueIdx = block.ifStatementTrue.value();
+            uint32_t falseIdx = block.ifStatementFalse.value();
+            uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
+
+            if (mergeIdx == static_cast<uint32_t>(-1) && stopBlockId != static_cast<uint32_t>(-1))
+                mergeIdx = stopBlockId;
+
+            std::shared_ptr<Expression> cond = std::make_shared<BooleanLiteralNode>(true);
+            if (block.lpTail) {
+                cond = LiftExpression(block.lpTail->operands[0]);
+            }
+
+            std::set<uint32_t> subVisited = visited;
+            auto thenBody = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, subVisited));
+            subVisited = visited;
+            auto elseBody = CreateBlock(LiftControlFlow(falseIdx, mergeIdx, subVisited));
+
+            auto ifStmt = std::make_shared<IfStatementNode>();
+            ifStmt->condition = cond;
+            ifStmt->thenBranch = thenBody;
+            ifStmt->elseBranch = elseBody;
+            nodes.push_back(ifStmt);
+
+            auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
+            nodes.insert(nodes.end(), after.begin(), after.end());
+        }
+        break;
+    }
+    case BlockType::LoopHeader: {
+        if (block.loopLatch.has_value()) {
+            uint32_t exitIdx = block.loopExit.value_or(block.loopLatch.value_or(-1));
+            uint32_t bodyIdx = block.successors[0] == exitIdx ? block.successors[1] : block.successors[0];
+
+            std::set<uint32_t> loopVisited = visited;
+
+            if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
+                for (auto succ : block.successors) {
+                    if (succ != block.loopLatch.value_or(block.loopExit.value_or(-1))) { // determine body by != exit.
+                        bodyIdx = succ;
                         break;
                     }
                 }
+
+                auto forNode = std::make_shared<ForNumericNode>();
+                auto forPrepInst = block.lpTail;
+                int32_t limitVer = -1, stepVer = -1, startVer = -1;
+
+                if (this->m_currentFunction->implicitUses.contains(forPrepInst)) {
+                    const auto &impl = this->m_currentFunction->implicitUses.at(forPrepInst);
+                    if (impl.size() >= 3) {
+                        limitVer = impl[0];
+                        stepVer = impl[1];
+                        startVer = impl[2];
+                    }
+                }
+
+                int baseReg = block.lpTail->operands[0].value.reg;
+                {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    {
+                        PinnedRegisterScope pin(this, baseReg + 2);
+
+                        this->m_currentFunction->SetVariableName(baseReg + 2, startVer, std::format("i_{}", baseReg + 2));
+                        forNode->lpLoopBody = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+
+                        op.value.reg = baseReg + 2;
+                        op.ssaVersion = startVer;
+                        forNode->loopVariable = LiftExpression(op);
+                    }
+
+                    op.value.reg = baseReg + 2;
+                    op.ssaVersion = startVer;
+                    forNode->startVariable = LiftExpression(op);
+
+                    op.value.reg = baseReg;
+                    op.ssaVersion = limitVer;
+                    forNode->maxIncreased = LiftExpression(op);
+
+                    op.value.reg = baseReg + 1;
+                    op.ssaVersion = stepVer;
+                    forNode->increaseBy = LiftExpression(op);
+                    this->m_currentFunction->ClearVersionName(baseReg, block.lpTail->operands[0].ssaVersion);
+                }
+                nodes.push_back(forNode);
+            } else {
+                auto whileNode = std::make_shared<WhileStatementNode>();
+                switch (block.lpTail->operation) {
+                case LiftedOperation::JUMPIFNOTEQ: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        "==", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFEQ: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        "~=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFLT: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        "<", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFNOTLT: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        ">", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFLE: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        "<=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIFNOTLE: {
+                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
+                        ">=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                    );
+                    break;
+                }
+                case LiftedOperation::JUMPIF: {
+                case LiftedOperation::JUMPIFNOT: {
+                    whileNode->condition = this->LiftExpression(block.lpTail->operands[0]);
+                    break;
+                }
+                }
+                case LiftedOperation::JUMPXEQK: {
+                    auto kIdx = block.lpTail->operands[2].value.imm.k;
+                    auto notFlag = block.lpTail->operands[3].value.imm.b;
+                    std::shared_ptr<Expression> rhs;
+                    const auto &k = this->m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+                    switch (k.kType) {
+                    case LUA_TNIL:
+                        rhs = std::make_shared<NilLiteralNode>();
+                        break;
+                    case LUA_TBOOLEAN:
+                        rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                        break;
+                    case LUA_TNUMBER:
+                        rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                        break;
+                    case LUA_TSTRING:
+                        rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                        break;
+                    default:
+                        rhs = std::make_shared<NilLiteralNode>(); // fallback
+                        break;
+                    }
+
+                    if (notFlag)
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(block.lpTail->operands[0]), rhs);
+                    else
+                        whileNode->condition = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(block.lpTail->operands[0]), rhs);
+                    break;
+                }
+
+                default:
+                    whileNode->condition = LiftExpression(block.lpTail->operands[0]);
+                    break;
+                }
+                whileNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+                nodes.push_back(whileNode);
             }
-            if (def && def->operation == LiftedOperation::GETVARARGS) {
-                isVararg = true;
-                break;
-            }
-            args.push_back(LiftExpression(func, op));
+
+            auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
+            nodes.insert(nodes.end(), after.begin(), after.end());
         }
+        break;
     }
-
-    std::vector<std::shared_ptr<Expression>> rets;
-    std::vector<SSARef> refs;
-    for (const auto &ret : func->definitionMap) {
-        if (ret.second != func->lpLiftedFunction->instructions.data() + callInfoIndex)
-            continue;
-        refs.emplace_back(ret.first);
+    case BlockType::Break:
+        nodes.push_back(std::make_shared<BreakStatementNode>());
+        break;
+    case BlockType::Return:
+        break;
+    default: {
+        if (!block.successors.empty()) {
+            auto next = LiftControlFlow(block.successors[0], stopBlockId, visited);
+            nodes.insert(nodes.end(), next.begin(), next.end());
+        }
+        break;
     }
-    std::ranges::sort(refs, [](const SSARef &a, const SSARef &b) { return a.regIndex < b.regIndex; });
-    for (const auto &ref : refs)
-        if ((inst.operation == LiftedOperation::NAMECALL && !isNested) || inst.operation == LiftedOperation::CALL)
-            rets.push_back(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(ref.regIndex, ref.version))));
-
-    bool shouldInline = isNested || IsInstructionConsumed(func, index);
-
-    if (isNameCall) {
-        auto kIdx = func->lpLiftedFunction->lpDeserialized->constants.at(inst.operands[2].value.imm.k);
-        auto methodName = std::get<std::string>(kIdx.constantData);
-        auto node = std::make_shared<NameCallExpressionNode>(
-            callee, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(methodName)), args, rets, isVararg, shouldInline
-        );
-        return node;
     }
-
-    auto node = std::make_shared<CallExpressionNode>(callee, args, rets, isVararg, shouldInline);
-    return node;
+    return nodes;
 }
 
-std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *func, const LiftedOperand &operand, bool forceExpression) {
-    if (operand.type == LiftedOperandType::Register && this->m_pinnedRegisters.contains(operand.value.reg))
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
+std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const BasicBlock &block) {
+    std::vector<std::shared_ptr<Statement>> statements;
+    if (!block.lpHead)
+        return statements;
 
-    if (operand.type == LiftedOperandType::ImmediateNil) {
+    for (int i = block.lpHead->instructionIndex; i <= block.lpTail->instructionIndex; ++i) {
+        if (m_processedInstructions.contains(i))
+            continue;
+
+        const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
+
+        if (ShouldInline(&inst))
+            continue;
+
+        switch (inst.operation) {
+        case LiftedOperation::SETGLOBAL: {
+            const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[inst.operands[1].value.imm.k];
+            auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(k.constantData)));
+            statements.push_back(std::make_shared<AssignmentStatementNode>(left, LiftExpression(inst.operands[0])));
+            break;
+        }
+        case LiftedOperation::SETTABLE: {
+            auto idxExpr = std::make_shared<IndexExpressionNode>(LiftExpression(inst.operands[1]), LiftExpression(inst.operands[2]));
+            statements.push_back(std::make_shared<AssignmentStatementNode>(idxExpr, LiftExpression(inst.operands[0])));
+            break;
+        }
+        case LiftedOperation::SETTABLEKS: {
+            const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[inst.operands[2].value.imm.k];
+            auto memExpr = std::make_shared<MemberExpressionNode>(LiftExpression(inst.operands[1]), std::get<std::string>(k.constantData));
+            statements.push_back(std::make_shared<AssignmentStatementNode>(memExpr, LiftExpression(inst.operands[0])));
+            break;
+        }
+        case LiftedOperation::RETURN: {
+            std::vector<std::shared_ptr<Expression>> rets;
+            if (m_currentFunction->implicitUses.contains(&inst)) {
+                for (int32_t ver : m_currentFunction->implicitUses.at(&inst)) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = inst.operands[0].value.reg + (int)rets.size();
+                    op.ssaVersion = ver;
+
+                    auto def = m_currentFunction->GetDefinition(op);
+                    if (def && (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::NAMECALL)) {
+                        int32_t callIdx = (def->operation == LiftedOperation::NAMECALL) ? def->instructionIndex + 2 : def->instructionIndex;
+                        if (m_currentFunction->lpLiftedFunction->instructions[callIdx].operands[2].value.imm.n == 0) {
+                            rets.push_back(LiftCall(*def, def->instructionIndex, true));
+                            break;
+                        }
+                    }
+                    rets.push_back(LiftExpression(op));
+                }
+            }
+
+            if (i == block.lpTail->instructionIndex && inst.operation == LiftedOperation::RETURN && rets.empty())
+                continue; // ignore last return if and only if there's no returns.
+
+            statements.push_back(std::make_shared<ReturnStatementNode>(rets));
+            break;
+        }
+        case LiftedOperation::CALL:
+        case LiftedOperation::NAMECALL: {
+            auto callExpr = LiftCall(inst, i, false);
+
+            std::vector<std::shared_ptr<Expression>> lhs;
+            std::vector<SSARef> defs;
+            for (const auto &[ref, defInst] : m_currentFunction->definitionMap) {
+                if (defInst == &inst)
+                    defs.push_back(ref);
+            }
+            std::ranges::sort(defs, [](auto &a, auto &b) { return a.regIndex < b.regIndex; });
+
+            for (const auto &ref : defs) {
+                if (m_currentFunction->useCounts[ref] > 0) {
+                    lhs.push_back(
+                        std::make_shared<IdentifierExpressionNode>(
+                            std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
+                        )
+                    );
+                }
+            }
+
+            if (!lhs.empty()) {
+                if (auto callNode = std::dynamic_pointer_cast<CallExpressionNode>(callExpr)) {
+                    callNode->rets = lhs;
+                } else if (auto nameCallNode = std::dynamic_pointer_cast<NameCallExpressionNode>(callExpr)) {
+                    nameCallNode->rets = lhs;
+                }
+            }
+
+            statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
+
+            if (inst.operation == LiftedOperation::NAMECALL) {
+                m_processedInstructions.insert(i + 1);
+                m_processedInstructions.insert(i + 2);
+            }
+            break;
+        }
+
+        case LiftedOperation::DUPCLOSURE: {
+            const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[inst.operands[1].value.imm.k];
+            const auto duplicatedFunction = std::get<LuauProto>(k.constantData);
+
+            AnalyzedFunction *targetFunc = nullptr;
+            for (auto &inner : m_currentFunction->innerFunctions) {
+                if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId) {
+                    targetFunc = &inner;
+                    break;
+                }
+            }
+
+            ASTLifter subLifter;
+            ASTFunction subAst = subLifter.Lift(*targetFunc);
+
+            std::string funcName = duplicatedFunction->debugName.value_or(std::format("f{}", duplicatedFunction->bytecodeId));
+            m_currentFunction->SetGlobalName(inst.operands[0].value.reg, funcName);
+
+            std::unordered_map<int32_t, std::string> argNames;
+            for (int j = 0; j < duplicatedFunction->numparams; ++j) {
+                std::string argName = targetFunc->GetVarName(j, 0);
+                if (argName.empty() || argName == std::format("v{}", j))
+                    argName = std::format("a{}", j);
+                argNames[j] = argName;
+            }
+
+            auto bodyBlock = std::make_shared<BlockStatementNode>();
+            bodyBlock->body = subAst.statements;
+
+            statements.push_back(
+                std::make_shared<FunctionDeclarationNode>(
+                    funcName, duplicatedFunction->numparams, argNames, duplicatedFunction->isvararg, bodyBlock, !duplicatedFunction->debugName.has_value()
+                )
+            );
+            break;
+        }
+        case LiftedOperation::NEWCLOSURE: {
+            int protoIdx = inst.operands[1].value.imm.k;
+            const auto proto = m_currentFunction->lpLiftedFunction->lpDeserialized->subfunctions[protoIdx];
+
+            AnalyzedFunction *targetFunc = nullptr;
+            for (auto &inner : m_currentFunction->innerFunctions) {
+                if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == proto->bytecodeId) {
+                    targetFunc = &inner;
+                    break;
+                }
+            }
+
+            size_t capIdx = 0;
+            while (i + 1 + capIdx < m_currentFunction->lpLiftedFunction->instructions.size()) {
+                auto &cap = m_currentFunction->lpLiftedFunction->instructions[i + 1 + capIdx];
+                if (cap.operation != LiftedOperation::CAPTURE)
+                    break;
+                m_processedInstructions.insert(i + 1 + capIdx);
+                capIdx++;
+            }
+
+            ASTLifter subLifter;
+            ASTFunction subAst = subLifter.Lift(*targetFunc);
+
+            std::string funcName = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
+
+            std::unordered_map<int32_t, std::string> argNames;
+            for (int j = 0; j < proto->numparams; ++j) {
+                std::string argName = targetFunc->GetVarName(j, 0);
+                if (argName.empty() || argName == std::format("v{}", j))
+                    argName = std::format("a{}", j);
+                argNames[j] = argName;
+            }
+
+            auto bodyBlock = std::make_shared<BlockStatementNode>();
+            bodyBlock->body = subAst.statements;
+
+            statements.push_back(std::make_shared<FunctionDeclarationNode>(funcName, proto->numparams, argNames, proto->isvararg, bodyBlock, true));
+
+            auto &saveWhere = inst.operands[0];
+
+            if (this->m_currentFunction->users.contains({saveWhere.value.reg, saveWhere.ssaVersion})) {
+                auto users = this->m_currentFunction->users[{saveWhere.value.reg, saveWhere.ssaVersion}];
+                for (const auto &user : users) {
+                    if (user->operation == LiftedOperation::SETGLOBAL) {
+                        // set to global, not a local function.
+                        auto fDec = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements.back());
+                        // local functions may have a debug name. This is exactly to prevent this
+                        fDec->bIsLocalDeclaration = false;
+                    }
+                }
+            }
+
+            if (auto fDec = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements.back()); fDec->bIsLocalDeclaration) {
+                m_currentFunction->SetGlobalName(inst.operands[0].value.reg, funcName);
+            }
+
+            break;
+        }
+
+        case LiftedOperation::MOVE:
+            break;
+
+        default: {
+            if (inst.operands.empty())
+                break;
+            if (inst.operands[0].type != LiftedOperandType::Register)
+                break;
+
+            const auto *def = m_currentFunction->GetDefinition(inst.operands[0]);
+            if (def == &inst) {
+                auto isDefined = m_definedRegisters.contains(inst.operands[0].value.reg);
+                auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
+                auto val = LiftExpression(inst.operands[0], true);
+
+                if (inst.operands[0].ssaVersion <= 1 || !isDefined)
+                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, val));
+                else {
+                    if (val->nodeKind == ASTNodeKind::BinaryExpression) {
+                        // binary expressions may be compounded under specific conditions.
+                        if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(val); lpBinExpr != nullptr)
+                            if (auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(lpBinExpr->left); identifier != nullptr) {
+                                // expression is compound.
+                                statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(lpBinExpr->op, lpBinExpr->left, lpBinExpr->right));
+                                break;
+                            }
+                    }
+
+                    statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
+                }
+            }
+            break;
+        }
+        }
+    }
+    return statements;
+}
+
+std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &operand, bool forceExpression) {
+    if (operand.type == LiftedOperandType::Register && m_pinnedRegisters.contains(operand.value.reg)) {
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
+    }
+
+    if (operand.type == LiftedOperandType::ImmediateNil)
         return std::make_shared<NilLiteralNode>();
-    } else if (operand.type == LiftedOperandType::ImmediateBool) {
+    if (operand.type == LiftedOperandType::ImmediateBool)
         return std::make_shared<BooleanLiteralNode>(operand.value.imm.b);
-    } else if (operand.type == LiftedOperandType::ImmediateInteger) {
+    if (operand.type == LiftedOperandType::ImmediateInteger)
         return std::make_shared<NumberLiteralNode>(operand.value.imm.n);
-    } else if (operand.type == LiftedOperandType::ImmediateConstant) {
-        const auto &k = func->lpLiftedFunction->lpDeserialized->constants[operand.value.imm.k];
+    if (operand.type == LiftedOperandType::ImmediateConstant) {
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[operand.value.imm.k];
         switch (k.kType) {
         case LUA_TNIL:
             return std::make_shared<NilLiteralNode>();
@@ -190,101 +514,21 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
         }
     }
 
-    const auto definitionInstruction = func->GetDefinition(operand);
+    const auto *def = m_currentFunction->GetDefinition(operand);
 
-    if (!definitionInstruction)
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-
-    if (!forceExpression) {
-        switch (definitionInstruction->operation) {
-        case LiftedOperation::ADD:
-        case LiftedOperation::SUB:
-        case LiftedOperation::MUL:
-        case LiftedOperation::DIV:
-        case LiftedOperation::MOD:
-        case LiftedOperation::POW:
-        case LiftedOperation::ADDK:
-        case LiftedOperation::SUBK:
-        case LiftedOperation::MULK:
-        case LiftedOperation::DIVK:
-        case LiftedOperation::MODK:
-        case LiftedOperation::POWK:
-        case LiftedOperation::NOT:
-        case LiftedOperation::MINUS:
-        case LiftedOperation::LENGTH:
-        case LiftedOperation::MOVE:
-        case LiftedOperation::LOAD:
-        case LiftedOperation::GETTABLE:
-        case LiftedOperation::GETTABLEKS:
-        case LiftedOperation::GETTABLEN:
-            if (!IsInstructionConsumed(func, definitionInstruction->instructionIndex)) {
-                return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-            }
-            break;
-        case LiftedOperation::CALL:
-        case LiftedOperation::NAMECALL:
-            if (IsInstructionConsumed(func, definitionInstruction->instructionIndex))
-                return LiftCallLikeInstruction(func, definitionInstruction->instructionIndex, true);
-            return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-        default:
-            break;
-        }
+    if (!def || (!forceExpression && !ShouldInline(def))) {
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
     }
 
-    switch (definitionInstruction->operation) {
-    case LiftedOperation::CONCAT: {
-        std::shared_ptr<Expression> currentExpr = nullptr;
-        int startReg = definitionInstruction->operands[1].value.reg;
-        int endReg = definitionInstruction->operands[2].value.reg;
-
-        if (func->implicitUses.contains(definitionInstruction)) {
-            const auto &versions = func->implicitUses.at(definitionInstruction);
-            for (size_t k = 0; k < versions.size(); ++k) {
-                LiftedOperand op;
-                op.type = LiftedOperandType::Register;
-                op.value.reg = startReg + k;
-                op.ssaVersion = versions[k];
-
-                auto part = LiftExpression(func, op);
-                if (currentExpr) {
-                    currentExpr = std::make_shared<BinaryExpressionNode>("..", currentExpr, part);
-                } else {
-                    currentExpr = part;
-                }
-            }
-        } else {
-            for (int r = startReg; r <= endReg; ++r) {
-                LiftedOperand op;
-                op.type = LiftedOperandType::Register;
-                op.value.reg = r;
-                op.ssaVersion = definitionInstruction->operands[1].ssaVersion;
-
-                auto part = LiftExpression(func, op);
-                if (currentExpr) {
-                    currentExpr = std::make_shared<BinaryExpressionNode>("..", currentExpr, part);
-                } else {
-                    currentExpr = part;
-                }
-            }
-        }
-
-        if (!currentExpr)
-            return std::make_shared<StringLiteralNode>("");
-        return currentExpr;
-    }
-
-    case LiftedOperation::NEWTABLE:
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-    case LiftedOperation::LOAD: {
-        auto type = definitionInstruction->operands[1].type;
-        if (type == LiftedOperandType::ImmediateNil) {
+    if (def->operation == LiftedOperation::LOAD) {
+        if (def->operands[1].type == LiftedOperandType::ImmediateNil)
             return std::make_shared<NilLiteralNode>();
-        } else if (type == LiftedOperandType::ImmediateBool) {
-            return std::make_shared<BooleanLiteralNode>(definitionInstruction->operands[1].value.imm.b);
-        } else if (type == LiftedOperandType::ImmediateInteger) {
-            return std::make_shared<NumberLiteralNode>(definitionInstruction->operands[1].value.imm.n);
-        } else if (type == LiftedOperandType::ImmediateConstant) {
-            const auto &k = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[1].value.imm.k];
+        if (def->operands[1].type == LiftedOperandType::ImmediateBool)
+            return std::make_shared<BooleanLiteralNode>(def->operands[1].value.imm.b);
+        if (def->operands[1].type == LiftedOperandType::ImmediateInteger)
+            return std::make_shared<NumberLiteralNode>(def->operands[1].value.imm.n);
+        if (def->operands[1].type == LiftedOperandType::ImmediateConstant) {
+            const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[1].value.imm.k];
             switch (k.kType) {
             case LUA_TNIL:
                 return std::make_shared<NilLiteralNode>();
@@ -295,39 +539,24 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
             case LUA_TSTRING:
                 return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
             default:
-                return std::make_shared<NilLiteralNode>(); // fallback
+                return std::make_shared<NilLiteralNode>();
             }
         }
-        break;
     }
-    case LiftedOperation::MOVE:
-        return LiftExpression(func, definitionInstruction->operands[1]);
 
-    // Arithmetic
+    switch (def->operation) {
     case LiftedOperation::ADD:
-        return std::make_shared<BinaryExpressionNode>(
-            "+", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("+", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
     case LiftedOperation::SUB:
-        return std::make_shared<BinaryExpressionNode>(
-            "-", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("-", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
     case LiftedOperation::MUL:
-        return std::make_shared<BinaryExpressionNode>(
-            "*", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("*", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
     case LiftedOperation::DIV:
-        return std::make_shared<BinaryExpressionNode>(
-            "/", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("/", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
     case LiftedOperation::MOD:
-        return std::make_shared<BinaryExpressionNode>(
-            "%", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("%", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
     case LiftedOperation::POW:
-        return std::make_shared<BinaryExpressionNode>(
-            "^", LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
+        return std::make_shared<BinaryExpressionNode>("^", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
 
     case LiftedOperation::ADDK:
     case LiftedOperation::SUBK:
@@ -336,955 +565,343 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const AnalyzedFunction *fu
     case LiftedOperation::MODK:
     case LiftedOperation::POWK: {
         std::string op = "+";
-        if (definitionInstruction->operation == LiftedOperation::SUBK)
+        if (def->operation == LiftedOperation::SUBK)
             op = "-";
-        if (definitionInstruction->operation == LiftedOperation::MULK)
+        else if (def->operation == LiftedOperation::MULK)
             op = "*";
-        if (definitionInstruction->operation == LiftedOperation::DIVK)
+        else if (def->operation == LiftedOperation::DIVK)
             op = "/";
-        if (definitionInstruction->operation == LiftedOperation::MODK)
+        else if (def->operation == LiftedOperation::MODK)
             op = "%";
-        if (definitionInstruction->operation == LiftedOperation::POWK)
+        else if (def->operation == LiftedOperation::POWK)
             op = "^";
 
-        auto left = LiftExpression(func, definitionInstruction->operands[1]);
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-
-        ASSERT(constant.kType == LUA_TNUMBER, "we are cooked dev");
-        std::shared_ptr<Expression> right = std::make_shared<NumberLiteralNode>(std::get<double>(constant.constantData));
-
+        auto left = LiftExpression(def->operands[1]);
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[2].value.imm.k];
+        auto right = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
         return std::make_shared<BinaryExpressionNode>(op, left, right);
     }
 
     case LiftedOperation::NOT:
-        return std::make_shared<UnaryExpressionNode>("not", LiftExpression(func, definitionInstruction->operands[1]));
+        return std::make_shared<UnaryExpressionNode>("not", LiftExpression(def->operands[1]));
     case LiftedOperation::MINUS:
-        return std::make_shared<UnaryExpressionNode>("-", LiftExpression(func, definitionInstruction->operands[1]));
+        return std::make_shared<UnaryExpressionNode>("-", LiftExpression(def->operands[1]));
     case LiftedOperation::LENGTH:
-        return std::make_shared<UnaryExpressionNode>("#", LiftExpression(func, definitionInstruction->operands[1]));
+        return std::make_shared<UnaryExpressionNode>("#", LiftExpression(def->operands[1]));
 
-    case LiftedOperation::GETTABLE:
-        return std::make_shared<IndexExpressionNode>(
-            LiftExpression(func, definitionInstruction->operands[1]), LiftExpression(func, definitionInstruction->operands[2])
-        );
-    case LiftedOperation::GETTABLEKS: {
-        auto table = LiftExpression(func, definitionInstruction->operands[1]);
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[2].value.imm.k];
-        std::string key = (constant.kType == LUA_TSTRING) ? std::get<std::string>(constant.constantData) : "ERR";
-        return std::make_shared<MemberExpressionNode>(table, key);
+    case LiftedOperation::MOVE:
+        return LiftExpression(def->operands[1], forceExpression);
+
+    case LiftedOperation::CONCAT: {
+        std::shared_ptr<Expression> expr = nullptr;
+        int startReg = def->operands[1].value.reg;
+        int endReg = def->operands[2].value.reg;
+
+        if (m_currentFunction->implicitUses.contains(def)) {
+            const auto &vers = m_currentFunction->implicitUses.at(def);
+            for (size_t i = 0; i < vers.size(); ++i) {
+                LiftedOperand partOp;
+                partOp.type = LiftedOperandType::Register;
+                partOp.value.reg = startReg + i;
+                partOp.ssaVersion = vers[i];
+                auto part = LiftExpression(partOp);
+                expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
+            }
+        } else {
+            for (int r = startReg; r <= endReg; ++r) {
+                LiftedOperand partOp;
+                partOp.type = LiftedOperandType::Register;
+                partOp.value.reg = r;
+                partOp.ssaVersion = def->operands[1].ssaVersion;
+                auto part = LiftExpression(partOp);
+                expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
+            }
+        }
+        return expr ? expr : std::make_shared<StringLiteralNode>("");
     }
+
+    case LiftedOperation::NEWTABLE:
+        return LiftTableLiteral(*def);
+
+    case LiftedOperation::CALL:
+    case LiftedOperation::NAMECALL:
+        return LiftCall(*def, def->instructionIndex, true);
+
     case LiftedOperation::GETGLOBAL: {
-        const auto &constant = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[1].value.imm.k];
-        std::string name = (constant.kType == LUA_TSTRING) ? std::get<std::string>(constant.constantData) : "ERR";
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[1].value.imm.k];
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(k.constantData)));
+    }
+    case LiftedOperation::GETUPVAL: {
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("uv_{}", def->operands[1].value.imm.n)));
     }
     case LiftedOperation::GETIMPORT: {
-        uint32_t importData = definitionInstruction->operands[2].value.imm.u;
-
+        uint32_t importData = def->operands[2].value.imm.u;
+        int count = importData >> 30;
         int id0 = int(importData >> 20) & 1023;
         int id1 = int(importData >> 10) & 1023;
         int id2 = int(importData) & 1023;
-        int count = importData >> 30;
-
-        if (count == 0) {
-            return std::make_shared<CommentNode>("Corrupted GETIMPORT (count 0)", true);
-        }
 
         std::vector<std::string> parts;
-        parts.reserve(3);
-
-        auto &constants = func->lpLiftedFunction->lpDeserialized->constants;
-
-        if (count >= 1) {
-            auto &k = constants.at(id0);
-            if (k.kType == LUA_TSTRING)
-                parts.push_back(std::get<std::string>(k.constantData));
-            else
-                parts.emplace_back("ERR");
-        }
-        if (count >= 2) {
-            auto &k = constants.at(id1);
-            if (k.kType == LUA_TSTRING)
-                parts.push_back(std::get<std::string>(k.constantData));
-            else
-                parts.emplace_back("ERR");
-        }
-        if (count >= 3) {
-            auto &k = constants.at(id2);
-            if (k.kType == LUA_TSTRING)
-                parts.push_back(std::get<std::string>(k.constantData));
-            else
-                parts.emplace_back("ERR");
-        }
+        auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
+        if (count >= 1)
+            parts.push_back(std::get<std::string>(constants.at(id0).constantData));
+        if (count >= 2)
+            parts.push_back(std::get<std::string>(constants.at(id1).constantData));
+        if (count >= 3)
+            parts.push_back(std::get<std::string>(constants.at(id2).constantData));
 
         if (parts.empty())
             return std::make_shared<NilLiteralNode>();
 
-        std::shared_ptr<Expression> currentExpr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(parts[0]));
-
-        for (size_t i = 1; i < parts.size(); ++i) {
-            currentExpr = std::make_shared<MemberExpressionNode>(currentExpr, parts[i]);
-        }
-
-        return currentExpr;
+        std::shared_ptr<Expression> curr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(parts[0]));
+        for (size_t i = 1; i < parts.size(); ++i)
+            curr = std::make_shared<MemberExpressionNode>(curr, parts[i]);
+        return curr;
     }
-    case LiftedOperation::DUPCLOSURE: {
-        const auto &duplicatedClosure = func->lpLiftedFunction->lpDeserialized->constants[definitionInstruction->operands[1].value.imm.k];
-        if (duplicatedClosure.kType != LUA_TFUNCTION) {
-            ASSERT(false, "dupclosure constant wasnt function"); // no way to really handle
-        }
+    case LiftedOperation::GETTABLE:
+        return std::make_shared<IndexExpressionNode>(LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
 
-        const auto duplicatedFunction = std::get<LuauProto>(duplicatedClosure.constantData);
-
-        // If we ever change the logic inside the bytecode lifter, this only needs to changed too, thx.
-        auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
-        auto functionArguments = duplicatedFunction->numparams;
-        auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-        for (int i = 0; i < functionArguments; i++) {
-            functionArgumentNames[i] = std::format("v{}", i);
-        }
-
-        const AnalyzedFunction *lpFunc = nullptr;
-        for (const auto &ffunc : func->innerFunctions) {
-            if (ffunc.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId)
-                lpFunc = &ffunc;
-        }
-        ASSERT(lpFunc != nullptr, "lpFunc == nullptr");
-        std::set<uint32_t> visited;
-
-        /*
-        *  std::make_shared<FunctionDeclarationNode>(
-            functionName, functionArguments, functionArgumentNames, duplicatedFunction->isvararg,
-            CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)), !duplicatedFunction->debugName.has_value()
-        );
-
-         */
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(functionName));
-    }
-    case LiftedOperation::NEWCLOSURE: {
-        // TODO: walk forward/back on instruction list to check CAPTURE instructions to discern what is what.
-        const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[definitionInstruction->operands[1].value.imm.k];
-        std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
-        std::unordered_map<int32_t, std::string> args;
-        for (int i = 0; i < proto->numparams; i++)
-            args[i] = std::format("v{}", i);
-
-        // auto *lpFunc = &func->innerFunctions[definitionInstruction->operands[1].value.imm.k];
-        // std::set<uint32_t> visited;
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
-        // return std::make_shared<FunctionDeclarationNode>(
-        //     name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
-        //     !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
-        // );
-    }
-
-    case LiftedOperation::CALL:
-    case LiftedOperation::NAMECALL: {
-        if (IsInstructionConsumed(func, definitionInstruction->instructionIndex)) {
-            return LiftCallLikeInstruction(func, definitionInstruction->instructionIndex, true);
-        }
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(operand)));
-    }
-
-    case LiftedOperation::GETUPVAL: {
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("uv_{}", definitionInstruction->operands[1].value.imm.n)));
+    case LiftedOperation::GETTABLEKS: {
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[2].value.imm.k];
+        return std::make_shared<MemberExpressionNode>(LiftExpression(def->operands[1]), std::get<std::string>(k.constantData));
     }
 
     default:
-        break;
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
     }
-
-    return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("reg_" + std::to_string(operand.value.reg)));
 }
 
-std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const AnalyzedFunction *func, const BasicBlock &block) {
-    std::vector<std::shared_ptr<Statement>> statements;
-
-    if (!block.lpHead || !block.lpTail)
-        return statements;
-
-    int32_t startIdx = block.lpHead->instructionIndex;
-    int32_t endIdx = block.lpTail->instructionIndex;
-    std::set<int> skippedIndices;
-    for (int i = startIdx; i <= endIdx; ++i) {
-        if (IsInstructionConsumed(func, i)) {
-            skippedIndices.insert(i);
-            if (func->lpLiftedFunction->instructions[i].operation == LiftedOperation::NAMECALL) {
-                skippedIndices.insert(i + 1); // AUX
-                skippedIndices.insert(i + 2); // CALL
-            }
+std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested) {
+    if (inst.operation == LiftedOperation::CALL && instructionIndex >= 2) {
+        const auto &prev = m_currentFunction->lpLiftedFunction->instructions[instructionIndex - 2];
+        if (prev.operation == LiftedOperation::NAMECALL && prev.operands[0].value.reg == inst.operands[0].value.reg) {
+            return LiftCall(prev, instructionIndex - 2, isNested);
         }
     }
 
-    for (int i = startIdx; i <= endIdx; ++i) {
-        if (skippedIndices.contains(i))
-            continue; // skip instructions that will be inlined.
+    bool isNameCall = (inst.operation == LiftedOperation::NAMECALL);
+    int32_t callInfoIndex = isNameCall ? instructionIndex + 2 : instructionIndex;
 
-        const auto &inst = func->lpLiftedFunction->instructions[i];
+    if (static_cast<size_t>(callInfoIndex) >= m_currentFunction->lpLiftedFunction->instructions.size())
+        return std::make_shared<NilLiteralNode>();
 
-        switch (inst.operation) {
-            // control flow handled by the LiftTree structure
+    const auto &callInfoInst = m_currentFunction->lpLiftedFunction->instructions[callInfoIndex];
+    int regFunc = callInfoInst.operands[0].value.reg;
 
-        case LiftedOperation::DUPCLOSURE: {
-            const auto &duplicatedClosure = func->lpLiftedFunction->lpDeserialized->constants[inst.operands[1].value.imm.k];
-            if (duplicatedClosure.kType != LUA_TFUNCTION) {
-                ASSERT(false, "dupclosure constant wasnt function"); // no way to really handle
-            }
+    std::vector<std::shared_ptr<Expression>> args;
+    std::shared_ptr<Expression> callee;
+    bool isVararg = false;
 
-            const auto duplicatedFunction = std::get<LuauProto>(duplicatedClosure.constantData);
+    if (isNameCall)
+        callee = LiftExpression(inst.operands[1], false);
+    else
+        callee = LiftExpression(inst.operands[0], false);
 
-            int32_t howManyCaptures = 0;
-            while (true) {
-                auto capture = func->lpLiftedFunction->instructions[i + 1 + howManyCaptures];
-                if (capture.operation != LiftedOperation::CAPTURE)
+    if (m_currentFunction->implicitUses.contains(&callInfoInst)) {
+        const auto &argVersions = m_currentFunction->implicitUses.at(&callInfoInst);
+        int startOffset = isNameCall ? 1 : 0;
+        for (size_t k = startOffset; k < argVersions.size(); ++k) {
+            LiftedOperand op;
+            op.type = LiftedOperandType::Register;
+            op.value.reg = regFunc + 1 + k;
+            op.ssaVersion = argVersions[k];
+
+            auto def = m_currentFunction->GetDefinition(op);
+            if (def && (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::NAMECALL)) {
+                int32_t actualCallIdx = (def->operation == LiftedOperation::NAMECALL) ? def->instructionIndex + 2 : def->instructionIndex;
+                const auto &defCallInfo = m_currentFunction->lpLiftedFunction->instructions[actualCallIdx];
+                if (defCallInfo.operands[2].value.imm.n == 0) {
+                    m_processedInstructions.insert(def->instructionIndex);
+                    if (def->operation == LiftedOperation::NAMECALL) {
+                        m_processedInstructions.insert(def->instructionIndex + 1);
+                        m_processedInstructions.insert(def->instructionIndex + 2);
+                    }
+                    args.push_back(LiftCall(*def, def->instructionIndex, true));
                     break;
-                statements.push_back(
-                    std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("uv_{}", capture.operands[1].value.imm.n))),
-                        std::make_shared<IdentifierExpressionNode>(
-                            std::make_shared<Identifier>(this->GetVarName(capture.operands[1].value.reg, capture.operands[1].ssaVersion))
-                        )
-                    )
-                );
-                howManyCaptures++;
+                }
             }
-
-            // If we ever change the logic inside the bytecode lifter, this only needs to changed too, thx.
-            auto functionName = duplicatedFunction->debugName ? duplicatedFunction->debugName.value() : std::format("f{}", duplicatedFunction->bytecodeId);
-            auto functionArguments = duplicatedFunction->numparams;
-            auto functionArgumentNames = std::unordered_map<int32_t, std::string>();
-            for (uint8_t aN = 0; aN < functionArguments; aN++) {
-                functionArgumentNames[aN] = std::format("v{}", aN);
-            }
-
-            const AnalyzedFunction *lpFunc = nullptr;
-            for (const auto &ffunc : func->innerFunctions) {
-                if (ffunc.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId)
-                    lpFunc = &ffunc;
-            }
-            ASSERT(lpFunc != nullptr, "lpFunc == nullptr");
-            std::set<uint32_t> visited;
-
-            statements.push_back(
-                std::make_shared<FunctionDeclarationNode>(
-                    functionName, functionArguments, functionArgumentNames, duplicatedFunction->isvararg,
-                    CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)), !duplicatedFunction->debugName.has_value()
-                )
-            );
-            break;
-        }
-        case LiftedOperation::NEWCLOSURE: {
-            int32_t howManyCaptures = 0;
-            while (true) {
-                auto capture = func->lpLiftedFunction->instructions[i + 1 + howManyCaptures];
-                if (capture.operation != LiftedOperation::CAPTURE)
-                    break;
-                statements.push_back(
-                    std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::format("uv_{}", capture.operands[1].value.imm.n))),
-                        std::make_shared<IdentifierExpressionNode>(
-                            std::make_shared<Identifier>(this->GetVarName(capture.operands[1].value.reg, capture.operands[1].ssaVersion))
-                        )
-                    )
-                );
-                howManyCaptures++;
-            }
-
-            const auto proto = func->lpLiftedFunction->lpDeserialized->subfunctions[inst.operands[1].value.imm.k];
-            std::string name = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
-            std::unordered_map<int32_t, std::string> args;
-            for (uint8_t pN = 0; pN < proto->numparams; pN++)
-                args[pN] = std::format("v{}", pN);
-
-            auto *lpFunc = &func->innerFunctions[inst.operands[1].value.imm.k];
-            std::set<uint32_t> visited;
-            statements.push_back(
-                std::make_shared<FunctionDeclarationNode>(
-                    name, proto->numparams, args, proto->isvararg, CreateBlock(this->LiftTree(const_cast<AnalyzedFunction *>(lpFunc), 0, -1, visited)),
-                    !proto->debugName.has_value() // NOLINT(*-pro-type-const-cast)
-                )
-            );
-            break;
-        }
-
-        case LiftedOperation::NEWTABLE: {
-            auto nSize = inst.operands[2];
-            if (nSize.value.imm.n == 0) {
-                statements.push_back(
-                    std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(inst.operands[0]))),
-                        std::make_shared<TableLiteralNode>()
-                    )
-                );
+            if (def && def->operation == LiftedOperation::GETVARARGS) {
+                isVararg = true;
                 break;
             }
-
-            int tableReg = inst.operands[0].value.reg;
-            std::vector<std::shared_ptr<Expression>> setListWhat;
-
-            size_t setlistId = i;
-            while (setlistId < func->lpLiftedFunction->instructions.size() - 1 &&
-                   func->lpLiftedFunction->instructions[++setlistId].operation != LiftedOperation::SETLIST) {
-                ASSERT(func->lpLiftedFunction->instructions.size() > setlistId);
-            }
-            if (func->lpLiftedFunction->instructions[setlistId].operation == LiftedOperation::SETLIST) {
-                // no direct set?
-                if (func->implicitUses.contains(&func->lpLiftedFunction->instructions[setlistId])) {
-                    if (tableReg == func->lpLiftedFunction->instructions[setlistId].operands[0].value.imm.n) {
-                        skippedIndices.insert(setlistId);
-                        auto itemsIdx = func->lpLiftedFunction->instructions[setlistId].operands[1].value.imm.n;
-                        size_t nItemsCount = inst.operands[2].value.imm.n;
-                        const auto &versions = func->implicitUses.at(&func->lpLiftedFunction->instructions[setlistId]);
-                        for (size_t k = 0; k < nItemsCount && k < versions.size(); ++k) {
-                            LiftedOperand op;
-                            op.type = LiftedOperandType::Register;
-                            op.value.reg = itemsIdx + k;
-                            op.ssaVersion = versions[k];
-                            setListWhat.push_back(LiftExpression(func, op));
-                        }
-                    } // different table, don't set.
-                }
-            }
-
-            statements.push_back(
-                std::make_shared<VariableDeclarationNode>(
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->GetVarName(inst.operands[0]))),
-                    std::make_shared<TableLiteralNode>(setListWhat)
-                )
-            );
-            i = setlistId; // move after SETLIST.
-            break;
+            args.push_back(LiftExpression(op, false));
         }
+    }
 
-        case LiftedOperation::JUMP:
-        case LiftedOperation::JUMPIF:
-        case LiftedOperation::JUMPIFNOT:
-        case LiftedOperation::JUMPXEQK:
-        case LiftedOperation::JUMPIFEQ:
-        case LiftedOperation::JUMPIFLE:
-        case LiftedOperation::JUMPIFLT:
-        case LiftedOperation::JUMPIFNOTEQ:
-        case LiftedOperation::JUMPIFNOTLE:
-        case LiftedOperation::JUMPIFNOTLT:
-        case LiftedOperation::FORNPREP:
-        case LiftedOperation::FORNLOOP:
-        case LiftedOperation::FORGLOOP:
-        case LiftedOperation::FORGPREP: {
-            continue;
-        }
-
-            // stmts
-        case LiftedOperation::SETGLOBAL: {
-            int kIndex = inst.operands[1].value.imm.k;
-            const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIndex];
-            std::string name = (k.kType == LUA_TSTRING) ? std::get<std::string>(k.constantData) : "ERR";
-
-            auto right = LiftExpression(func, inst.operands[0]);
-            if (func->GetDefinition(inst.operands[0]) == nullptr) {
-                statements.push_back(
-                    std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), right)
-                );
-            } else {
-                auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
-                statements.push_back(std::make_shared<AssignmentStatementNode>(left, right));
+    int32_t prevIdx = instructionIndex - 1;
+    if (prevIdx >= 0) {
+        const auto &prevInst = m_currentFunction->lpLiftedFunction->instructions[prevIdx];
+        if (prevInst.operation == LiftedOperation::CALL && prevInst.operands[2].value.imm.n == 0) {
+            if (!m_processedInstructions.contains(prevIdx)) {
+                m_processedInstructions.insert(prevIdx);
+                args.push_back(LiftCall(prevInst, prevIdx, true));
             }
-            break;
         }
-        case LiftedOperation::SETTABLE: {
-            auto table = LiftExpression(func, inst.operands[1]);
-            auto key = LiftExpression(func, inst.operands[2]);
-            auto val = LiftExpression(func, inst.operands[0]);
+    }
 
-            auto idxExpr = std::make_shared<IndexExpressionNode>(table, key);
-            statements.push_back(std::make_shared<AssignmentStatementNode>(idxExpr, val));
+    std::vector<std::shared_ptr<Expression>> rets;
+    if (isNameCall) {
+        auto kIdx = inst.operands[2].value.imm.k;
+        std::string method = std::get<std::string>(m_currentFunction->lpLiftedFunction->lpDeserialized->constants.at(kIdx).constantData);
+        return std::make_shared<NameCallExpressionNode>(
+            callee, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(method)), args, rets, isVararg, isNested
+        );
+    } else {
+        return std::make_shared<CallExpressionNode>(callee, args, rets, isVararg, isNested);
+    }
+}
+
+std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst) {
+    std::vector<std::shared_ptr<Expression>> elements;
+    const LiftedInstruction *setListInst = nullptr;
+    int32_t tableReg = inst.operands[0].value.reg;
+    size_t scanLimit = 50;
+    size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
+
+    for (size_t i = inst.instructionIndex + 1; i < inst.instructionIndex + scanLimit && i < maxIdx; ++i) {
+        const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+        if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF || candidate.operation == LiftedOperation::RETURN)
             break;
-        }
-        case LiftedOperation::SETTABLEKS: {
-            int kIndex = inst.operands[2].value.imm.k;
-            const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIndex];
-            std::string name = (k.kType == LUA_TSTRING) ? std::get<std::string>(k.constantData) : "ERR";
 
-            auto table = LiftExpression(func, inst.operands[1]);
-            auto val = LiftExpression(func, inst.operands[0]);
-            auto memberExpr = std::make_shared<MemberExpressionNode>(table, name);
-            statements.push_back(std::make_shared<AssignmentStatementNode>(memberExpr, val));
-            break;
-        }
-        case LiftedOperation::RETURN: {
-            int regStart = inst.operands[0].value.reg;
-            // size_t count = inst.operands[1].value.imm.n - 1;
-            std::vector<std::shared_ptr<Expression>> rets;
-
-            if (func->implicitUses.contains(&inst)) {
-                const auto &versions = func->implicitUses.at(&inst);
-                for (size_t k = 0; k < versions.size(); ++k) {
-                    LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
-                    op.value.reg = regStart + k;
-                    op.ssaVersion = versions[k];
-
-                    auto def = func->GetDefinition(op);
-
-                    if (def && (def->operation == LiftedOperation::CALL)) {
-                        if (def->operands[2].value.imm.n == 0) {
-                            rets.push_back(LiftCallLikeInstruction(func, def->instructionIndex));
-                            break;
-                        }
-                    }
-                    // we'll see if namecall needs this later on.
-
-                    rets.push_back(LiftExpression(func, op, false));
-                }
-            }
-            statements.push_back(std::make_shared<ReturnStatementNode>(rets));
-            break;
-        }
-        case LiftedOperation::CALL:
-        case LiftedOperation::NAMECALL: {
-            int32_t callInfoIdx = (inst.operation == LiftedOperation::NAMECALL) ? i + 2 : i;
-            const auto &callOp = func->lpLiftedFunction->instructions[callInfoIdx];
-
-            bool isMultRetProducer = (callOp.operands[2].value.imm.n == 0);
-
-            if (isMultRetProducer) {
-                size_t nextIdx = callInfoIdx + 1;
-                if (nextIdx < func->lpLiftedFunction->instructions.size()) {
-                    const auto &nextInst = func->lpLiftedFunction->instructions[nextIdx];
-
-                    bool nextConsumes = false;
-
-                    if (nextInst.operation == LiftedOperation::CALL || nextInst.operation == LiftedOperation::NAMECALL) {
-                        nextConsumes = (nextInst.operands[1].value.imm.n == 0);
-                    } else if (nextInst.operation == LiftedOperation::RETURN) {
-                        // RETURN
-                        nextConsumes = (nextInst.operands[1].value.imm.n == 0);
-                    } else if (nextInst.operation == LiftedOperation::SETLIST) {
-                        // SETLIST consumes multret if 0
-                        nextConsumes = (nextInst.operands[2].value.imm.n == 0);
-                    }
-
-                    if (nextConsumes) {
-                        if (inst.operation == LiftedOperation::NAMECALL)
-                            i += 2;
-                        continue;
-                    }
-                }
-            }
-
-            auto expr = LiftCallLikeInstruction(func, i, false);
-            statements.push_back(std::make_shared<ExpressionStatementNode>(expr));
-
-            if (inst.operation == LiftedOperation::NAMECALL) {
-                i += 2;
-            }
-            break;
-        }
-        case LiftedOperation::NOP:
-            break;
-        case LiftedOperation::GETIMPORT:
-        case LiftedOperation::GETGLOBAL: {
-            int32_t reg = inst.operands[0].value.reg;
-            int32_t ver = inst.operands[0].ssaVersion;
-            int uses = 0;
-            if (func->useCounts.contains({reg, ver})) {
-                uses = func->useCounts.at({reg, ver});
-            }
-            auto expression = LiftExpression(func, inst.operands[0]);
-
-            auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(reg, ver));
-            auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
-            if (ver == 1)
-                statements.push_back(std::make_shared<VariableDeclarationNode>(targetExpression, expression));
-            else
-                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
-
-            if (uses > 0 /* if we have more than 0 refs, then we don't care. We inline these */ && !m_pinnedRegisters.contains(reg))
+        if (candidate.operation == LiftedOperation::SETLIST) {
+            if (candidate.operands[0].value.reg == tableReg) {
+                setListInst = &candidate;
                 break;
-
-            break;
-        }
-        case LiftedOperation::LOAD: {
-            if (!func->useCounts.contains({inst.operands[0].value.reg, inst.operands[0].ssaVersion}) ||
-                ((func->useCounts.at({inst.operands[0].value.reg, inst.operands[0].ssaVersion}) <= 1) && inst.operands[0].ssaVersion != 1))
-                break; // one usage isn't enough to matter.
-            // while this will be self, we want to know if there was a previous definition.
-            // if no previous definition, push it, as this may be used to mutate variables.
-            auto expression = LiftExpression(func, inst.operands[0], true);
-
-            auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
-            auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
-
-            if (inst.operands[0].ssaVersion <= 1)
-                statements.push_back(std::make_shared<VariableDeclarationNode>(targetExpression, expression));
-            else
-                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
-            break;
-        }
-        case LiftedOperation::MOVE:
-            break; // MOVE is suppressed.
-        case LiftedOperation::ADD:
-        case LiftedOperation::SUB:
-        case LiftedOperation::MUL:
-        case LiftedOperation::DIV:
-        case LiftedOperation::MOD:
-        case LiftedOperation::POW: {
-            // if a SUB/ADD/MUL/DIV/MOD/POW uses rX, rx and rn, then it means that it MUST be emitted and cannot be inlined.
-            auto expression = LiftExpression(func, inst.operands[0], true);
-
-            auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
-            auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
-
-            statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
-            break;
-        }
-        case LiftedOperation::ADDK:
-        case LiftedOperation::SUBK:
-        case LiftedOperation::MULK:
-        case LiftedOperation::DIVK:
-        case LiftedOperation::MODK:
-        case LiftedOperation::POWK: {
-        }
-        case LiftedOperation::GETVARARGS: { // register moves are handled at the SSA level, we are not to be concerned with moving the registers.
-            if (func->GetDefinition(inst.operands[0])) {
-                auto expression = LiftExpression(func, inst.operands[0], true);
-
-                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
-                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
-
-                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
             }
-            break;
-        }
-        default:
-            if (nullptr == func->GetDefinition(inst.operands[0])) {
-                // auto targetIdentifier = std::make_shared<Identifier>(std::format("v{}", inst.operands[0].value.reg));
-                // statements.push_back(std::make_shared<VariableDeclarationNode>(targetIdentifier));
-            } else {
-                auto expression = LiftExpression(func, inst.operands[0]);
-
-                auto targetIdentifier = std::make_shared<Identifier>(this->GetVarName(inst.operands[0]));
-                auto targetExpression = std::make_shared<IdentifierExpressionNode>(targetIdentifier);
-
-                statements.push_back(std::make_shared<AssignmentStatementNode>(targetExpression, expression));
-            }
-            break;
         }
     }
-    return statements;
+
+    if (setListInst) {
+        m_processedInstructions.insert(setListInst->instructionIndex);
+        if (m_currentFunction->implicitUses.contains(setListInst)) {
+            const auto &versions = m_currentFunction->implicitUses.at(setListInst);
+            int startReg = setListInst->operands[1].value.reg;
+
+            for (size_t k = 0; k < versions.size(); ++k) {
+                LiftedOperand itemOp;
+                itemOp.type = LiftedOperandType::Register;
+                itemOp.value.reg = startReg + k;
+                itemOp.ssaVersion = versions[k];
+                elements.push_back(LiftExpression(itemOp));
+            }
+        }
+    }
+    return std::make_shared<TableLiteralNode>(elements);
 }
 
-std::vector<std::shared_ptr<Statement>>
-ASTLifter::LiftTree(AnalyzedFunction *func, uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited) {
-    std::vector<std::shared_ptr<Statement>> nodes;
+bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
+    if (!inst || inst->operands.size() < 1)
+        return false;
+    if (inst->operation == LiftedOperation::RETURN)
+        return false;
 
-    if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= func->basicBlocks.size())
-        return nodes;
-    if (currentBlockId == stopBlockId)
-        return nodes;
-
-    if (visited.contains(currentBlockId))
-        return nodes;
-    visited.insert(currentBlockId);
-
-    const auto &block = func->basicBlocks[currentBlockId];
-
-    auto blockStatements = LiftBlockInstructions(func, block);
-    nodes.insert(nodes.end(), blockStatements.begin(), blockStatements.end());
-
-    switch (block.bType) {
-    case BlockType::IfHeader: {
-        if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
-            uint32_t trueIdx = block.ifStatementTrue.value();
-            uint32_t falseIdx = block.ifStatementFalse.value();
-            auto blockId = std::make_shared<CommentNode>(std::format("IfHeader (true: {}, false: {}, thisblock: {})", trueIdx, falseIdx, currentBlockId), true);
-            nodes.insert(nodes.end(), blockId);
-
-            std::shared_ptr<Expression> condition = nullptr;
-            if (block.lpTail) {
-                switch (block.lpTail->operation) {
-                case LiftedOperation::JUMPXEQK: {
-                    auto notFlag = block.lpTail->operands[3].value.imm.b;
-                    std::shared_ptr<Expression> rhs;
-                    if (block.lpTail->operands[2].type == LiftedOperandType::ImmediateConstant) {
-                        auto kIdx = block.lpTail->operands[2].value.imm.k;
-                        const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIdx];
-                        switch (k.kType) {
-                        case LUA_TNIL:
-                            rhs = std::make_shared<NilLiteralNode>();
-                            break;
-                        case LUA_TBOOLEAN:
-                            rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-                            break;
-                        case LUA_TNUMBER:
-                            rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-                            break;
-                        case LUA_TSTRING:
-                            rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-                            break;
-                        default:
-                            rhs = std::make_shared<NilLiteralNode>(); // fallback
-                            break;
-                        }
-                    } else {
-                        switch (block.lpTail->operands[2].type) {
-                        default:
-                        case LiftedOperandType::ImmediateNil:
-                            rhs = std::make_shared<NilLiteralNode>();
-                            break;
-                        case LiftedOperandType::ImmediateInteger:
-                            rhs = std::make_shared<BooleanLiteralNode>(block.lpTail->operands[2].value.imm.n);
-                            break;
-                        case LiftedOperandType::ImmediateBool:
-                            rhs = std::make_shared<BooleanLiteralNode>(block.lpTail->operands[2].value.imm.b);
-                            break;
-                        }
-                    }
-
-                    if (notFlag)
-                        condition = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
-                    else
-                        condition = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
-                    break;
-                }
-                case LiftedOperation::JUMPIFNOTEQ: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        "==", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFEQ: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        "~=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFLE: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFNOTLE: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        ">=", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFLT: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        "<", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFNOTLT: {
-                    condition = std::make_shared<BinaryExpressionNode>(
-                        ">", this->LiftExpression(func, block.lpTail->operands[2]), this->LiftExpression(func, block.lpTail->operands[0])
-                    );
-                    break;
-                }
-                default:
-                    condition = LiftExpression(func, block.lpTail->operands[0]);
-                    break;
-                }
-            }
-
-            ASSERT(condition, "failed to determine conditional for if branch.");
-
-            uint32_t mergeIdx = FindMergeBlock(func, trueIdx, falseIdx);
-            if (mergeIdx == static_cast<uint32_t>(-1) && stopBlockId != static_cast<uint32_t>(-1))
-                mergeIdx = (int32_t)stopBlockId;
-
-            std::set<uint32_t> branchVisited = visited;
-            auto thenStmts = LiftTree(func, trueIdx, mergeIdx, branchVisited);
-
-            branchVisited = visited;
-            auto elseStmts = LiftTree(func, falseIdx, mergeIdx, branchVisited);
-
-            auto ifNode = std::make_shared<IfStatementNode>();
-            ifNode->condition = condition;
-            if (!thenStmts.empty()) {
-                ifNode->thenBranch = CreateBlock(thenStmts);
-            }
-            if (!elseStmts.empty()) {
-                ifNode->elseBranch = CreateBlock(elseStmts);
-            }
-            nodes.push_back(ifNode);
-
-            // continue from merge point
-            if (mergeIdx != static_cast<uint32_t>(-1) && mergeIdx != stopBlockId) {
-                auto nextNodes = LiftTree(func, mergeIdx, stopBlockId, visited);
-                nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
-            }
-        } else {
-            nodes.push_back(std::make_shared<CommentNode>("Broken If Header", true));
-        }
-        break;
+    if (inst->operands.size() > 0 && inst->operands[0].type == LiftedOperandType::Register &&
+        (inst->operation != LiftedOperation::MOVE && m_currentFunction->IsSingleUse(inst->operands[0]))) {
+        SSARef defRef{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
+        if (m_phiConsumers.contains(defRef))
+            return false;
     }
 
-    case BlockType::LoopHeader: {
-        if (block.loopLatch.has_value()) {
-            uint32_t exitIdx = block.loopExit.value_or(-1);
-            ASSERT(
-                (exitIdx != static_cast<uint32_t>(-1) || ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop ||
-                                                          ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop)) &&
-                                                             exitIdx == static_cast<uint32_t>(-1)),
-                "other loop type than while without an exit block."
-            );
+    if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::NAMECALL) {
+        int regA = inst->operands[0].value.reg;
 
-            if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
-                auto whileNode = std::make_shared<WhileStatementNode>();
-                int32_t bodyIdx = -1;
-                if (exitIdx == static_cast<uint32_t>(-1)) {
-                    // in while loops, depending on the optimization level, we may have no exit block.
-                    // this is because the compiler will remove any conditional jumps, as they evaluate to a constant.
-                    // The way to solve this is to assume that the path that comes next will always be the body. Realistically, we have no choice!
-                    ASSERT(block.successors.size() == 1); // this loop type only has 1 successor.
-                    bodyIdx = block.successors.at(0);     // grab first.
+        if (inst->operation == LiftedOperation::CALL && inst->operands[2].value.imm.n == 0)
+            return true;
 
-                    if (static_cast<uint32_t>(bodyIdx) == currentBlockId || func->basicBlocks.at(bodyIdx).bType == BlockType::LoopLatch) {
-                        whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
-                    }
-                    whileNode->body = CreateBlock(blockStatements);
-                    // remove last block (us)
-                    nodes.pop_back(); // remove last node.
-                    nodes.push_back(whileNode);
-                    // we are the loop body.
-                    break;
-                } else {
-                    for (auto succ : block.successors) {
-                        if (succ != exitIdx) { // determine body by != exit.
-                            bodyIdx = succ;
-                            break;
-                        }
-                    }
+        for (const auto &[ref, defInst] : m_currentFunction->definitionMap) {
+            if (defInst == inst && ref.regIndex == regA) {
+                auto users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
+                if (users.size() == 1) {
+                    if (users[0]->operation == LiftedOperation::RETURN)
+                        return true;
+                    if (users[0]->operation == LiftedOperation::CALL || users[0]->operation == LiftedOperation::NAMECALL)
+                        return true;
                 }
-                // in while loops, there may be no exit. Thus, if there's none, set it to the latch. This should get things going.
-
-                // assume the first non-exit successor is the loop body start
-
-                // try to extract condition
-                if (block.bTerminator == BlockTerminator::Conditional && block.lpTail) {
-                    switch (block.lpTail->operation) {
-                    case LiftedOperation::JUMPIFNOTEQ: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            "==", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIFEQ: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            "~=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIFLT: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            "<", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIFNOTLT: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            ">", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIFLE: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            "<=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIFNOTLE: {
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                            ">=", this->LiftExpression(func, block.lpTail->operands[0]), this->LiftExpression(func, block.lpTail->operands[2])
-                        );
-                        break;
-                    }
-                    case LiftedOperation::JUMPIF: {
-                    case LiftedOperation::JUMPIFNOT: {
-                        whileNode->condition = this->LiftExpression(func, block.lpTail->operands[0]);
-                        break;
-                    }
-                    }
-                    case LiftedOperation::JUMPXEQK: {
-                        auto kIdx = block.lpTail->operands[2].value.imm.k;
-                        auto notFlag = block.lpTail->operands[3].value.imm.b;
-                        std::shared_ptr<Expression> rhs;
-                        const auto &k = func->lpLiftedFunction->lpDeserialized->constants[kIdx];
-                        switch (k.kType) {
-                        case LUA_TNIL:
-                            rhs = std::make_shared<NilLiteralNode>();
-                            break;
-                        case LUA_TBOOLEAN:
-                            rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-                            break;
-                        case LUA_TNUMBER:
-                            rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-                            break;
-                        case LUA_TSTRING:
-                            rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-                            break;
-                        default:
-                            rhs = std::make_shared<NilLiteralNode>(); // fallback
-                            break;
-                        }
-
-                        if (notFlag)
-                            whileNode->condition = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
-                        else
-                            whileNode->condition = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(func, block.lpTail->operands[0]), rhs);
-                        break;
-                    }
-
-                    default:
-                        whileNode->condition = LiftExpression(func, block.lpTail->operands[0]);
-                        break;
-                    }
-                } else {
-                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
-                }
-
-                ASSERT(bodyIdx != -1, "control flow analysis failed"); // TODO: properly handle while true do end loops.
-                std::set<uint32_t> loopVisited = visited;
-                auto loopBody = LiftTree(func, bodyIdx, exitIdx, loopVisited);
-                whileNode->body = CreateBlock(loopBody);
-
-                nodes.push_back(whileNode);
-
-                // continue after loop
-                if (exitIdx != stopBlockId) {
-                    auto nextNodes = LiftTree(func, exitIdx, stopBlockId, visited);
-                    nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
-                }
-            } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
-                auto numericForNode = std::make_shared<ForNumericNode>();
-                auto forPrepInst = block.lpTail;
-                auto baseRegister = forPrepInst->operands[0].value.reg;
-
-                auto dwStartValueReg = baseRegister + 2;
-                auto increaseBy = baseRegister + 1;
-                auto increaseUntilReg = baseRegister;
-
-                int32_t limitVer = -1, stepVer = -1, startVer = -1;
-
-                if (func->implicitUses.contains(forPrepInst)) {
-                    const auto &impl = func->implicitUses.at(forPrepInst);
-                    if (impl.size() >= 3) {
-                        limitVer = impl[0];
-                        stepVer = impl[1];
-                        startVer = impl[2];
-                    }
-                }
-
-                // ssa may fail to be generated, we should put a warning, but most of the bugs
-                // on the ssa builder have been evicted, so this is proooobably never going to reach. But just in case.
-                if (limitVer == -1)
-                    limitVer = forPrepInst->operands[0].ssaVersion;
-                if (stepVer == -1)
-                    stepVer = limitVer;
-                if (startVer == -1)
-                    startVer = limitVer;
-
-                uint32_t bodyIdx = -1;
-                for (const auto succ : block.successors)
-                    if (succ != block.loopLatch) {
-                        bodyIdx = succ;
-                        break; // FORNLOOP
-                    }
-                ASSERT(bodyIdx != -1, "bodyIdx == -1");
-                std::set<uint32_t> loopVisited = visited;
-                LiftedOperand op;
-                op.type = LiftedOperandType::Register;
-                {
-                    PinnedRegisterScope pinScope(this, dwStartValueReg);
-
-                    this->EnterLoop(dwStartValueReg);
-
-                    auto loopBody = LiftTree(func, bodyIdx, *block.loopLatch, loopVisited);
-                    numericForNode->lpLoopBody = CreateBlock(loopBody);
-
-                    op.value.reg = increaseBy;
-                    op.ssaVersion = stepVer;
-                    numericForNode->increaseBy = LiftExpression(func, op);
-
-                    op.value.reg = increaseUntilReg;
-                    op.ssaVersion = limitVer;
-                    numericForNode->maxIncreased = LiftExpression(func, op);
-
-                    op.value.reg = dwStartValueReg;
-                    op.ssaVersion = startVer;
-                    numericForNode->loopVariable = LiftExpression(func, op);
-
-                    this->ExitLoop();
-                }
-
-                op.value.reg = dwStartValueReg;
-                op.ssaVersion = startVer;
-                numericForNode->startVariable = LiftExpression(func, op);
-
-                nodes.push_back(numericForNode);
-
-                if (exitIdx != (uint32_t)-1 && exitIdx != stopBlockId) {
-                    auto nextNodes = LiftTree(func, exitIdx, stopBlockId, visited);
-                    nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
-                }
-            } else {
-                nodes.push_back(
-                    std::make_shared<CommentNode>(std::format("Warning: Unhandled LoopType with id {} (Blk {})", block.dwBlockFlags, block.dwBlockId), true)
-                );
+                return false;
             }
         }
-        break;
+        return false;
     }
 
-    case BlockType::Break:
-        nodes.push_back(std::make_shared<BreakStatementNode>());
-        break;
-
-    case BlockType::Continue:
-        nodes.push_back(std::make_shared<ContinueStatementNode>());
-        break;
-
-    case BlockType::Return:
-        break;
-
-    case BlockType::Standard:
-    case BlockType::LoopLatch:
-    default: {
-        if (!block.successors.empty()) {
-            const uint32_t next = block.successors[0];
-
-            if (func->basicBlocks[next].bType == BlockType::LoopHeader && block.bType == BlockType::LoopLatch)
-                break;
-
-            auto nextNodes = LiftTree(func, next, stopBlockId, visited);
-            nodes.insert(nodes.end(), nextNodes.begin(), nextNodes.end());
-        }
-        break;
-    }
+    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0])) {
+        return true;
     }
 
-    return nodes;
+    if (m_currentFunction->IsSingleUse(inst->operands[0])) {
+        if (m_currentFunction->IsConsumedByPhi(inst->operands[0]))
+            return false;
+        if (inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE)
+            return false; // do not omit NEWCLOSURE and DUPCLOSURE.
+        return true;
+    }
+
+    return false;
 }
 
-ASTFunction ASTLifter::LiftFunctionInternal(AnalyzedFunction *analyzedFunction) {
-    ASTFunction astFunc;
-    astFunc.backingFunction = analyzedFunction;
+std::string ASTLifter::ResolveVariableName(const LiftedOperand &op) {
+    if (op.type != LiftedOperandType::Register)
+        return "err_not_reg";
 
-    if (!analyzedFunction->basicBlocks.empty()) {
-        std::set<uint32_t> visited;
-        astFunc.statements = LiftTree(analyzedFunction, 0, -1, visited);
-    }
+    m_definedRegisters.insert(op.value.reg);
+    std::string name = m_currentFunction->GetVarName(op.value.reg, op.ssaVersion);
+    if (name.empty())
+        return std::format("v{}", op.value.reg);
 
-    for (auto &inner : analyzedFunction->innerFunctions) {
-        astFunc.subFunctions.push_back(LiftFunctionInternal(&inner));
-    }
-
-    return astFunc;
+    return name;
 }
 
-ASTFunction ASTLifter::LiftFunction(AnalyzedFunction *analyzedFunction) {
-    this->m_lpRootFunction = analyzedFunction; // set root for internal traversal.
-    return LiftFunctionInternal(analyzedFunction);
+int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
+    if (branchA == branchB)
+        return static_cast<int32_t>(branchA);
+
+    std::set<uint32_t> reachableFromA;
+    std::queue<uint32_t> q;
+
+    q.push(branchA);
+    reachableFromA.insert(branchA);
+    while (!q.empty()) {
+        uint32_t curr = q.front();
+        q.pop();
+
+        if (reachableFromA.size() > 2000u)
+            break;
+
+        const auto &block = m_currentFunction->basicBlocks[curr];
+        for (uint32_t succ : block.successors) {
+            if (block.bType == BlockType::LoopLatch && succ < curr)
+                continue;
+
+            if (!reachableFromA.contains(succ)) {
+                reachableFromA.insert(succ);
+                q.push(succ);
+            }
+        }
+    }
+
+    if (reachableFromA.contains(branchB))
+        return static_cast<int32_t>(branchB);
+
+    std::queue<uint32_t> q2;
+    q2.push(branchB);
+    std::set<uint32_t> visitedB;
+    visitedB.insert(branchB);
+
+    while (!q2.empty()) {
+        const uint32_t curr = q2.front();
+        q2.pop();
+
+        for (const auto &block = m_currentFunction->basicBlocks[curr]; uint32_t succ : block.successors) {
+            if (block.bType == BlockType::LoopLatch && succ < curr)
+                continue;
+
+            if (reachableFromA.contains(succ))
+                return static_cast<int32_t>(succ);
+
+            if (!visitedB.contains(succ)) {
+                visitedB.insert(succ);
+                q2.push(succ);
+            }
+        }
+    }
+    return -1;
 }

@@ -1,0 +1,26 @@
+--!optimize 0
+
+function test()
+    local a = 2
+    local b = 3
+    local c = 6
+    print(a, b, c)
+    return c, b, a
+end
+
+game:FindFirstChild(print(getRet(test()))):FindFirstChild("ByeByeBye!")
+
+local g = game:FindFirstChild(tostring("g"))
+print(g:WaitForChild("Test").Bypass:FilteringEnabled())
+warn(g)
+
+local acc = 0
+while true do
+    acc += 1
+end
+print(acc)
+
+for i=1, 50, 2 do
+    error(i + 1)
+end
+print"hi"

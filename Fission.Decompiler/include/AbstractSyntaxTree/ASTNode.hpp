@@ -119,6 +119,18 @@ class WhileStatementNode : public Statement {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class CompoundBinaryExpressionNode : public Expression {
+  public:
+    std::string op;
+    std::shared_ptr<Expression> left, right;
+    CompoundBinaryExpressionNode(const std::string &op, const std::shared_ptr<Expression> &left, const std::shared_ptr<Expression> &right)
+        : op(op), left(left), right(right) {
+        this->nodeKind = ASTNodeKind::BinaryExpression;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class BinaryExpressionNode : public Expression {
   public:
     std::string op;

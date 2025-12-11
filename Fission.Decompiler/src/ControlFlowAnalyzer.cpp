@@ -365,7 +365,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         subfuncs.push_back(analyzed);
     }
 
-    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs, {}};
+    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs, {}, {}, {}, {}, {}, {}};
 }
 
 void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks) {

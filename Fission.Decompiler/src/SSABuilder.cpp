@@ -35,7 +35,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
         set(op, AccessType::Write);
     }
 
-    set(LiftedOperation::CALL, AccessType::Read); // THIS NEEDS TO BE CHANGED, READWRITE BREAKS AST LIFTING FOR CALLS.
+    set(LiftedOperation::CALL, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Read);
 
     return table;
@@ -53,6 +53,40 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
     }
 
     return baseType;
+}
+
+std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &inst) {
+    std::vector<int> defs;
+    switch (inst.operation) {
+    case LiftedOperation::CALL: {
+        int regStart = inst.operands[0].value.reg;
+        int retCount = inst.operands[2].value.imm.n;
+        int effectiveRetCount = (retCount == 0) ? 1 : (retCount - 1);
+        for (int k = 0; k < effectiveRetCount; ++k) {
+            defs.push_back(regStart + k);
+        }
+        break;
+    }
+    case LiftedOperation::NAMECALL: {
+        int regA = inst.operands[0].value.reg;
+        defs.push_back(regA + 1); // Implicit Self
+        break;
+    }
+    case LiftedOperation::GETVARARGS: {
+        int baseReg = inst.operands[0].value.reg;
+        int count = inst.operands[1].value.imm.n;
+        for (int k = 1; k < count; ++k) {
+            defs.push_back(baseReg + k);
+        }
+        break;
+    }
+    case LiftedOperation::SETLIST: {
+        break;
+    }
+    default:
+        break;
+    }
+    return defs;
 }
 
 int32_t SSABuilder::NewVersion(int32_t reg) {
@@ -79,17 +113,34 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
     if (lpOriginalFunction->basicBlocks.empty())
         return;
 
+    int numParams = 0;
     int maxRegs = 255;
     if (lpOriginalFunction->lpLiftedFunction && lpOriginalFunction->lpLiftedFunction->lpDeserialized) {
         maxRegs = lpOriginalFunction->lpLiftedFunction->lpDeserialized->maxstacksize;
+        numParams = lpOriginalFunction->lpLiftedFunction->lpDeserialized->numparams;
     }
 
     std::vector<std::vector<int>> defBlocks(maxRegs + 1);
 
     if (lpOriginalFunction->lpLiftedFunction) {
-        for (int i = 0; i <= maxRegs; ++i) {
+        for (int i = 0; i < numParams; ++i) {
             defBlocks[i].push_back(0);
         }
+    }
+
+    for (auto &block : lpOriginalFunction->basicBlocks) {
+        if (block.predecessors.size() < 2)
+            continue;
+
+        std::ranges::stable_sort(block.predecessors, [&](uint32_t a, uint32_t b) {
+            bool aIsLatch = (a == block.loopLatch.value_or(-1));
+            bool bIsLatch = (b == block.loopLatch.value_or(-1));
+
+            if (aIsLatch != bIsLatch) {
+                return !aIsLatch;
+            }
+            return a < b;
+        });
     }
 
     for (const auto &block : lpOriginalFunction->basicBlocks) {
@@ -113,6 +164,16 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                     }
                 }
             }
+
+            std::vector<int> implicitDefs = GetImplicitDefinitions(*inst);
+            for (int reg : implicitDefs) {
+                if (reg <= maxRegs) {
+                    if (defBlocks[reg].empty() || static_cast<uint32_t>(defBlocks[reg].back()) != block.dwBlockId) {
+                        defBlocks[reg].push_back(block.dwBlockId);
+                    }
+                }
+            }
+
             if (inst == block.lpTail)
                 break;
         }
@@ -190,6 +251,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
         int v = NewVersion(reg);
         phi.operands[0].ssaVersion = v;
         varsDefinedHere.push_back(reg);
+        func.definitionMap[{static_cast<uint8_t>(reg), v}] = &phi;
     }
 
     if (block.lpHead) {
@@ -213,6 +275,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                     auto ref = SSARef{reg, CurrentVersion(reg)};
                     func.useCounts[ref]++;
+                    func.users[ref].push_back(inst);
                 }
             }
 
@@ -246,6 +309,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                             v = NewVersion(argReg);
                         argVersions.push_back(v);
                         func.useCounts[{argReg, v}]++;
+                        func.users[{argReg, v}].push_back(inst);
                     }
                 }
                 func.implicitUses[inst] = std::move(argVersions);
@@ -284,15 +348,13 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                         v = NewVersion(reg);
                     retVersions.push_back(v);
                     func.useCounts[{reg, v}]++;
+                    func.users[{reg, v}].push_back(inst);
                 }
 
                 func.implicitUses[inst] = std::move(retVersions);
             } else if (inst->operation == LiftedOperation::SETLIST) {
-                // int tableReg = inst->operands[0].value.reg;
                 int newItemsStartReg = inst->operands[1].value.reg;
                 int newItemsCount = inst->operands[2].value.imm.n;
-                // unused.
-                // int startFrom = inst->operands[3].value.imm.n;
 
                 std::vector<int32_t> itemVersions;
                 itemVersions.reserve(newItemsCount > 0 ? newItemsCount : 0);
@@ -300,19 +362,32 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 if (newItemsCount > 0) {
                     for (int32_t k = 0; k < newItemsCount; ++k) {
                         int32_t argReg = newItemsStartReg + k;
-
                         int32_t v = CurrentVersion(argReg);
-
-                        if (v == -1) {
+                        if (v == -1)
                             v = NewVersion(argReg);
-                        }
 
                         itemVersions.push_back(v);
                         func.useCounts[{argReg, v}]++;
+                        func.users[{argReg, v}].push_back(inst);
                     }
                 }
 
                 func.implicitUses[inst] = std::move(itemVersions);
+            } else if (inst->operation == LiftedOperation::CONCAT) {
+                int32_t startReg = inst->operands[1].value.reg;
+                int32_t endReg = inst->operands[2].value.reg;
+                std::vector<int32_t> rangeVersions;
+
+                for (int32_t r = startReg + 1; r <= endReg - 1; ++r) {
+                    int32_t v = CurrentVersion(r);
+                    if (v == -1)
+                        v = NewVersion(r);
+
+                    rangeVersions.push_back(v);
+                    func.useCounts[{r, v}]++;
+                    func.users[{r, v}].push_back(inst);
+                }
+                func.implicitUses[inst] = std::move(rangeVersions);
             } else if (inst->operation == LiftedOperation::GETVARARGS) {
                 int32_t count = inst->operands[1].value.imm.n;
                 if (count > 1) {
@@ -332,16 +407,14 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 for (int i = 0; i < 3; ++i) {
                     int32_t r = baseReg + i;
                     int32_t v = CurrentVersion(r);
-
                     if (v == -1)
                         v = NewVersion(r);
                     loopInputs.push_back(v);
                     func.useCounts[{r, v}]++;
+                    func.users[{r, v}].push_back(inst);
                 }
-
                 func.implicitUses[inst] = std::move(loopInputs);
             } else if (inst->operation == LiftedOperation::FORNLOOP) {
-                // numeric loops mutate their control variable. We must mark this as a R/W.
                 NewVersion(inst->operands[2].value.reg);
             }
             if (inst == block.lpTail)
@@ -366,6 +439,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 if (size_t(predIndex + 1) < phi.operands.size()) {
                     phi.operands[predIndex + 1].ssaVersion = CurrentVersion(reg);
                     func.useCounts[SSARef{reg, CurrentVersion(reg)}]++;
+                    func.users[SSARef{static_cast<uint8_t>(reg), CurrentVersion(reg)}].push_back(&phi);
                 }
             }
         }

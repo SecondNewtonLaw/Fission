@@ -23,6 +23,7 @@ class SSABuilder {
     std::vector<int> versionCounter;
 
     static AccessType GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex);
+    std::vector<int> GetImplicitDefinitions(const LiftedInstruction &inst);
 
     int32_t NewVersion(int32_t reg);
 

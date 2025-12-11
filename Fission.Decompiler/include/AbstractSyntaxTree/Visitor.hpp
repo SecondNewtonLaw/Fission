@@ -31,6 +31,7 @@ class TableLiteralNode;
 class NoExpressionNode;
 class NameCallExpressionNode;
 class ForNumericNode;
+class CompoundBinaryExpressionNode;
 
 class Visitor {
   public:
@@ -61,4 +62,5 @@ class Visitor {
     virtual void Visit(NoExpressionNode *lpNode) = 0;
     virtual void Visit(NameCallExpressionNode *lpNode) = 0;
     virtual void Visit(ForNumericNode *lpNode) = 0;
+    virtual void Visit(CompoundBinaryExpressionNode *lpNode) = 0;
 };

@@ -6,6 +6,7 @@
 #include <set>
 
 #include "BytecodeLifter.hpp"
+#include "Deserializer.hpp"
 
 #include <map>
 #include <queue>
@@ -140,6 +141,134 @@ struct AnalyzedFunction {
         return definitionMap.at(ssaRef);
     }
 
+    [[nodiscard]] bool IsConsumedByPhi(const LiftedOperand &op) const {
+        if (op.type != LiftedOperandType::Register)
+            return false;
+
+        const auto &userList = users.find({op.value.reg, op.ssaVersion});
+        if (userList == users.end())
+            return false;
+
+        for (const auto *inst : userList->second) {
+            if (inst->operation == LiftedOperation::PHI)
+                return true;
+        }
+        return false;
+    }
+
+    [[nodiscard]] int32_t GetUseCount(const LiftedOperand &op) const {
+        if (op.type != LiftedOperandType::Register)
+            return 0;
+        const auto it = useCounts.find({op.value.reg, op.ssaVersion});
+        return (it != useCounts.end()) ? it->second : 0;
+    }
+
+    [[nodiscard]] bool IsSingleUse(const LiftedOperand &op) const { return GetUseCount(op) == 1; }
+
+    [[nodiscard]] bool IsOperation(const LiftedOperand &op, LiftedOperation targetOp) const {
+        const auto *def = GetDefinition(op);
+        return def && def->operation == targetOp;
+    }
+
+    [[nodiscard]] bool IsSimpleOrConstant(const LiftedOperand &op) const {
+        const auto *def = GetDefinition(op);
+        if (!def)
+            return false;
+
+        switch (def->operation) {
+        case LiftedOperation::LOAD:
+        case LiftedOperation::MOVE:      // simple aliases
+        case LiftedOperation::GETUPVAL:  // upvalue reads are usually safe to inline
+        case LiftedOperation::GETIMPORT: // global reads (standard)
+        case LiftedOperation::GETGLOBAL:
+            return true;
+        default:
+            return false;
+        }
+    }
+
+    [[nodiscard]] bool HasSideEffects(const LiftedOperand &op) const {
+        const auto *def = GetDefinition(op);
+        if (!def)
+            return false;
+
+        switch (def->operation) {
+        case LiftedOperation::CALL:
+        case LiftedOperation::NAMECALL:
+        case LiftedOperation::SETTABLE:
+        case LiftedOperation::SETTABLEKS:
+        case LiftedOperation::SETTABLEN:
+        case LiftedOperation::SETGLOBAL:
+        case LiftedOperation::SETUPVAL:
+        case LiftedOperation::NEWCLOSURE: // captures upvalues (side effect-ish)
+        case LiftedOperation::DUPCLOSURE: // may create and capture.
+            return true;
+        default:
+            return false;
+        }
+    }
+    [[nodiscard]] int32_t GetBlockId(const LiftedInstruction *inst) const {
+        for (const auto &block : basicBlocks) {
+            if (!block.lpHead)
+                continue;
+            if (inst >= block.lpHead && inst <= block.lpTail) {
+                return static_cast<int32_t>(block.dwBlockId);
+            }
+        }
+        return -1;
+    }
+
+    std::unordered_map<SSARef, std::string> variableNames;
+    std::unordered_map<int32_t, std::string> upvalueNames;
+
+    std::unordered_map<int, std::string> globalRegNames;
+    std::unordered_map<SSARef, std::string> ssaOverrides;
+
+    void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
+
+    void SetVariableName(int32_t reg, int32_t version, const std::string &name) { variableNames[{static_cast<uint8_t>(reg), version}] = name; }
+
+    std::string GetVarName(int32_t reg, int32_t version) {
+        SSARef ref{static_cast<uint8_t>(reg), version};
+        if (this->ssaOverrides.contains(ref))
+            return this->ssaOverrides.at(ref);
+
+        if (this->globalRegNames.contains(reg))
+            return this->globalRegNames.at(reg);
+
+        if (variableNames.contains(ref))
+            return variableNames.at(ref);
+
+        return std::format("v{}", reg);
+    }
+
+    void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }
+
+    void ClearVersionName(int32_t reg, int32_t ver) { ssaOverrides.erase({static_cast<uint8_t>(reg), ver}); }
+
+    void ClearAllVersionNames(int32_t reg) {
+        for (auto it = ssaOverrides.begin(); it != ssaOverrides.end();) {
+            if (it->first.regIndex == static_cast<uint8_t>(reg)) {
+                it = ssaOverrides.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+    void PopulateNames() {
+        auto lpDeserialized = this->lpLiftedFunction->lpDeserialized;
+
+        int32_t uIdx = 0;
+        for (const auto &name : lpDeserialized->upvalueNames)
+            this->upvalueNames[uIdx++] = name;
+
+        for (size_t i = 0; i < lpDeserialized->numparams; i++) {
+            this->SetGlobalName(i, std::format("arg{}", i));
+        }
+    }
+
+    std::unordered_map<SSARef, std::vector<LiftedInstruction *>> users;
 };
 
 inline std::string BlockTypeToString(BlockType type) {

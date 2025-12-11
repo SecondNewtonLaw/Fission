@@ -176,7 +176,7 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     const auto ssaEnd = std::chrono::steady_clock::now();
 
     const auto astStart = std::chrono::steady_clock::now();
-    const auto liftedAST = ASTLifter.LiftFunction(&controlFlowAnalyzedFunction);
+    const auto liftedAST = ASTLifter.Lift(controlFlowAnalyzedFunction);
     const auto astEnd = std::chrono::steady_clock::now();
 
     RootNode root{liftedAST.statements};

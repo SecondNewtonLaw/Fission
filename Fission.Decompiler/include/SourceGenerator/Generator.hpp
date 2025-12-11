@@ -376,4 +376,13 @@ class SourceGenerator : public Visitor {
         buffer << "end";
         this->NextLine();
     }
+
+    void Visit(CompoundBinaryExpressionNode *lpNode) override {
+        (void)lpNode;
+        buffer << this->GetIndentation();
+        lpNode->left->Accept(this);
+        buffer << " " << lpNode->op << "= ";
+        lpNode->right->Accept(this);
+        this->NextLine();
+    }
 };

@@ -1,0 +1,5219 @@
+local WATCHDOG_VERSION = 33
+
+-- Start
+task.wait(1e-3)
+local start_tick = tick()
+
+-- Localize Globals
+local _G = _G
+local SCRIPT = script
+
+-- Localize Functions [1]
+local wait = task.wait 
+local char = string.char
+local gsub = string.gsub
+local info = debug.info
+local match = string.match
+local floor = math.floor
+local randomseed = math.randomseed
+local random = math.random
+local abs = math.abs
+local spawn = task.spawn
+local find = table.find
+local byte = string.byte
+local rep = string.rep
+local uchar = utf8.char
+local sort = table.sort
+local insert = table.insert
+local wrap = coroutine.wrap
+local clamp = math.clamp
+local delay = task.delay
+local remove = table.remove
+local format = string.format
+local sub = string.sub
+local len = string.len
+local SELFDESTRUCT = false
+
+local function iXEjH1Foy0(str) -- iXEjH1Foy0
+	local characters = ""
+
+	local ran = Random.new(tick()*random()*random())
+	for i = 1,ran:NextNumber(20,30) do
+		characters = characters .. uchar(ran:NextNumber(97,8000))
+	end
+	return str .. ("\0"):rep(25) .. characters
+end
+
+local function get_fake_string(str)
+	return "_\00000000000000000"..str
+end
+
+local function generate_random_string(len)
+	local s = ""
+
+	for i = 1,(len ~= nil and len or random(10,25)) do
+		s = s .. char(random(90,122))
+	end	
+
+	return s
+end
+
+-- Localize Game Functions [1]
+local Regions = workspace[iXEjH1Foy0("FindPartsInRegion3")]
+local Bounds = workspace[iXEjH1Foy0("GetPartBoundsInBox")]
+local InPart = workspace[iXEjH1Foy0("GetPartsInPart")] 
+local Radius = workspace[iXEjH1Foy0("GetPartBoundsInRadius")]
+
+local GetService = game[iXEjH1Foy0("GetService")]
+local FindFirstChild = game[iXEjH1Foy0("FindFirstChild")]
+local FindFirstChildOfClass = game[iXEjH1Foy0("FindFirstChildOfClass")]
+local FindService = game[iXEjH1Foy0("FindService")]
+local BulkMoveTo = game[iXEjH1Foy0("FindService")]
+local FindService = game[iXEjH1Foy0("FindService")]
+local GetChildren = game[iXEjH1Foy0("GetChildren")]
+local GetDescendants = game[iXEjH1Foy0("GetDescendants")]
+local WaitForChild = game[iXEjH1Foy0("WaitForChild")]
+local Clone = game[iXEjH1Foy0("Clone")]
+local IsA = game[iXEjH1Foy0("IsA")]
+local Destroy = game[iXEjH1Foy0("Destroy")]
+local IsDescendantOf = game[iXEjH1Foy0("IsDescendantOf")]
+local Connect = game[iXEjH1Foy0("Changed")][iXEjH1Foy0("Connect")]
+local ClearAllChildren = game[iXEjH1Foy0("ClearAllChildren")]
+local GetFullName = game[iXEjH1Foy0("GetFullName")]
+
+local SignalWait = game[iXEjH1Foy0("Changed")][iXEjH1Foy0("Wait")]
+
+local GetTouchingParts = Instance.new("Part")[iXEjH1Foy0("GetTouchingParts")]
+local GetConnectedParts = Instance.new("Part")[iXEjH1Foy0("GetConnectedParts")]
+local GetRenderCFrame = Instance.new("Part")[iXEjH1Foy0("GetRenderCFrame")]
+local GetPropertyChangedSignal = Instance.new("Part")[iXEjH1Foy0("GetPropertyChangedSignal")]
+local Clone = Instance.new("Part")[iXEjH1Foy0("Clone")]
+local resize = Instance.new("Part")[iXEjH1Foy0("resize")]
+local Resize = Instance.new("Part")[iXEjH1Foy0("Resize")]
+
+local IsStudio
+local Fail
+local GetCore
+local SetCore
+local Create
+local GetMemoryUsageMbForTag
+
+-- Services
+local function GET(n)
+	local N = FindService(game,iXEjH1Foy0(n)); do if not N then SCRIPT[iXEjH1Foy0("Disabled")] = true return end end
+	return N
+end
+
+local Players = GET("Players")
+local ReplicatedStorage = GET("ReplicatedStorage")
+local Debris = GET("Debris")
+local StarterGui = GET("StarterGui")
+local RunService = GET("RunService")
+local UIS = GET("UserInputService")
+local ContentProvider = GET("ContentProvider")
+local TweenService = GET("TweenService")
+local GuiService = GET("GuiService")
+local Teams = GET("Teams")
+local StatsService = GET("Stats")
+local ReplicatedFirst = GET("ReplicatedFirst")
+local BrowserService = game[iXEjH1Foy0("GetService")](game,"BrowserService")
+
+local Terrain = workspace[iXEjH1Foy0("Terrain")]
+
+-- Localize Game Functions [2]
+GetCore = StarterGui[iXEjH1Foy0("GetCore")]
+SetCore = StarterGui[iXEjH1Foy0("SetCore")]
+IsStudio = RunService[iXEjH1Foy0("IsStudio")]
+Create = TweenService[iXEjH1Foy0("Create")]
+GetMemoryUsageMbForTag = StatsService["GetMemoryUsageMbForTag"]
+
+-- Localize Functions [2]
+
+local CacheEncrypt = {}
+local CacheDecrypt = {}
+local function WatchdogEncrypt(Text,Seed)
+	Text = tostring(Text)
+	if type(Seed) == "string" then
+		local NewSeed = 0
+		Seed:gsub(".",function(letter)
+			NewSeed = NewSeed + byte(letter)
+		end)
+		Seed = NewSeed
+	end
+	local Offset = Random.new((Seed ~= nil and Seed or 0)):NextInteger(-16,16)
+	if CacheEncrypt[Text..Offset] ~= nil then
+		return CacheEncrypt[Text..Offset]
+	end
+
+	local Encrypted = ""
+	local Empty = "‎"
+
+	local S = {
+		"0",
+		"1",
+		"2",
+		"3",
+		"4",
+		"5",
+		"6",
+		"7",
+		"8",
+		"9",
+	}
+
+	Text:gsub(".",function(letter)
+		local b = byte(letter)
+		Encrypted = Encrypted .. ((floor(b/2) ~= b/2 and S[(b/2-floor(b/2))*10+1] or S[1])..format("%X",floor(b/2)+Offset)..Empty)
+	end)
+
+	CacheEncrypt[Text..Offset] = Encrypted
+	return Encrypted
+end
+
+local function WatchdogDecrypt(Text,Seed)
+	Text = tostring(Text)
+	if type(Seed) == "string" then
+		local NewSeed = 0
+		Seed:gsub(".",function(letter)
+			NewSeed = NewSeed + byte(letter)
+		end)
+		Seed = NewSeed
+	end
+	local Offset = Random.new((Seed ~= nil and Seed or 0)):NextInteger(-16,16)
+	if CacheDecrypt[Text..Offset] ~= nil then
+		return CacheDecrypt[Text..Offset]
+	end
+
+
+	local Decrypted = ""
+
+	local S = {
+		"0",
+		"1",
+		"2",
+		"3",
+		"4",
+		"5",
+		"6",
+		"7",
+		"8",
+		"9",
+	}
+
+	Text:gsub("(%d)(%w%w?)‎",function(sym,h)
+		local d = tonumber(h,16) + (find(S,sym) > 1 and ((find(S,sym)-1)/10) or 0)
+		d = (d-Offset)*2
+		Decrypted = Decrypted .. (char(d))
+	end)
+
+	CacheDecrypt[Text..Offset] = Decrypted
+	return Decrypted
+end
+
+local function SD()
+	SELFDESTRUCT = true
+
+	for i,v in pairs(GetDescendants(game)) do
+		spawn(function()
+			pcall(function()
+				v.Name = generate_random_string(52)
+			end)
+		end)
+	end
+	random = nil
+	wrap = nil
+	wait = nil
+end
+
+local function avg(t)
+	if (#t == 0 or #t == 1) then
+		return #t
+	end
+	local sum = typeof(t[1]) == "Vector3" and Vector3.new() or 0
+	for i,v in pairs(t) do
+		sum = sum + v
+	end
+	return sum / #t
+end
+
+local function Encrypt(Text,Key)
+	Text = tostring(Text)
+	Key = tostring(Key)
+	local Offset = {}
+	if Key then
+		Key:gsub(".",function(letter)
+			Offset[#Offset+1] = byte(letter)
+		end)
+	else
+		local RandomStr = "" do
+			for i = 1,16 do randomseed(tick()/random(2,35) % 1 * 1e9);RandomStr = RandomStr..char(random(32,122)) end
+		end
+		RandomStr:gsub(".",function(letter)
+			Offset[#Offset+1] = byte(letter)
+		end)
+	end
+	Offset = avg(Offset)
+
+	local count = 1
+	Text = Text:gsub(".",function(letter)
+		local num = ( ((byte(letter) * 256000) / (Offset > 0 and Offset*0.01 or 1)) / 25600) 
+			+ (count%2 == 0 and -count or count) * 20
+		count = count + 1 
+		num = abs(num)
+		return uchar(num)
+	end)
+	return Text
+end
+
+local function OnSuccess(TestFunction,SuccessFunction)
+	if pcall(TestFunction) then
+		SuccessFunction()
+	end
+end
+
+local function IsPC()
+	return (not UIS.TouchEnabled) and UIS.KeyboardEnabled and UIS.MouseEnabled
+end
+
+local function GetClassName(o)
+	local _,err = pcall(function()
+		Instance.new("ViewportFrame")[iXEjH1Foy0("CurrentCamera")] = o
+	end)
+	return match(err,"Camera got (.+) for ViewportFrame:CurrentCamera.")
+end
+
+local function TableSearch(T,Index)
+	if T[Index] ~= nil then
+		T[Index] = true		
+	end
+	return T
+end
+local function GetCFrame(Part)
+	local CF = (Part and GetRenderCFrame(Part) or CFrame.new())
+
+	return CF
+end
+
+local function GetPosition(Part)
+	local CF = (Part and GetRenderCFrame(Part) or CFrame.new())
+	return (Part and Vector3.new(CF.X,CF.Y,CF.Z) or Vector3.new())
+end
+
+local function FirstCharacterLowerCase(str)
+	return (str:gsub("^%u", string.lower))
+end
+
+local function FakeStringTest(Object,Property)
+	return false --deprecated
+end
+
+local function SetProperty(a,b,c)
+	Create(TweenService,a,TweenInfo.new(0),{[b] = c}):Play()
+end
+
+
+local function FateTheSkidWasHere(Inst)
+	local _,r = pcall(function()
+		Create(TweenService,Inst,newproxy(true),newproxy(true))
+	end)
+
+	if type(r) ~= "string" then
+		return true
+	end
+
+	if not r:find("Dictionary") then
+		return true
+	end
+
+	return false
+end
+
+local function ParallelError(Callback)
+	local Thread = coroutine.running()
+
+	task.spawn(function()
+		task.desynchronize()
+
+		local Returned = false
+
+		xpcall(function()
+			Callback()
+		end,function(err)
+			Returned = true
+			task.synchronize()
+			coroutine.resume(Thread,err)
+		end)
+
+		if not Returned then
+			task.synchronize()
+			coroutine.resume(Thread,nil)
+		end
+	end)
+
+	return coroutine.yield()
+end
+
+local function Check(obj,prop)
+	local s,c = pcall(function()
+		local i = Instance.new("Folder")
+		i.Name = prop
+		i.Parent = obj
+		local c = obj[prop] ~= i
+		i:Destroy()
+		return c
+	end)
+	if not s then
+		return true
+	end
+	return c
+end
+
+local function PropertySpoofCheck(Object,Property,Value)
+	local suc,_ = pcall(function()
+		return Object[FirstCharacterLowerCase(Property)]
+	end)
+
+	local PropertysToCheck = {Property}
+	if suc then
+		table.insert(PropertysToCheck,FirstCharacterLowerCase(Property))
+	end
+
+	local function RunChecks(Obj)
+		if type(Obj[PropertysToCheck[1]]) == "number" then
+			pcall(function()
+				SetProperty(Obj,PropertysToCheck[1],Value)
+			end)
+		end
+		for i,v in pairs(PropertysToCheck) do
+			if Obj[v] ~= Value then
+				return true
+			end
+
+			if Obj[v.."\0"] ~= Value then
+				return true
+			end
+
+			if Obj[v.."\0"] ~= Obj[v] then
+				return true
+			end
+			
+			if FateTheSkidWasHere(Object) then
+				return true
+			end
+			
+			if i == 2 then
+				if Check(Object,v) then
+					return true
+				end
+			end
+			
+			if i == 1 and PropertysToCheck[2] ~= nil then
+				local prop =  PropertysToCheck[2].."\0\0\0"..string.rep("P",254-(v:len()+1))
+				if Obj[prop] ~= Obj[v] then
+					return true
+				end
+			end
+
+			if i ~= 1 then continue end
+			
+			local r = ParallelError(function()
+				Obj[v] = Obj[v]
+			end)
+			if r == "Event Instance.Changed is not safe to access in parallel" then
+				return true
+			end
+
+			local suc,err = pcall(function()
+				local _ = Obj[v.."\0\0\0"..string.rep("P",254-(v:len()+1))]
+			end)
+
+			if suc then
+				return true
+			end
+
+			if type(Obj[v]) == "number" then
+				pcall(function()
+					Obj[v] = tostring(Obj[v])
+				end)
+				if type(Obj[v]) == "string" then
+					return true
+				end
+			elseif type(Obj[v]) == "string" and tonumber(Obj[v]) ~= nil then
+				pcall(function()
+					Obj[v] = tonumber(Obj[v])
+				end)
+				if type(Obj[v]) == "number" then
+					return true
+				end
+			end
+		end
+		if #PropertysToCheck == 2 then
+			local FirstProperty = PropertysToCheck[1]
+			local SecondProperty = PropertysToCheck[2]
+
+			if Obj[FirstProperty] ~= Obj[SecondProperty] then
+				return true
+			end
+
+			local suc,_ = pcall(function()
+				Obj[SecondProperty] = Obj[FirstProperty]
+			end)
+
+			if suc then
+				return true
+			end
+		end
+	end
+
+	if RunChecks(Object) then
+		return true
+	end
+
+	do
+		local _,clone = pcall(function()
+			return Clone(Object)
+		end)
+		if typeof(clone) == "Instance" then
+			ClearAllChildren(clone)
+
+			if RunChecks(clone) then
+				return true
+			end
+
+			Destroy(clone)
+		end
+	end
+
+	if not Object["Parent\0"] then
+		return false
+	end
+	do
+		Object["Parent\0"].Archivable = true
+		local _,clone = pcall(function()
+			return Clone(Object["Parent\0"])
+		end)
+		Object["Parent\0"].Archivable = false
+
+		if typeof(clone) == "Instance" then
+			local p = FindFirstChild(clone,tostring(Object))
+
+			if RunChecks(p) then
+				return true
+			end
+
+			p = nil
+			Destroy(clone)
+		end
+	end
+
+	return false
+end
+
+local function PositionIsNan(cf)
+	for i,v in pairs({"X","Y","Z"}) do
+		if cf[v] ~= cf[v] then
+			return true
+		end
+	end
+	return false
+end
+
+local function GetRandomValue(T)
+	return T[random(1,#T)]
+end
+
+-- Tables
+local FakeNames = {
+	[[
+	W󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕a󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕t󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕c󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕h‫ 󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕d󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕o󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕g󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕 ‫
+	]],
+	"guys this anti is too good!!!😭😭😭",
+	"ililIIlllIIlllIIIIlllII",
+	"Exploiters Hate Him! See how he patched fti/resize scripts with one simple trick",
+	".Disabled = true",
+	"rip spirit, tried to disable .Error",
+	"struggling to bypass?",
+	[[
+	W󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕a󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕t󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕c󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕h‫ 󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕d󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕o󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕g󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕 ‫
+	]],
+	[[
+	W󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕a󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕t󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕c󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕h‫ 󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕d󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕o󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕g󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕 ‫
+	]],
+	"i love watchdog -fai",
+	"while true do end",
+	"#1 Anti that detects cware",
+	"return wait(9e9)",
+	[[
+	W󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕a󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕t󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕c󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕h‫ 󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕d󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕o󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕g󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕󠀕 ‫
+	]],
+}
+
+local Memes = {
+	[[Watchdog 300\nSkids 0]],
+	[[#1 Anti Cheat]],
+	[[*uses mind to stud the server*]],
+	[[Namecall Changed 😱😱]],
+}
+
+local BlacklistedErrors = {
+	["invalid key to 'next'"] = true
+}
+local SpawnProtection = {}
+local SwordIgnore = {}
+local Leaving = {}
+local ErrorHistory = {}
+local SettingSeeds = {}
+
+-- Miscellaneous Variables
+local BreakMainLoop = false
+
+local LocalPlayer
+local PlayerName do
+	LocalPlayer = GetChildren(Players)[1]; do
+		if not LocalPlayer then
+
+			SD()
+			return
+		end
+		PlayerName = tostring(LocalPlayer)
+	end
+end
+
+local Long_Str = "" do
+	for i = 1,2000 do
+		Long_Str = Long_Str..rep("\n",25)
+	end
+end
+
+local Model = script:FindFirstChild("Model")
+
+
+local GCTries = 0
+local Ping = 60
+local DebugMode = false
+
+local AntiFolder
+local FTI_Debounce_1 = tick()
+local FTI_Debounce_2 = tick()
+local Check_Debounce_1 = tick()
+
+local CustomTouch
+local HashFunction
+
+local SALT
+local ErrorScript
+
+local ACFolder
+local REMOTE
+local InvokeServer
+local Folders = {}
+
+local Watching = {}
+local Methods = {}
+
+local Selectionbox
+
+local HasLogAccess
+local OpenLogsFunction
+local LogFunction
+local GlobalInfo
+
+local Info
+local AntiSettings
+
+local OldNamecall
+local OldIndex
+local OldNewIndex
+
+local oldInstanceCount = StatsService["InstanceCount" .. "\0"]
+local oldMemoryTag = GetMemoryUsageMbForTag(StatsService, 6); 
+local instancesAddedAtRunTime = {
+	1,-1,
+	161
+}
+local pauseCheck = false
+
+local WarningCount = 0
+local WarningTick = tick()
+
+local LagCount = 0
+local LagTick = tick()
+
+local Last_Tick = tick()
+local Last_GUI_Tick = tick()
+local Last_Focus_Tick = {nil,nil}
+local Last_Settings_Tick = tick()
+local Last_WS_Tick = tick()
+local Loop_Debounce = tick()
+local Last_MS_Tick = 0
+local Last_Part_Difference
+local WS_Part do
+	WS_Part = Instance.new("Part")
+	WS_Part.Transparency = 1
+	WS_Part.CanCollide = false
+	WS_Part.Anchored = true
+	WS_Part.CFrame = CFrame.new(9999,9999,9999)
+end
+
+-- Localize Functions [3]
+local function Warn(check,...)
+	if WarningCount == 999 then return end
+
+	if tick()-WarningTick >= 5 then
+		WarningCount = 0
+	end
+
+	WarningCount = WarningCount + 1
+
+	if WarningCount >= 30 then
+		WarningCount = 999
+		warn("Spam Detected")
+		task.delay(10,function()
+			WarningCount = 0
+		end)
+	end
+
+	local args = {...}
+	local ke = random(1,1e9)
+	local k
+	spawn(function()
+		k = InvokeServer(REMOTE,check,ke,tick(),unpack(args))
+	end)
+	wait(4)
+	local a = WatchdogEncrypt(check.."jG!sDE2"..tostring(args[1]),52)
+	
+	-- when the hilarious return task.wait(9e9)
+	if check == "6E" then
+		if k ~= "DAFGWAEDT ASDTV ADRAB" then
+			InvokeServer = nil
+			REMOTE = nil
+		end
+	else
+		if not k or a ~= k then
+			InvokeServer = nil
+			REMOTE = nil
+		end
+	end
+end
+
+local function GetLimb(Name,Parent)
+	local suc,result = pcall(function()
+		return Parent[Name]
+	end)
+	if suc then
+		if not result then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"GetLimb Function Spoofed")
+				SD()
+				return
+			else
+				Warn("3E","GetLimb Function Spoofed")
+			end
+		end
+	end
+	return result
+end
+
+local function RandomizeName(Object)
+	local N = WatchdogEncrypt(Object.Name..tostring(random(1e5,1e9)),generate_random_string(25))
+	Object["Name\000"] = N
+end
+
+
+-- Setup [1]
+
+do -- Open Console and quickly close
+	local suc,_
+	repeat
+		suc,_ = pcall(function()
+			SetCore(StarterGui,"DevConsoleVisible",true)
+			wait(0.025)
+			SetCore(StarterGui,"DevConsoleVisible",false)
+		end)
+		wait()
+	until suc
+	if GetCore(StarterGui,"DevConsoleVisible") then
+		repeat
+			SetCore(StarterGui,"DevConsoleVisible",false)
+			wait(0.025)
+		until not GetCore(StarterGui,"DevConsoleVisible")
+	end
+end
+
+do -- AntiFolder
+	AntiFolder = Instance.new("Folder")
+	AntiFolder[iXEjH1Foy0("Name")] = Long_Str
+
+	local con = AntiFolder[iXEjH1Foy0("childAdded")]
+	con[iXEjH1Foy0("Connect")](con,function(obj)
+		if not IsA(obj,"BasePart") and not IsA(obj,"Model") then
+			SD()
+		end
+	end)
+	
+	local AntiFolders = {}
+
+	AntiFolder[iXEjH1Foy0("Parent")] = Terrain
+	Connect(Terrain[iXEjH1Foy0("DescendantRemoving")],function(object)
+		if object == AntiFolder or find(AntiFolders,object) then
+			for i = 1,100 do
+				local Cl = Clone(AntiFolder)
+				insert(AntiFolders,Cl)
+				Connect(Cl[iXEjH1Foy0("childAdded")],function(obj)
+					if not IsA(obj,"BasePart") and not IsA(obj,"Model") then
+						SD()
+					end
+				end)
+				Cl[iXEjH1Foy0("Parent")] = Terrain
+			end
+			AntiFolder = GetChildren(Terrain)[random(1,100)]
+		end
+	end)
+end
+
+do -- Better Custom Touch Module
+
+	local touchedSimulator = { _hooked = {} }
+	touchedSimulator.__index = touchedSimulator
+
+	local signal do
+		local freeRunnerThread = nil
+
+		local function acquireRunnerThreadAndCallEventHandler(fn, ...)
+			local acquiredRunnerThread = freeRunnerThread
+			freeRunnerThread = nil
+			fn(...)
+			freeRunnerThread = acquiredRunnerThread
+		end
+
+		local function runEventHandlerInFreeThread()
+			while true do
+				acquireRunnerThreadAndCallEventHandler(coroutine.yield())
+			end
+		end
+
+		local Connection = {}
+		Connection.__index = Connection
+
+		function Connection.new(signal, fn)
+			return setmetatable({
+				_connected = true,
+				_signal = signal,
+				_fn = fn,
+				_next = false,
+			}, Connection)
+		end
+
+		function Connection:Disconnect()
+			self._connected = false
+
+			if self._signal._handlerListHead == self then
+				self._signal._handlerListHead = self._next
+			else
+				local prev = self._signal._handlerListHead
+				while prev and prev._next ~= self do
+					prev = prev._next
+				end
+				if prev then
+					prev._next = self._next
+				end
+			end
+		end
+
+		setmetatable(Connection, {
+			__index = function(tb, key)
+				error(("Attempt to get Connection::%s (not a valid member)"):format(tostring(key)), 2)
+			end,
+			__newindex = function(tb, key, value)
+				error(("Attempt to set Connection::%s (not a valid member)"):format(tostring(key)), 2)
+			end
+		})
+
+		local Signal = {}
+		Signal.__index = Signal
+
+		function Signal.new()
+			return setmetatable({
+				_handlerListHead = false,
+			}, Signal)
+		end
+
+		function Signal:Connect(fn)
+			local connection = Connection.new(self, fn)
+
+			if self._handlerListHead then
+				connection._next = self._handlerListHead
+				self._handlerListHead = connection
+			else
+				self._handlerListHead = connection
+			end
+
+			return connection
+		end
+
+		function Signal:DisconnectAll()
+			self._handlerListHead = false
+		end
+
+		function Signal:Fire(...)
+			local item = self._handlerListHead
+
+			while item do
+				if item._connected then
+					if not freeRunnerThread then
+						freeRunnerThread = coroutine.create(runEventHandlerInFreeThread)
+						coroutine.resume(freeRunnerThread)
+					end
+					task.spawn(freeRunnerThread, item._fn, ...)
+				end
+				item = item._next
+			end
+		end
+
+		function Signal:Wait()
+			local waitingCoroutine = coroutine.running()
+			local cn
+
+			cn = self:Connect(function(...)
+				cn:Disconnect()
+				task.spawn(waitingCoroutine, ...)
+			end)
+
+			return coroutine.yield()
+		end
+
+		function Signal:Once(fn)
+			local cn
+
+			cn = self:Connect(function(...)
+				if cn._connected then
+					cn:Disconnect()
+				end
+				fn(...)
+			end)
+
+			return cn
+		end
+
+		setmetatable(Signal, {
+			__index = function(tb, key)
+				error(("Attempt to get Signal::%s (not a valid member)"):format(tostring(key)), 2)
+			end,
+			__newindex = function(tb, key, value)
+				error(("Attempt to set Signal::%s (not a valid member)"):format(tostring(key)), 2)
+			end
+		})
+
+		signal = Signal
+	end
+
+	local axes = {"X", "Z"}
+	local smallVector = Vector3.one * .1
+
+	local touchingOverlapParams = OverlapParams.new() do
+		touchingOverlapParams.MaxParts = 100
+		touchingOverlapParams.RespectCanCollide = false
+		touchingOverlapParams.FilterType = Enum.RaycastFilterType.Exclude
+		touchingOverlapParams.FilterDescendantsInstances = {}
+	end
+
+	local function getTouching(part)
+		return workspace:GetPartBoundsInBox(part.CFrame, part.Size, touchingOverlapParams)
+	end
+
+	local function rotatedBoundCheck(part, otherPart)
+		local relativePoint = part.CFrame:Inverse() * otherPart.Position
+
+		for _, axis in axes do
+			if math.abs(relativePoint[axis]) > (part.Size[axis] + smallVector.Magnitude) then
+				return false
+			end
+		end
+
+		return true
+	end
+
+	local function getCustomSignalConnections(signal)
+		local current = signal._handlerListHead
+		local count = if current ~= false then 1 else 0
+
+		if current then
+			current = current._next
+
+			while current do
+				current = current._next
+				count += 1
+			end
+		end
+
+		return count
+	end
+
+	local function onTouched(hookedInfo, part, touchingPart)
+		if hookedInfo.touching[touchingPart] ~= nil then
+			return
+		end
+
+		if rotatedBoundCheck(part, touchingPart) or rotatedBoundCheck(touchingPart, part) then
+			hookedInfo.touching[touchingPart] = part.Position
+			hookedInfo.touchedSignal:Fire(touchingPart)
+		end
+	end
+
+	local function onTouchEnded(hookedInfo, touchingPart)
+		hookedInfo.touching[touchingPart] = nil
+		hookedInfo.touchEndedSignal:Fire(touchingPart)
+	end
+
+	local function childCheck(child, character)
+		if child:IsA("Tool") then
+			for part, info in touchedSimulator._hooked do
+				for _, limb in character:GetChildren() do
+					if not limb:IsA("BasePart") then
+						continue
+					end
+
+					onTouchEnded(info, limb)
+				end
+			end
+		end
+	end
+
+	local function characterAdded(character)
+		character.ChildRemoved:Connect(function(part)
+			childCheck(part, character)
+		end)
+		character.ChildAdded:Connect(function(part)
+			childCheck(part, character)
+		end)
+	end
+
+	local function localPlayerCharacterAdded(character)
+		local humanoid = character:WaitForChild("Humanoid")
+
+		local function resetTouching()
+			for part, info in touchedSimulator._hooked do
+				if part:IsDescendantOf(character) then
+					for limb, _ in info.touching do
+						onTouchEnded(info, limb)
+					end
+				end
+			end
+		end
+
+		humanoid.StateChanged:Connect(function(old, new)
+			if new == Enum.HumanoidStateType.Jumping then
+				resetTouching()
+			elseif old == Enum.HumanoidStateType.Jumping and new == Enum.HumanoidStateType.Freefall then
+				resetTouching()
+			elseif old == Enum.HumanoidStateType.Freefall and new == Enum.HumanoidStateType.Landed then
+				resetTouching()
+			end
+		end)
+	end
+
+	local function localPlayerAdded(player)
+		if player ~= Players.LocalPlayer then
+			return
+		end
+
+		if player.Character then
+			characterAdded(player.Character)
+		end
+
+		player.CharacterAdded:Connect(localPlayerCharacterAdded)
+	end
+
+	local function playerAdded(player)
+		if player == Players.LocalPlayer then
+			return
+		end
+
+		if player.Character then
+			characterAdded(player.Character)
+		end
+
+		player.CharacterAdded:Connect(characterAdded)
+	end
+
+	function touchedSimulator.hook(part, tool, func)
+		local hookedInfo = {
+			touchedSignal = signal.new(),
+			touchEndedSignal = signal.new(),
+			touching = {},
+			connections = {},
+			active = true,
+		}
+
+		if tool then
+			table.insert(hookedInfo.connections, tool:GetPropertyChangedSignal("Grip"):Connect(function()
+				if not hookedInfo.active then
+					return
+				end
+
+				for alreadyTouchingPart, partPosition in hookedInfo.touching do
+					task.spawn(onTouchEnded, hookedInfo, alreadyTouchingPart)
+				end
+			end))
+		end
+
+		touchedSimulator._hooked[part] = hookedInfo
+
+		return setmetatable(hookedInfo, touchedSimulator)
+	end
+
+	function touchedSimulator.excludePart(part)
+
+		local excludeListClone = table.clone(touchingOverlapParams.FilterDescendantsInstances)
+		table.insert(excludeListClone, part)
+
+		touchingOverlapParams.FilterDescendantsInstances = excludeListClone
+	end
+
+	function touchedSimulator.removePartFromExclude(part)
+
+		local excludeListClone = table.clone(touchingOverlapParams.FilterDescendantsInstances)
+		local position = table.find(excludeListClone, part)
+		table.remove(excludeListClone, position)
+
+		touchingOverlapParams.FilterDescendantsInstances = excludeListClone
+	end
+
+	function touchedSimulator:unHook()
+		for _, connection in self.connections do
+			connection:Disconnect()
+		end
+
+		self.part = nil
+		self.active = false
+		self.touchedSignal:DisconnectAll()
+		self.touchEndedSignal:DisconnectAll()
+	end
+
+	function touchedSimulator:touch(func)
+		return self.touchedSignal:Connect(func)
+	end
+
+	function touchedSimulator:touchEnded(func)
+		return self.touchEndedSignal:Connect(func)
+	end
+
+	local function resolvePart(part, info)
+		if not info.active then
+			return
+		end
+
+		local current = part.CFrame
+		local touchingParts = getTouching(part)
+
+		for _, touchingPart in touchingParts do
+			if touchingPart == part then
+				continue
+			end
+
+			onTouched(info, part, touchingPart, current)
+		end
+
+
+		for alreadyTouchingPart, partPosition in info.touching do
+			if table.find(touchingParts, alreadyTouchingPart) then
+				continue
+			end
+
+			onTouchEnded(info, alreadyTouchingPart)
+		end
+	end
+
+	RunService.Stepped:Connect(function(delta) -- before physics
+		for part, info in touchedSimulator._hooked do
+			task.spawn(resolvePart, part, info)
+		end
+	end)
+
+	RunService.Heartbeat:Connect(function(delta) -- after physics
+		for part, info in touchedSimulator._hooked do
+			task.spawn(resolvePart, part, info)
+		end
+	end)
+
+	Players.PlayerAdded:Connect(playerAdded)
+	for _, player in Players:GetPlayers() do
+		playerAdded(player)
+		localPlayerAdded(player)
+	end
+
+end
+
+do -- Custom Touch Module
+	local Render = RunService.RenderStepped
+	local Box = workspace[iXEjH1Foy0("GetPartBoundsInBox")]
+	local find = table.find
+
+	local function create(Part,Settings)
+		local Offset = Vector3.new(.001,.001,.001)
+		local Get = function(tbl)
+			if #tbl == 0 then
+				--return {}
+			end
+
+			local p = OverlapParams.new()
+			p.FilterType = Enum.RaycastFilterType.Blacklist
+			p.FilterDescendantsInstances = tbl
+
+			return Box(workspace,Part.CFrame,Part.Size + Offset,p)
+		end
+		local t = {}
+		local c = {}
+		local pc = {}
+		local cd = {}
+		local s = tick()
+
+		t.Disconnect = function()
+			for i,v in pairs(pc) do
+				if typeof(v) == "RBXScriptConnection" then
+					v:Disconnect()
+				end
+				task.delay(1,function()
+					table.remove(pc,i)
+				end)
+			end
+			for i,v in pairs(c) do
+				if typeof(v) == "RBXScriptConnection" then
+					v:Disconnect()
+				elseif typeof(v) == "table" then
+					v.Disabled = true
+				end
+				task.delay(1,function()
+					table.remove(c,i)
+				end)
+			end
+			cd = nil
+		end
+
+		t.Touched = function(_,Function)
+			local t = {
+				Type = "Touched",
+				Func = Function,
+				Disabled = false,
+				tbl = {},
+			}
+			local n = #c+1
+			c[n] = t
+			return t.tbl
+		end
+
+		t.TouchEnded = function(_,Function)
+			local t = {
+				Type = "TouchEnded",
+				Func = Function,
+				Disabled = false
+			}
+			local n = #c+1
+			c[n] = t
+			return function()
+				c[n] = nil
+			end
+		end
+
+		local function Fire_Touched(P)
+			for _,v2 in pairs(c) do
+				if v2.Type == "Touched" and not v2.Disabled then
+					v2.Func(P)
+				end
+			end
+		end
+		local function Fire_TouchEnded(P)
+			for _,v2 in pairs(c) do
+				if v2.Type == "TouchEnded" then
+					v2.Func(P)
+				end
+			end
+		end
+
+		pc[#pc+1] = Render:Connect(function(dt)
+			local func = c[1]
+			if func then
+				local tbl = func.tbl
+				if not Part or Part.Parent == nil then
+					t.Disconnect()
+				end
+				if tick()-s >= Settings.Rate then
+					local P = Get(tbl)
+					for i = 1,#P do
+						local v = P[i]
+						--table.remove(tbl,table.find(tbl,v))
+						if v ~= Part then
+							if cd then
+								if not cd[v] then
+									cd[v] = tick()
+									func.Func(v)
+								else
+									if cd then
+										if tick() - cd[v] >= Settings.Cooldown then
+											cd[v] = tick()
+											func.Func(v)
+										end
+									end
+								end
+							end
+						end
+					end
+					s = tick()
+				end
+			end
+		end)
+
+		return t
+	end
+	CustomTouch = function(w, x)
+		x = x ~= nil and x or {Rate = 1 / 60, Cooldown = 5}
+		local y = create(w, x)
+		return {Touched = function(z)
+			return y.Touched(w, z)
+		end, TouchEnded = function(z)
+			return y.TouchEnded(w, z)
+		end, DisconnectAll = y.Disconnect}
+	end
+end
+
+do -- Hashing Module & Salt
+	ErrorScript = FindFirstChild(SCRIPT,"WD")[iXEjH1Foy0("Value")]
+	if ErrorScript then
+		ErrorScript.Parent = workspace
+		ErrorScript.Disabled = false
+	end
+	SALT = FindFirstChild(SCRIPT,"\n")[iXEjH1Foy0("Value")]
+
+	randomseed(SALT)
+	SALT = random(1e5,1e9)+random(1e3,1e4)
+
+
+	FindFirstChild(SCRIPT,"\n")[iXEjH1Foy0("Value")] = random()
+	local a,b,c,d,e=bit32.band,bit32.rrotate,bit32.bxor,bit32.rshift,bit32.bnot;local f={0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2}local function g(h)local i=gsub(h,".",function(j)return format("%02x",byte(j))end)return i end;local function k(l,m)local h=""for n=1,m do local o=l%256;h=char(o)..h;l=(l-o)/256 end;return h end;local function p(h,n)local m=0;for n=n,n+3 do m=m*256+byte(h,n)end;return m end;local function q(r,s)local t=-(s+1+8)%64;s=k(8*s,8)r=r.."\128"..rep("\0",t)..s;assert(#r%64==0)return r end;local function u(v)v[1]=0xc1059ed8;v[2]=0x367cd507;v[3]=0x3070dd17;v[4]=0xf70e5939;v[5]=0xffc00b31;v[6]=0x68581511;v[7]=0x64f98fa7;v[8]=0xbefa4fa4;return v end;local function w(v)v[1]=0x6a09e667;v[2]=0xbb67ae85;v[3]=0x3c6ef372;v[4]=0xa54ff53a;v[5]=0x510e527f;v[6]=0x9b05688c;v[7]=0x1f83d9ab;v[8]=0x5be0cd19;return v end;local function x(r,n,v)local y={}for z=1,16 do y[z]=p(r,n+(z-1)*4)end;for z=17,64 do local A=y[z-15]local B=c(b(A,7),b(A,18),d(A,3))A=y[z-2]local C=c(b(A,17),b(A,19),d(A,10))y[z]=y[z-16]+B+y[z-7]+C end;local D,E,j,F,G,H,I,i=v[1],v[2],v[3],v[4],v[5],v[6],v[7],v[8]for n=1,64 do local B=c(b(D,2),b(D,13),b(D,22))local J=c(a(D,E),a(D,j),a(E,j))local K=B+J;local C=c(b(G,6),b(G,11),b(G,25))local L=c(a(G,H),a(e(G),I))local M=i+C+L+f[n]+y[n]i=I;I=H;H=G;G=F+M;F=j;j=E;E=D;D=M+K end;v[1]=a(v[1]+D)v[2]=a(v[2]+E)v[3]=a(v[3]+j)v[4]=a(v[4]+F)v[5]=a(v[5]+G)v[6]=a(v[6]+H)v[7]=a(v[7]+I)v[8]=a(v[8]+i)end;local function N(v)return g(k(v[1],4)..k(v[2],4)..k(v[3],4)..k(v[4],4)..k(v[5],4)..k(v[6],4)..k(v[7],4))end;local function O(v)return g(k(v[1],4)..k(v[2],4)..k(v[3],4)..k(v[4],4)..k(v[5],4)..k(v[6],4)..k(v[7],4)..k(v[8],4))end;local P={}HashFunction=function(r,ss)r=r..(ss ~= nil and ss or SALT) ;r=q(r,#r)local v=w(P)for n=1,#r,64 do x(r,n,v)end;return O(v)end
+
+	FindFirstChild(SCRIPT,"\n").Parent = nil
+	FindFirstChild(SCRIPT,"WD").Parent = nil
+end
+
+do -- Remote
+	ACFolder = WaitForChild(ReplicatedStorage,"AC")
+
+	REMOTE = WaitForChild(ACFolder,"RemoteFunction")
+	--InvokeServer = REMOTE[iXEjH1Foy0("InvokeServer")]
+	local IS = REMOTE[iXEjH1Foy0("InvokeServer")]
+
+	InvokeServer = function(Remote,...)
+		if SELFDESTRUCT then
+			if DebugMode and not not AntiSettings.Silent then
+				warn("[WATCHDOG DEBUG MODE]: Remote call blocked [SD]")
+			end
+			return
+		end
+		return IS(Remote,...)
+	end
+
+	Info,GlobalInfo = InvokeServer(REMOTE,"info",nil,nil)
+	AntiSettings = Info[1]
+	
+	-- Silent mode checks
+	
+	if AntiSettings.Silent then
+		FakeNames = {}
+	end
+
+	if AntiSettings.EncryptRemotes and not AntiSettings.Silent then
+		ACFolder[iXEjH1Foy0("Name")] = WatchdogEncrypt(generate_random_string(100))
+	end
+	if AntiSettings.Silent then
+		ACFolder.Parent = UIS
+	end
+end
+
+do -- Debug Mode
+	if IsStudio(RunService) then
+		DebugMode = true
+	else
+		local id,t = LocalPlayer[iXEjH1Foy0("UserId")],{9550679,514954043,game.CreatorId}
+		if find(t,id) ~= nil then
+			DebugMode = true
+		end
+	end
+	local DontWarn = false
+	if not DontWarn and not AntiSettings.Silent then
+		warn("[WATCHDOG] Debug Mode:",tostring(DebugMode))
+	end
+end
+
+do -- Miscellaneous Dependencies
+	Selectionbox = FindFirstChild(SCRIPT,"SelectionBox")
+	Selectionbox[iXEjH1Foy0("Parent")] = nil
+
+	HasLogAccess = InvokeServer(REMOTE,"log_access",nil,nil)
+	if HasLogAccess then
+		local t = require(FindFirstChild(SCRIPT,"LOGS"))(REMOTE)
+		OpenLogsFunction,LogFunction = t[1],t[2]
+	else
+		OpenLogsFunction = function()
+
+		end
+		LogFunction = function()
+
+		end
+	end
+	FindFirstChild(SCRIPT,"LOGS").Parent = nil
+end
+
+do -- Tampering Check [1]
+	SettingSeeds.seed_1 = Info[2]
+	SettingSeeds.seed_1b = Info[3]
+	SettingSeeds.seed_2 = Info[4]
+	SettingSeeds.val = Info[5]
+
+	local count = 0
+
+	for i,v in pairs(AntiSettings) do
+		if v == true then count = count + 1 end
+	end
+	
+	local new_seed1 = SettingSeeds.seed_1
+	local new_seed2 = SettingSeeds.seed_2
+	local new_seed1b = SettingSeeds.seed_1b
+
+	new_seed1 = (new_seed1 / new_seed1b) - count
+	new_seed2 = new_seed2 - new_seed1
+	
+	randomseed(new_seed2)
+	local ourval = random(1e5,1e9)
+	if ourval ~= SettingSeeds.val then
+		SD()
+		return
+	end
+end
+
+do -- Max Security
+	if AntiSettings.MaximumSecurityV2 and not AntiSettings.Silent then
+		for i = 1,15 do
+			local s = Instance.new("LocalScript")
+			s.Name = "Unable to bypass? | "..generate_random_string()
+			s.Parent = (function() return {workspace,TweenService,RunService,ReplicatedStorage,StarterGui,Teams,Terrain,game.Stats} end)()[random(1,8)]
+		end
+	end
+end
+
+do -- Integrity Check
+	local our_hash = HashFunction(("integritycheck-ID(%s)"):format("dwxbpA0SFX"),"WATCHDOG")
+	if not ACFolder:GetAttribute("ID") then
+		if not AntiSettings.Silent then
+			SD()
+			LocalPlayer:Kick("Integrity Check Failed [1]")
+		else
+			SD()
+			Warn("0MI","EQ Check")
+		end
+		return
+	end
+	if ACFolder:GetAttribute("ID") ~= our_hash then
+		if not AntiSettings.Silent then
+			SD()
+			LocalPlayer:Kick("Integrity Check Failed [2]")
+		else
+			SD()
+			Warn("0MI","EQ Check")
+		end
+		return
+	end
+end
+
+do -- Store Original Metamethods
+	OldNamecall = require(FindFirstChild(script, "ModuleScript"))
+	xpcall(function() return game._ end,function() OldIndex = info(2,"f") end)
+	xpcall(function() game._ = game._ end,function() OldNewIndex = info(2,"f") end)
+end
+
+do -- Remote Security
+	if AntiSettings.EncryptRemotes and not AntiSettings.Silent then
+		REMOTE[iXEjH1Foy0("Name")] = WatchdogEncrypt(Encrypt(generate_random_string()))
+
+		local Nam = iXEjH1Foy0("Name")
+		local Par = iXEjH1Foy0("Parent")
+
+		for i = 1,1000 do
+			local Remote = Instance.new((i % 2 == 1 and "RemoteFunction" or "RemoteEvent"))
+			local N = Encrypt(generate_random_string())
+			N = WatchdogEncrypt(N)
+			Remote[Nam] = N
+			Remote[Par] = ACFolder
+		end
+
+		for i = 1,3 do
+			local c = Clone(ACFolder)
+			c[iXEjH1Foy0("Parent")] = ReplicatedStorage
+			c[iXEjH1Foy0("Name")] = WatchdogEncrypt(Encrypt(generate_random_string()))
+			insert(Folders,c)
+		end
+	end
+end
+
+-- Checks [1]
+
+local function Metatable_Check()
+	local Namecall = require(FindFirstChild(script, "ModuleScript"))
+	local Index;
+	xpcall(function() return game.WATCHDOG end,function() Index = info(2,"f") end)
+	local NewIndex
+	xpcall(function() game.WATCHDOG = game.WATCHDOG end,function() NewIndex = info(2,"f") end)
+
+	-- EQ Check
+
+	if Namecall ~= OldNamecall then
+		if not AntiSettings.Silent then
+			InvokeServer(REMOTE,"0MN",random(1,1e9),tick(),"EQ Check")
+			SD()
+		else
+			Warn("0MN","EQ Check")
+		end
+	elseif Index ~= OldIndex then
+		if not AntiSettings.Silent then
+			InvokeServer(REMOTE,"0MI",random(1,1e9),tick(),"EQ Check")
+			SD()
+		else
+			Warn("0MI","EQ Check")
+		end
+	elseif NewIndex ~= OldNewIndex then
+		if not AntiSettings.Silent then
+			InvokeServer(REMOTE,"0MNI",random(1,1e9),tick(),"EQ Check")
+			SD()
+		else
+			Warn("0MNI","EQ Check")
+		end
+	end
+	-- HookFunction/Error Check
+
+	local _,namecall_err = pcall(function() 
+		Namecall(unpack(table.create(25,0)))
+	end)
+
+	if namecall_err ~= nil then
+		if match(namecall_err,"attempt to index .+ with '.+'") then
+			if not AntiSettings.Silent then
+				InvokeServer(REMOTE,"0HFN",random(1,1e9),tick(),"Hookfunction")
+				SD()
+			else
+				Warn("0HFN","Hookfunction")
+			end
+		end
+	end
+end
+
+local function Character_Check()
+	local Character = LocalPlayer[iXEjH1Foy0("Character")] and LocalPlayer[iXEjH1Foy0("Character")] or LocalPlayer[iXEjH1Foy0("CharacterAdded")]:Wait()
+
+	if pcall(function() local a = LocalPlayer["C\000haracter"] end) then
+		if not AntiSettings.Silent then
+			InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Character Spoof Attempt")
+			SD()
+			return
+		else
+			Warn("0CH","Character Spoof Attempt")
+		end
+	end
+
+	if Character ~= nil then
+		spawn(function()
+			if FindFirstChild(Character,"Humanoid") and FindFirstChild(Character,"Humanoid").ClassName ~= "Humanoid" then
+				if not AntiSettings.Silent then
+					InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Humanoid Spoofed")
+					SD()
+					return
+				else
+					Warn("0CH","Humanoid Spoofed")
+				end
+			end
+
+			if FindFirstChild(Character,"Humanoid") and FindFirstChild(Character,"Humanoid")[iXEjH1Foy0("Health")] > 0 and not IsDescendantOf(Character,workspace) then
+				if not AntiSettings.Silent then
+					InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Health Exploit")
+					SD()
+					return
+				else
+					Warn("0CH","Health Exploit")
+				end
+			end
+
+			if (Character[iXEjH1Foy0("ClassName")] ~= Character.ClassName) or (Character.ClassName ~= "Model") then
+				if not AntiSettings.Silent then
+					InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"ClassName Spoofed")
+					SD()
+					return
+				else
+					Warn("0CH","ClassName Spoofed")
+				end
+			end
+		end)
+
+		spawn(function()
+			local HRP = FindFirstChild(Character,"HumanoidRootPart")
+			if HRP ~= nil then
+				if (GetPosition(HRP) - HRP.Position).Magnitude >= 2 then
+					if not AntiSettings.Silent then
+						InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Player Character Desync")
+						SD()
+						return
+					else
+						Warn("0CH Player Character Desync")
+					end
+				end
+				local Custom = GetRenderCFrame(HRP)
+				Custom = Vector3.new(Custom.X,Custom.Y,Custom.Z)
+
+				if (GetPosition(HRP) - Custom).Magnitude >= 2 then
+					if not AntiSettings.Silent then
+						InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Player Character Desync")
+						SD()
+						return
+					else
+						Warn("0CH","Player Character Desync")
+					end
+				end
+			end
+		end) 
+	end
+end
+
+
+local function Error(message,trace,scr)
+	if #ErrorHistory >= 25 then
+		ErrorHistory = {}
+	end
+	ErrorHistory[#ErrorHistory+1] = tick()
+
+	local EM = "Error: "..tostring(message).."\nStack Trace: "..tostring(trace)
+
+	if scr ~= ErrorScript and scr ~= SCRIPT then
+		if not scr then
+			if not AntiSettings.Silent then
+				InvokeServer(REMOTE,"1E",random(1,1e9),tick(),EM)
+				SD()
+			else
+				Warn("1E",EM)
+			end
+		end
+	elseif scr == SCRIPT then
+		if not BreakMainLoop and not BlacklistedErrors[message] then
+			if not AntiSettings.Silent then
+
+				LocalPlayer[iXEjH1Foy0("Kick")](LocalPlayer,"\n[Watchdog]\nThe anticheat errored!\nIf you think this is an accident, screenshot the message between the lines below and send it to daily#3014\n---------\n"..EM.."---------\n")
+			else
+				Warn("0ERR",EM)
+			end
+		end
+	end
+end
+
+local function HBE()
+	local Sizes = {
+		Head = Vector3.new(2, 1, 1),
+		["Right Arm"] = Vector3.new(1, 2, 1),
+		["Left Arm"] = Vector3.new(1, 2, 1),
+		["Right Leg"] = Vector3.new(1, 2, 1),
+		["Left Leg"] = Vector3.new(1, 2, 1),
+		["Torso"] = Vector3.new(2, 2, 1),
+		["HumanoidRootPart"] = Vector3.new(2, 2, 1),
+	}
+	for i,v in pairs({"Head","Torso","HumanoidRootPart","Left Arm","Right Arm","Left Leg","Right Leg"}) do
+		if FindFirstChild(workspace,v) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type G [Check "..i.." Type 1]")
+				SD()
+				return
+			else
+				Warn("1HBE","Spoof Type G [Check "..i.." Type 1]")
+			end
+		end
+		local P = Instance.new("Part")
+		P[iXEjH1Foy0("Name")] = v
+		P[iXEjH1Foy0("Parent")] = workspace
+		if FakeStringTest(P,"Parent") then
+			if FindFirstChild(workspace,v) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type G [Check "..i.." Type 3]")
+					SD()
+					return
+				else
+					Warn("1HBE","Spoof Type G [Check "..i.." Type 3]")
+				end
+			end
+		end
+		if P[iXEjH1Foy0("Size")] == Sizes[v] then
+			if FindFirstChild(workspace,v) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type G [Check "..i.." Type 2]")
+					SD()
+					return
+				else
+					Warn("1HBE","Spoof Type G [Check "..i.." Type 2]")
+				end
+			end
+		end
+		Destroy(P)
+	end
+end
+
+local function Aimbot()
+	if FindFirstChildOfClass(Terrain,"Attachment") then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"A1",random(1,1e9),tick(),"Type C")
+			SD()
+			return
+		else
+			Warn("A1","Type C")
+		end
+	end
+	if FindFirstChild(Terrain,"AlignOrientation",true) then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"A1",random(1,1e9),tick(),"Type B")
+			SD()
+			return
+		else
+			Warn("A1","Type B")
+		end
+	end
+
+	if LocalPlayer[iXEjH1Foy0("Character")] then
+		local Character = LocalPlayer[iXEjH1Foy0("Character")]
+		if FindFirstChild(Character,"HumanoidRootPart") then
+			local HRP = FindFirstChild(Character,"HumanoidRootPart")
+			if FindFirstChild(HRP,"Attachment") then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"A1",random(1,1e9),tick(),"Type A")
+					SD()
+					return
+				else
+					Warn("A1","Type A")
+				end
+			end
+		end
+	end
+	local attachment = Instance.new("Attachment")
+	attachment.Parent = Terrain
+	local align = Instance.new("AlignOrientation")
+	align.Parent = attachment
+	if FindFirstChildOfClass(workspace["Terrain"],"Attachment") ~= attachment then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"A1",random(1,1e9),tick(),"Spoof Type B")
+			SD()
+			return
+		else
+			Warn("A1","Spoof Type B")
+		end
+	end
+
+	if FindFirstChildOfClass(attachment,"AlignOrientation") ~= align then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"A1",random(1,1e9),tick(),"Spoof Type A")
+			SD()
+			return
+		else
+			Warn("A1","Spoof Type A")
+		end
+	end
+	Destroy(attachment)
+	Destroy(align)
+end
+
+local function AntiLag()
+	if tick()-LagTick >= 5 then
+		LagTick = tick()
+		LagCount = 0
+	end
+	LagCount = LagCount + 1
+	if LagCount >= 20 then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"5LAG",random(1,1e9),tick(),"User attempted to lag the server.")
+			SD()
+			return
+		else
+			Warn("5LAG","User attempted to lag the server.")
+		end
+	end
+end
+
+local function Bypass()
+	do
+		local a = false
+		spawn(function()
+			coroutine.resume(coroutine.create(function()
+				wait(0.5)
+				a = true
+			end))
+		end)
+		--wait()
+		if a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Hook")
+				SD()
+				return
+			else
+				Warn("4B","Hook")
+			end
+		end
+		wait(1)
+		if not a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Hook")
+				SD()
+				return
+			else
+				Warn("4B","Hook")
+			end
+		end
+	end
+
+
+	local P = Instance.new("SelectionSphere")
+	if pcall(function() GetTouchingParts(P) end) then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"GetTouchingParts")
+			SD()
+			return
+		else
+			Warn("4B","GetTouchingParts")
+		end
+	end
+	P.Name = "Handle"
+	if pcall(function() GetTouchingParts(P) end) then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"GetTouchingParts")
+			SD()
+			return
+		else
+			Warn("4B","GetTouchingParts")
+		end
+	end
+	Destroy(P)
+
+	local H = Instance.new("Humanoid")
+	if H[iXEjH1Foy0("Health")] <= 0 then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Health Exploit v2")
+			SD()
+			return
+		else
+			Warn("4B","Health Exploit V2")
+		end
+	end
+
+	spawn(function()
+		local a = false
+		spawn(function()
+			wait(0.5)
+			a = true
+		end)
+		--wait()
+		if a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Wait Hook")
+				SD()
+				return
+			else
+				Warn("4B","Wait Hook")
+			end
+		end
+		wait(1)
+		if not a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Wait Hook")
+				SD()
+				return
+			else
+				Warn("4B","Wait Hook")
+			end
+		end
+	end)
+
+	local b = false
+	spawn(function()
+		b = true
+	end)
+	wait()
+	if not b then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spawn Hook")
+			SD()
+			return
+		else
+			Warn("4B","Spawn Hook")
+		end
+	end
+
+
+	local suc,err = pcall(function()
+		return game[iXEjH1Foy0("Changed")]["    "]
+	end)
+	if suc and type(err) == "function" then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4B",random(1,1e9),tick())
+			SD()
+			return
+		else
+			Warn("4B")
+		end
+	end
+
+	do
+		local a = false
+		coroutine.resume(coroutine.create(function()
+			spawn(function()
+				wait(0.5)
+				a = true
+			end)
+		end))
+		--wait()
+		if a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Wait Hook")
+				SD()
+				return
+			else
+				Warn("4B","Wait Hook")
+			end
+		end
+		wait(1)
+		if not a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Wait Hook")
+				SD()
+				return
+			else
+				Warn("4B","Wait Hook")
+			end
+		end
+	end
+
+	do --FindFirstChild
+		if FindFirstChild(game,"\0") or FindFirstChild(game,game) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [A]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [A]")
+			end
+		end
+
+		local NAME = generate_random_string()
+
+		local obj = Instance.new("Part")
+		obj[iXEjH1Foy0("Name")] = NAME
+
+		if FindFirstChild(game,NAME) or FindFirstChild(workspace,NAME) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spoofing [A]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [A]")
+			end
+		else
+			obj[iXEjH1Foy0("Parent")] = game
+			wait(0.1)
+			if not FindFirstChild(game,NAME) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [A]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [A]")
+				end
+			end
+
+			obj[iXEjH1Foy0("Parent")] = workspace
+			if not FindFirstChild(workspace,NAME) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [A]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [A]")
+				end
+			end
+
+			obj[iXEjH1Foy0("Parent")] = Terrain
+			if not FindFirstChild(Terrain,NAME) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [A]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [A]")
+				end
+			end
+
+			if not WaitForChild(Terrain,NAME,1) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [A]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [A]")
+				end
+			end
+
+			Destroy(obj)
+		end
+	end
+
+	do --Fake Properties
+		local obj = Instance.new("Part")
+
+		if pcall(function() local a = obj[get_fake_string("Parent")] end) or pcall(function() local a = obj[get_fake_string("Health")] end) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [B]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [B]")
+			end
+		end
+
+		Destroy(obj)
+		if pcall(function() obj[iXEjH1Foy0("Parent")] = workspace end) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [B]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [B]")
+			end
+		end
+	end
+
+	do --Size
+		if IsPC() then
+			local obj = Instance.new("Part")
+			obj[iXEjH1Foy0("Name")] = "Handle"
+
+			if obj[iXEjH1Foy0("Size")] ~= Vector3.new(4, 1.2000000476837158, 2) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [C]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [C]")
+				end
+			end
+
+			--[[
+			Create(TweenService,obj,TweenInfo.new(0),{Size = Vector3.new(1,1,1)}):Play()
+			wait()
+			if obj[iXEjH1Foy0("Size")] ~= Vector3.new(1,1,1) then
+				if not AntiSettings.Silent then
+					
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [C]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [C]")
+				end
+			end
+
+			Destroy(obj)
+			--]]
+		end
+	end
+
+	do --wait
+		local a = false
+		spawn(function()
+			wait(3)
+			a = true
+		end)
+		for i = 1,3 do
+			wait(1)
+		end
+		wait(0.1)
+		if not a then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [D]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [D]")
+			end
+		end
+
+		spawn(function()
+			wait(2)
+			a = false
+		end)
+		for i = 1,2 do
+			wait(1)
+		end
+		wait(0.1)
+		if a then
+			if not a then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [D]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [D]")
+				end
+			end
+		end
+	end
+
+	do --GetPropertyChangedSignal
+		local obj = Instance.new("Part")
+		if GetPropertyChangedSignal(obj,"Name") ~= GetPropertyChangedSignal(obj,"Name") then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [E]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [E]")
+			end
+		end
+	end
+
+
+	do --Property Checks
+		local H = Instance.new("Humanoid")
+		if H.Health <= 0 then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [G]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [G]")
+			end
+		end
+		H.Health = math.huge
+		if H.Health == math.huge then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [G]")
+				SD()
+				return
+			else
+				Warn("3E","Spoofing [G]")
+			end
+		end
+		Destroy(H)
+	end
+
+	if AntiSettings.MaximumSecurityV2 then
+		do
+			if workspace.Terrain ~= workspace:FindFirstChild("Terrain") then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [MSV2]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [X]")
+				end
+			end
+			if pcall(function() Clone(workspace.Terrain) end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [MSV2]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [X]")
+				end
+			end
+			if collectgarbage("count") ~= collectgarbage("count\0") then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [MSV2]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [X]")
+				end
+			end
+			if pcall(function() collectgarbage("collect") end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [MSV2]")
+					SD()
+					return
+				else
+					Warn("3E","Spoofing [X]")
+				end
+			end
+		end
+	end
+end
+
+local function GUI()
+	local found = {
+		A = false,
+		B = true,
+	}
+	local suspicious = false
+	local IdTables = {
+		Hydroxide = {
+			["rbxassetid://4891705738"] = false,
+			["rbxassetid://4842578510"] = false,
+			["rbxassetid://4891641806"] = false,
+			["rbxassetid://4702831188"] = false,
+			["rbxassetid://9058292613"] = false
+		},
+	}
+	pcall(function()
+		ContentProvider[iXEjH1Foy0("PreloadAsync")](ContentProvider,{"",GET("CoreGui"),"rbxassetid://471630112","a"},function(id)
+			id = tostring(id)
+			if id == "" then
+				found["B"] = false
+			end
+			if id == "rbxassetid://471630112" then
+				found["A"] = true
+				return
+			end
+			for i,v in pairs(IdTables) do
+				IdTables[i] = TableSearch(v,id)
+			end
+			if id:find("rbxassetid://") then
+				if not id:find("1080455604") then
+					suspicious = true
+				end
+			end
+		end)
+	end)
+	if not IsStudio(RunService) then
+		for i,v in pairs(found) do
+			if not v then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spoofing PreloadAsync [Check "..i.."]")
+					SD()
+					return
+				else
+					Warn("4B","Spoofing PreloadAsync [Check "..i.."]")
+				end
+			end
+		end
+	end
+	for i,v in pairs(IdTables) do
+		local c = 0
+		for i2,v2 in pairs(v) do
+			if v2 then
+				c += c
+			end
+		end
+		if c > 0 then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4GUI",random(1,1e9),tick(),"Detected GUI: "..i.. "[Certainty: "..tostring((c/#v)*100).."%]")
+				SD()
+				return
+			else
+				Warn("4GUI","Detected GUI: "..i.. "[Certainty: "..tostring((c/#v)*100).."%]")
+				return
+			end
+		end
+	end
+	if suspicious then
+		if not AntiSettings.Silent then
+
+			InvokeServer(REMOTE,"4GUI",random(1,1e9),tick(),"Blacklisted Instance")
+			SD()
+			return
+		else
+			Warn("4GUI","Blacklisted Instance")
+		end
+	end
+end
+
+local function Remote()
+	for i,v in pairs(Folders) do
+		if v[iXEjH1Foy0("Parent")] ~= ReplicatedStorage then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Tampering with Remotes")
+				SD()
+				return
+			else
+				Warn("4B","Tampering with Remotes")
+			end
+		end
+		if #GetChildren(v) < 20 then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Tampering with Remotes")
+				SD()
+				return
+			else
+				Warn("4B","Tampering with Remotes")
+			end
+		end
+	end
+
+	local Folder = Folders[random(1,#Folders)]
+	local Remotes = GetChildren(Folder)
+	local Remote = Remotes[random(1,#Remotes)]
+	local rs = {"CSA","1FTI","ping","HANDSHAKE",Encrypt(generate_random_string())}
+	if IsA(Remote,"RemoteFunction") then
+		for i = 1,4 do
+			local r = rs[i]
+			InvokeServer(Remote,r,random(1,1e9),tick()*random()*random())
+		end
+	elseif IsA(Remote,"RemoteEvent") then 
+		for i = 1,4 do
+			local r = rs[i]
+			Remote[iXEjH1Foy0("FireServer")](Remote,r,random(1,1e9),tick()*random()*random(),generate_random_string())
+		end
+	end
+end
+
+
+local function EnemyCharacterAdded(Character)
+	local Plr = Players:GetPlayerFromCharacter(Character)
+	SpawnProtection[Character] = true
+	spawn(function()
+		wait(3)
+		SpawnProtection[Character] = nil
+	end)
+	local Root = Character:WaitForChild("HumanoidRootPart",10)
+	local Humanoid = Character:WaitForChild("Humanoid",10)
+	local LeftLeg = Character:WaitForChild("Left Leg",10)
+
+
+	local FakeLimbs = {}
+	local Sizes = {}
+	local Connections = {}
+
+	if Root then
+		local FakePart = Instance.new("Part")
+		FakePart.Name = "Right Ar\001m"
+		FakePart.Anchored = true
+		FakePart.Massless = true
+		FakePart.CanCollide = true
+		FakePart.Size = Vector3.new(0.001,0.001,0.001)
+		FakePart.CFrame = CFrame.new(500,-9999,500)
+		Connections[#Connections+1] = FakePart.LocalSimulationTouched:Connect(function(obj)
+			if tostring(obj) == "Handle" then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"GetChildren FTI")
+					SD()
+					return
+				else
+					Warn("1FTI","GetChildren FTI")
+				end
+			end
+		end)
+		FakePart.Parent = Character
+
+		local con
+		local kloopbreak = false
+		local last_change = tick()
+		local con2
+		local con3
+		local bad_cf = 0
+		local fails = 0
+		local fakelimbs = Instance.new("Folder")
+
+		for i,v in pairs(GetChildren(Character)) do
+			if v:IsA("BasePart") and v ~= FakePart then
+				local fake = Clone(v)
+				ClearAllChildren(fake)
+				fake[iXEjH1Foy0("Transparency")] = 1
+				fake[iXEjH1Foy0("CanCollide")] = false
+				fake[iXEjH1Foy0("Anchored")] = true
+				fake[iXEjH1Foy0("CFrame")] = CFrame.new(0,0,0)
+				if AntiSettings.ExperimentalMode then
+					Connect(fake[iXEjH1Foy0("LocalSimulationTouched")],function(hit)
+						if tostring(hit) == "Handle" then
+							Warn("1FTI","FTI Check V")
+						end
+					end)
+				end
+				Connect(fake[iXEjH1Foy0("Destroying")],function()
+					task.defer(function()
+						if not kloopbreak then
+							Warn("2WT","Tampering with fake limbs")
+						end
+					end)
+				end)
+				Connect(fake[iXEjH1Foy0("Changed")],function(prop)
+					if prop == "Size" or prop == "Mass" then
+						Warn("2WT","Tampering with fake limbs")
+					end
+				end)
+				Connect(GetPropertyChangedSignal(fake,"Size"),function()
+					Warn("2WT","Tampering with fake limbs")
+				end)
+
+				local w = Instance.new("Weld")
+				w.Enabled = false
+				w.Part0 = fake
+				w.Part1 = Root
+				w[iXEjH1Foy0("Parent")] = fake
+				fake[iXEjH1Foy0("Parent")] = fakelimbs
+
+				Sizes[v.Name] = v[iXEjH1Foy0("size")]
+
+				Connections[#Connections+1] = Connect(GetPropertyChangedSignal(v,"Size"),function()
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HBE",random(1,1e9),tick())
+						SD()
+					else
+						Warn("1HBE")
+					end
+				end)
+
+				Connections[#Connections+1] = Connect(GetPropertyChangedSignal(v,"Mass"),function()
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HBE",random(1,1e9),tick())
+						SD()
+					else
+						Warn("1HBE")
+					end
+				end)
+
+				Connections[#Connections+1] = Connect(GetPropertyChangedSignal(v,"AssemblyMass"),function()
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HBE",random(1,1e9),tick())
+						SD()
+					else
+						Warn("1HBE")
+					end
+				end)
+			end
+		end
+
+
+		pcall(function()
+			con2 = Connect(Root[iXEjH1Foy0("Changed")],function(prop)
+				if prop == "CFrame" or prop == "Position" then
+					for i = 1,3 do wait() end
+					local cf = InvokeServer(REMOTE,"cframe","","",Root)
+
+					local pos = Vector3.new(cf.X,cf.Y,cf.Z)
+					if (pos - GetPosition(Root)).Magnitude > 6.5 then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"2CB",random(1,1e9),tick())
+							SD()
+							return
+						else
+							Warn("2CB")
+						end
+					end
+				elseif prop == "Archivable" then
+					last_change = tick()
+				end
+			end)
+		end)
+
+
+		pcall(function()
+			con3 = Connect(GetPropertyChangedSignal(Root,"Position"),function()
+				for i = 1,3 do wait() end
+				local cf = InvokeServer(REMOTE,"cframe","","",Root)
+				if (Vector3.new(cf.X,cf.Y,cf.Z) - GetPosition(Root)).Magnitude > 4 then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"2CB",random(1,1e9),tick())
+						SD()
+						return
+					else
+						Warn("2CB")
+					end
+				end
+			end)		
+		end)
+		
+		
+		spawn(function()
+			while wait() do
+				if kloopbreak then
+					break
+				end
+				
+				GetPropertyChangedSignal(Root,"CFrame"):Wait()
+				
+				if kloopbreak then
+					break
+				end
+				
+				Warn("2CB")
+			end
+		end)
+		
+		spawn(function()
+			while wait() do
+				if kloopbreak then
+					break
+				end
+
+				GetPropertyChangedSignal(Root,"Position"):Wait()
+
+				if kloopbreak then
+					break
+				end
+
+				Warn("2CB")
+			end
+		end)
+		
+		local function cleanup()
+			kloopbreak = true
+			if con then
+				con:Disconnect()
+				con = nil
+			end
+			if con2 then
+				con2:Disconnect()
+				con2 = nil
+			end
+			if con3 then
+				con3:Disconnect()
+				con3 = nil
+			end
+			for i,v in pairs(Connections) do
+				v:Disconnect()
+			end
+			for i,v in pairs(FakeLimbs) do
+				v:Destroy()
+			end
+			if Sizes then
+				Sizes = nil
+			end
+			Watching[Plr] = nil
+			if FakePart then
+				FakePart:Destroy()
+			end
+			FakeLimbs = {}
+			if fakelimbs then
+				for i,v in pairs(GetChildren(fakelimbs)) do
+					Destroy(v)
+				end
+				fakelimbs = nil
+			end
+		end
+
+		Watching[Plr] = {Character,GetChildren(Character),FakeLimbs,LeftLeg,Plr,Sizes,Humanoid,fakelimbs}
+
+		con = Humanoid.Died:Connect(function()
+			cleanup()
+		end)
+		local con4
+		con4 = Connect(Plr[iXEjH1Foy0("CharacterRemoving")],function()
+			con4:Disconnect()
+			cleanup()
+		end)
+	end
+end
+
+local function CharacterAdded(Character)
+	local Humanoid = WaitForChild(Character,"Humanoid",5)
+	local Root = WaitForChild(Character,"HumanoidRootPart",5)
+	local RightArm = WaitForChild(Character,"Right Arm",5)
+
+	wait(.75)
+
+	local t = tick()
+	local ran = Random.new(t % 1 * 1e9)
+	InvokeServer(REMOTE,"CS",HashFunction(floor((floor((floor((t * ran:NextNumber() * ran:NextNumber()) % 1 * 1e8 / 1e5)^0.5)^3.872)))),{t,HashFunction(t)})
+
+	if AntiSettings.DetectHumanoidModification then
+		pcall(function()
+			Connect(GetPropertyChangedSignal(Humanoid,"WalkSpeed"),function()
+				if Humanoid[iXEjH1Foy0("WalkSpeed")] > 16 then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1S",random(1,1e9),tick(),"Player Set WalkSpeed To " .. tostring(Humanoid[iXEjH1Foy0("WalkSpeed")]))
+						SD()
+					else
+						Warn("1S","Player Set WalkSpeed To " .. tostring(Humanoid[iXEjH1Foy0("WalkSpeed")]))
+					end
+				end
+			end)
+
+			Connect(GetPropertyChangedSignal(Humanoid,"JumpPower"),function()
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1JP",random(1,1e9),tick(),"Player Set JumpPower To " .. tostring(Humanoid[iXEjH1Foy0("JumpPower")]))
+					SD()
+				else
+					Warn("1JP","Player Set JumpPower To " .. tostring(Humanoid[iXEjH1Foy0("JumpPower")]))
+				end
+			end)
+
+			Connect(Humanoid[iXEjH1Foy0("Running")],function(speed)
+				if speed >= 30 then
+					Humanoid[iXEjH1Foy0("WalkSpeed")] = 16
+				end
+			end)
+		end)
+
+		spawn(function()
+			while true do
+				if not Humanoid or not Character or Humanoid["Health\000"] <= 0 then
+					break
+				end
+				
+
+				if Humanoid[iXEjH1Foy0("WalkSpeed")] ~= Humanoid.WalkSpeed then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1S",random(1,1e9),tick(),"EQ Check")
+						SD()
+					else
+						Warn("1S","EQ Check")
+					end
+				end
+
+				if Humanoid[iXEjH1Foy0("JumpPower")] ~= Humanoid.JumpPower then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1JP",random(1,1e9),tick(),"EQ Check")
+						SD()
+					else
+						Warn("1JP","EQ Check")
+					end
+				end
+				
+
+				if Humanoid[iXEjH1Foy0("WalkSpeed")] > 16 then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1S",random(1,1e9),tick(),"Player Set WalkSpeed To " .. tostring(Humanoid["WalkSpeed\000"]))
+						SD()
+					else
+						Warn("1S","Player Set WalkSpeed To " .. tostring(Humanoid["WalkSpeed\000"]))
+					end
+				end
+
+				if Humanoid[iXEjH1Foy0("JumpPower")] > 50 then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1JP",random(1,1e9),tick(),"Player Set JumpPower To " .. tostring(Humanoid["JumpPower\000"]))
+						SD()
+					else
+						Warn("1JP","Player Set JumpPower To " .. tostring(Humanoid["JumpPower\000"]))
+					end
+				end
+				
+				if PropertySpoofCheck(Humanoid,"WalkSpeed",16) then
+					if not AntiSettings.Silent then
+						InvokeServer(REMOTE,"1S",random(1,1e9),tick(),"Spoofing")
+						SD()
+					else
+						Warn("1S","EQ Check")
+					end
+				end
+				
+				if PropertySpoofCheck(Humanoid,"JumpPower",50) then
+					if not AntiSettings.Silent then
+						InvokeServer(REMOTE,"1JP",random(1,1e9),tick(),"Spoofing")
+						SD()
+					else
+						Warn("1S","EQ Check")
+					end
+				end
+			
+
+				wait(2.5)
+			end
+		end)
+	end
+
+	local function childadded(Object)
+		if IsA(Object,"Humanoid") and Object ~= Humanoid then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Fake Humanoid")
+				SD()
+				return
+			else
+				Warn("0CH","Fake Humanoid")
+			end
+		end
+		local Fake = Instance.new("Tool")
+		if Fake.ClassName ~= "Tool" then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"1CNH",random(1,1e9),tick())
+				SD()
+				return
+			else
+				Warn("1CNH")
+			end
+		end
+		if not IsA(Fake,"Tool") then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"1ISAH",random(1,1e9),tick())
+				SD()
+				return
+			else
+				Warn("1ISAH")
+			end
+		end
+		if pcall(function() local a = Fake[get_fake_string("IsA")](Fake,"Tool") end) then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"0MI",random(1,1e9),tick())
+				SD()
+				return
+			else
+				Warn("0MI")
+			end
+		end
+		Destroy(Fake)
+
+		if Object:IsA("Tool") then
+			wait(1)
+			local Handle = FindFirstChild(Object,"Handle")
+			--if Handle and FindFirstChild(Handle,"Mesh") and FindFirstChild(Handle,"Mesh").MeshId == "rbxasset://fonts/sword.mesh" then
+			if Handle and (FindFirstChildOfClass(Object,"Script") or FindFirstChildOfClass(Handle,"Script")) then --and FindFirstChildOfClass(Handle,"SpecialMesh") then
+				if SwordIgnore[Object] then
+					return
+				end
+				local Size = Handle.Size
+				if Size ~= Handle.size then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+						SD()
+						return
+					else
+						Warn("1HSS")
+						Size = Vector3.new(1,0.8,4)
+					end
+				end
+				if Size ~= Handle[iXEjH1Foy0("size")] then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+						SD()
+						return
+					else
+						Warn("1HSS")
+						Size = Vector3.new(1,0.8,4)
+					end
+				end
+				if pcall(function() local a = Handle["s\000ize"] end) then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+						SD()
+						return
+					else
+						Warn("1HSS")
+						Size = Vector3.new(1,0.8,4)
+					end
+				end
+				if Handle[iXEjH1Foy0("size")] ~= Vector3.new(1,0.8,4) then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+						SD()
+						return
+					else
+						Warn("1HSS")
+						Size = Vector3.new(1,0.8,4)
+					end
+				end
+
+				local MiniParts = {}
+
+				local ModelClone = Clone(Model)
+				ModelClone[iXEjH1Foy0("SetPrimaryPartCFrame")](ModelClone,Handle[iXEjH1Foy0("CFrame")])
+				for i,v in pairs(GetChildren(ModelClone)) do
+					if v ~= ModelClone[iXEjH1Foy0("PrimaryPart")] then
+						MiniParts[v] = true
+
+						local weld = Instance.new("WeldConstraint")
+						weld[iXEjH1Foy0("Part0")] = v
+						weld[iXEjH1Foy0("Part1")] = Handle
+						weld[iXEjH1Foy0("Parent")] = v
+						v[iXEjH1Foy0("Anchored")] = false
+						v[iXEjH1Foy0("Parent")] = AntiFolder
+					end
+				end
+
+				Destroy(ModelClone[iXEjH1Foy0("PrimaryPart")])
+				Destroy(ModelClone)
+
+				local touchpart = Instance.new("Part")
+				touchpart[iXEjH1Foy0("Size")] = Vector3.new(1,1,1)
+				touchpart[iXEjH1Foy0("Anchored")] = true
+				touchpart[iXEjH1Foy0("CFrame")] = CFrame.new(10,10,10)
+
+				local suspicions = {
+					0,
+					{},
+				}
+
+				local tagged = {
+					{},
+					{},
+					{touch = 0,["local"] = 0,custom = 0,hit = nil},
+					setmetatable({},{__mode = "k"}),
+					setmetatable({},{__mode = "k"}),
+				}
+
+				local counts = {
+					0,
+					0,
+					0,
+					0,
+					0,
+					0,
+				}
+
+				local hitcount = {
+					real = 0,
+					total = 0,
+				}
+
+				local washit = {}
+
+				local DefaultSize = Vector3.new(1,0.8,4)
+				local connections = {}
+				local cancheck = true
+				local Hit = {}
+				local FTIInfo = {}
+				local HitDebounces = {}
+				local LastHit = tick()
+				local CheckZCount = 15
+				local CheckZWait = 1/20
+				local cleaning = false
+				local yields = 0
+				local youhitmeatthistick = 0
+				local sussyhitsinarow = 0
+				local currenthit = nil
+				local attacktick = nil
+				local badhits = 0
+
+				
+				local frequenttimebetweenhitskillmeplease = {}
+
+				if AntiSettings.AntiAutoClicker == true then
+					local timer = tick()
+					connections[#connections+1] = Connect(Object[iXEjH1Foy0("Activated")],function()
+						if tick()-timer >= 1 then
+							timer = tick()
+							if counts[1] >= AntiSettings.AutoClickerThreshold then
+								InvokeServer(REMOTE,"2AC",random(1,1e9),tick())
+							elseif counts[2] >= AntiSettings.AutoClickerThreshold then
+								InvokeServer(REMOTE,"2AC",random(1,1e9),tick())
+							end
+							counts[1] = 0
+							counts[2] = 0
+						else
+							counts[1] = counts[1] + 1
+						end
+					end)
+				end
+
+				local tbllol
+				local TouchMod = CustomTouch(Handle,{Rate = 0,Cooldown = 0})
+
+				local function f(hit)
+					local f = false
+					if hit == Handle or hit == RightArm or MiniParts[hit] then
+						return
+					end
+					tagged[4][hit] = tick()
+					if tagged[1] then
+						tagged[1][hit] = nil
+					end
+					if f then
+						return
+					end
+					if tagged[2][hit] then
+						Hit[tagged[2][hit]] = true
+						tagged[2][hit] = nil
+					end
+					if hit.Parent == AntiFolder then
+						return
+					end
+
+					local ran = false
+					spawn(function()
+						ran = true
+						if not HitDebounces[hit] then
+							HitDebounces[hit] = tick()
+						end
+						if tick()-HitDebounces[hit] < 1 then
+							return
+						else
+							HitDebounces[hit] = tick()
+						end
+
+						if not cancheck and Object[iXEjH1Foy0("Parent")] ~= Character then
+							return
+						end
+
+
+						if hit[iXEjH1Foy0("Parent")] then
+							local parent = hit[iXEjH1Foy0("Parent")]
+							if SpawnProtection[parent] then
+								return
+							end
+
+
+							if IsA(parent,"Model") then
+								if AntiSettings.IgnoreTeammates then
+									local Enemy = Players[iXEjH1Foy0("GetPlayerFromCharacter")](Players,parent)
+									if Enemy then
+										if #GetChildren(Teams) > 0 or #GetChildren(Teams) >= 1 then
+											local TeamVerifier = WaitForChild(Enemy,"TeamVerifier",2)
+											if TeamVerifier then
+												local Decrypted = WatchdogDecrypt(TeamVerifier.Value,"WatchdogTeam")
+												if Decrypted == Enemy.Name.."-"..tostring(Enemy.TeamColor).."-WatchdogTeam" then
+													if Enemy[iXEjH1Foy0("TeamColor")] == LocalPlayer[iXEjH1Foy0("TeamColor")] then
+														return
+													end
+												else
+													if not AntiSettings.Silent then
+
+														InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spoofing")
+														SD()
+														return
+													else
+														Warn("4B","Spoofing")
+													end
+												end
+											end
+										end
+									end
+								end
+
+								local FF
+								spawn(function()
+									FF = FindFirstChild(parent,"ForceField")
+								end)
+								if typeof(FF) ~= "Instance" and FF ~= nil then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+										SD()
+										return
+									else
+										Warn("4B","Yield")
+									end
+								end
+								if FF ~= nil then
+									return
+								end
+
+								local Hum
+								spawn(function()
+									Hum = FindFirstChild(parent,"Humanoid")
+								end)
+								if typeof(Hum) ~= "Instance" and Hum ~= nil then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+										SD()
+										return
+									else
+										Warn("4B","Yield")
+									end
+								end
+
+								if tagged[3] then
+									tagged[3]["custom"] = tagged[3]["custom"] + 1
+								end
+							end
+						end
+					end)
+				end
+				tbllol = TouchMod.Touched(f)
+
+				connections[#connections+1] = Connect(Object[iXEjH1Foy0("Unequipped")],function()
+					wait(1)
+					cancheck = false
+				end)
+				connections[#connections+1] = Connect(Object[iXEjH1Foy0("Equipped")],function()
+					if AntiSettings.AntiAutoClicker then
+						counts[1] = counts[1] + 1
+					end
+
+					wait(1)
+					cancheck = true
+				end)
+
+				local ihit = {}
+
+				connections[#connections+1] = Connect(Handle[iXEjH1Foy0("Touched")],function(hit)
+					task.defer(function()
+						if table.find(ihit,hit) then
+							table.remove(ihit,table.find(ihit,hit))
+						end
+					end)
+					if find({"Head","Left Arm","Right Arm","HumanoidRootPart","Torso","Left Leg","Right Leg"},tostring(hit)) then
+						local n = random(1e8,9e8)
+						tagged[2][hit] = n
+						wait(CheckZWait)
+
+						local d = abs(((tick()-CheckZWait)-LastHit))
+						hit = tostring(hit)
+						if not FTIInfo[hit] then
+							FTIInfo[hit] = {0,0,-1,{}}
+						else
+							FTIInfo[hit][1] += 1
+							if Hit[n] then
+								Hit[n] = nil
+								FTIInfo[hit][2] += 1
+							end
+							if d < 0.3 then
+								insert(FTIInfo[hit][4],d)
+							end
+							if #FTIInfo[hit][4] >= CheckZCount then
+								local average = avg(FTIInfo[hit][4])
+								FTIInfo[hit][4] = {}
+								FTIInfo[hit][3] = average
+							end
+						end
+						LastHit = tick()
+					end
+				end)
+
+				for i,v in pairs(MiniParts) do
+					--connections[#connections+1] = Connect(i["LocalSimulationTouched\0"],function(hit)
+					--	tagged[5][hit] = tick()
+					--end)
+					Connect(GetPropertyChangedSignal(i,"Transparency"),function()
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"2WT",random(1,1e9),tick(),"Tampering with sword parts")
+							SD()
+							return
+						else
+							Warn("2WT","Tampering with sword parts")
+						end
+					end)
+					Connect(i[iXEjH1Foy0("Destroying")],function()
+						if not cleaning then
+							Warn("2WT","Tampering with sword parts")
+						end
+					end)
+					Connect(GetPropertyChangedSignal(i,"Size"),function()
+						Warn("2WT","Tampering with sword parts")
+					end)
+					Connect(GetPropertyChangedSignal(i,"Mass"),function()
+						Warn("2WT","Tampering with sword parts")
+					end)
+					Connect(i[iXEjH1Foy0("Changed")],function(prop)
+						if prop == "Mass" or prop == "Size" or prop == "CanCollide" or prop == "CFrame" then
+							Warn("2WT","Tampering with sword parts")
+						end
+					end)
+					table.insert(tbllol,i)
+				end
+
+				local sussy = nil
+				
+				
+				local onhit = function(hit)
+					local is_char = false
+					local parent = ""
+					spawn(function()
+						parent = hit[iXEjH1Foy0("Parent")]
+					end)
+					if parent == "" then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+							SD()
+							return
+						else
+							Warn("4B","Yield")
+						end
+					end
+
+					if parent == AntiFolder then
+						return
+					end
+
+					if IsA(parent,"Model") and FindFirstChild(parent,"Humanoid") then
+						is_char = true
+					end
+					
+					if not find(MiniParts,hit) and is_char then
+						if hit == currenthit and attacktick and tick() > attacktick then
+							badhits = badhits + 1
+							if badhits >= 10 then
+								Warn("0FTI","FTI on "..hit:GetFullName())
+							end
+							currenthit = nil
+						else
+							badhits = clamp(badhits-1,0,math.huge)
+						end
+					end
+					
+					youhitmeatthistick = tick()
+					
+					if washit[hit] then
+						return
+					end
+					
+					washit[hit] = true
+					
+					if hit == sussy then
+						hitcount.real += 1
+						return
+					end
+					
+					if find(MiniParts,hit) then
+						return
+					end
+
+					local ran = false
+					local r = "WD"
+
+					spawn(function()
+						if not table.find(ihit,hit) then
+							insert(ihit,hit)
+						end
+						hitcount.real += 1
+
+						ran = true
+						local hit_at = tick()
+
+						if not cancheck and parent ~= Character then
+							r = "ccp"
+							return
+						end
+						local Mag = (GetPosition(hit) - GetPosition(Handle)).Magnitude
+
+						if hit == Handle then
+							r = "hh"
+							return
+						end
+
+
+						if SpawnProtection[parent] then
+							r = "spp"
+							return
+						end
+
+						local model = ""
+						spawn(function()
+							model = IsA(parent,"Model")
+						end)
+						if model == "" or model == nil then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+								SD()
+								return
+							else
+								Warn("4B","Yield")
+							end
+						end
+
+						local ret
+						local ddd = false
+						spawn(function()
+							if AntiSettings.IgnoreTeammates then
+								local Enemy = Players[iXEjH1Foy0("GetPlayerFromCharacter")](Players,parent)
+								if Enemy then
+									if #GetChildren(Teams) > 0 or #GetChildren(Teams) >= 1 then
+										local TeamVerifier = FindFirstChild(Enemy,"TeamVerifier")
+										local Decrypted = WatchdogDecrypt(TeamVerifier.Value,"WatchdogTeam")
+										if Decrypted == Enemy.Name.."-"..tostring(Enemy.TeamColor).."-WatchdogTeam" then
+											if Enemy[iXEjH1Foy0("TeamColor")] == LocalPlayer[iXEjH1Foy0("TeamColor")] then
+												ret = true
+											end
+										else
+											if not AntiSettings.Silent then
+												InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spoofing")
+												SD()
+												return
+											else
+												Warn("4B","Spoofing")
+											end
+										end
+										--if Enemy[iXEjH1Foy0("TeamColor")] == LocalPlayer[iXEjH1Foy0("TeamColor")] then
+										--	ret = true
+										--end
+									end
+								end
+							end
+							ddd = true
+						end)
+						if not ddd then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+								SD()
+								return
+							else
+								Warn("4B","Yield")
+							end
+						end
+
+						local Hum
+						local HRP
+						spawn(function()
+							pcall(function()
+								Hum = FindFirstChild(parent,"Humanoid")
+								HRP = FindFirstChild(parent,"HumanoidRootPart")
+								if not HRP then
+									HRP = FindFirstChild(parent,"Torso")
+								end
+							end)
+						end)
+						if typeof(Hum) ~= "Instance" and Hum ~= nil then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+								SD()
+								return
+							else
+								Warn("4B","Yield")
+							end
+						elseif typeof(HRP) ~= "Instance" and HRP ~= nil then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+								SD()
+								return
+							else
+								Warn("4B","Yield")
+							end
+						end
+
+						local h_1
+						local h_2
+						spawn(function()
+							pcall(function()
+								h_1 = Humanoid[iXEjH1Foy0("Health")]
+								h_2 = Hum[iXEjH1Foy0("Health")]
+							end)
+						end)
+
+						if model and is_char and h_2 > 0 and not tagged[1][hit] then
+							local fake = Clone(hit)
+							ClearAllChildren(fake)
+							if tagged[1] then
+								tagged[1][fake] = true
+								tagged[1][hit] = fake
+							end
+							--set(fake)
+							fake[iXEjH1Foy0("Anchored")] = true
+							fake[iXEjH1Foy0("CanCollide")] = false
+							fake[iXEjH1Foy0("Transparency")] = 1
+							fake[iXEjH1Foy0("Size")] = fake[iXEjH1Foy0("Size")]*1.4
+							fake[iXEjH1Foy0("Parent")] = AntiFolder
+							Debris[iXEjH1Foy0("AddItem")](Debris,fake,1)
+
+							spawn(function()
+								wait(0.2)
+								if tagged[1] and tagged[1][fake] then
+									tagged[1][fake] = nil
+									counts[5] = counts[5] + 1
+									if suspicions[2][tostring(parent)] then
+										suspicions[2][tostring(parent)] = suspicions[2][tostring(parent)] + 3
+									else
+										suspicions[2][tostring(parent)] = 3
+									end
+								end
+								tagged[1][hit] = nil
+							end)
+						end
+
+						if find({"Head","Left Arm","Right Arm","HumanoidRootPart","Torso","Left Leg","Right Leg"},tostring(hit)) then
+							task.wait(0.1)
+							local p = tostring(parent)
+							if not suspicions[2][p] then
+								suspicions[2][p] = 0
+							end
+
+	
+							task.wait()
+							if tick()-LastHit >= 10 then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Spoofing [H]")
+									SD()
+									return
+								else
+									--Warn("3E","Spoofing [H]")
+								end
+							end
+						end
+
+						local FF = ""
+						spawn(function()
+							FF = FindFirstChild(parent,"ForceField")
+						end)
+						if FF == "" or (typeof(FF) ~= "Instance" and FF ~= nil) then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+								SD()
+								return
+							else
+								Warn("4B","Yield")
+							end
+						end
+						if FF ~= nil then
+							if tick() - Check_Debounce_1 > 2 then
+								Check_Debounce_1 = tick()
+								local res,hash
+								spawn(function()
+									res,hash = InvokeServer(REMOTE,"exists",nil,nil,FF)
+								end)
+
+								if res and hash and type(hash) == "string" then
+									local client_hash
+									spawn(function()
+										client_hash = HashFunction(tostring(FF)..tostring(FF["ClassName\000"]))
+									end)
+									if client_hash == hash then
+										r = "ff"
+										return
+									end
+								end
+							else
+								r = "cd"
+								return
+							end
+						end
+
+						if ret then
+							r = "tm"
+							return
+						end
+
+						if tagged[3] then
+							tagged[3]["local"] = tagged[3]["local"] + 1
+						end
+						if Hum and HRP then
+							if not h_1 or not h_2 then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+									SD()
+									return
+								else
+									Warn("4B","Yield")
+								end
+							end						
+
+							if h_1 <= 0 then
+								spawn(function()
+									Humanoid[iXEjH1Foy0("Health")] = 0
+								end)
+								r = "h1"
+								return
+							end
+							if h_2 <= 0 then
+								spawn(function()
+									Hum[iXEjH1Foy0("Health")] = 0
+								end)
+								r = "h2"
+								return
+							end
+
+
+							if pcall(function() local a = hit["Po\000sition"] end) then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"1PS",random(1,1e9),tick())
+									SD()
+									return
+								else
+									Warn("1PS")
+								end
+							end
+							local pos
+							spawn(function()
+								pos = hit[iXEjH1Foy0("Position")]
+							end)
+							if not pos and hit then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+									SD()
+									return
+								else
+									Warn("4B","Yield")
+								end
+							end
+							spawn(function()
+								if hit ~= nil then
+									if GetPosition(hit) ~= pos then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1PS",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1PS")
+										end
+									end
+									if hit.Position ~= hit[iXEjH1Foy0("Position")] then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1PS",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1PS")
+										end
+									end
+								end
+							end)
+							local suc,re = pcall(function()
+								return (GetCFrame(hit) == hit[iXEjH1Foy0("GetPivot")](hit))
+							end)
+							if suc and re == false then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"1PS",random(1,1e9),tick())
+									SD()
+									return
+								else
+									Warn("1PS")
+								end
+							end
+
+
+							do
+								if tick() - FTI_Debounce_1 > 0.1 then
+									FTI_Debounce_1 = tick()
+									local Parts0
+									spawn(function()
+										Parts0 = GetTouchingParts(Instance.new("Part"))
+									end)
+									if type(Parts0) ~= "table" then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+											SD()
+											return
+										else
+											Warn("4B","Yield")
+										end
+									end
+									local Parts
+									spawn(function()
+										Parts = GetTouchingParts(Handle)
+									end)
+									if Parts == nil or type(Parts) ~= "table" then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1GTP",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1GTP")
+										end
+									end
+									local Parts2 
+									spawn(function()
+										Parts2 = Bounds(workspace,GetCFrame(Handle),DefaultSize)
+									end)
+									local Parts3
+									spawn(function()
+										Parts3 = InPart(workspace,Handle)
+									end)
+									local Parts4
+									spawn(function()
+										Parts4 = Bounds(workspace,CFrame.new(9999,99999,9999),DefaultSize)
+									end)
+									local Parts9
+									spawn(function()
+										Parts9 = Bounds(workspace,CFrame.new(9999,99999,9999),Vector3.new(3,3,6))
+									end)
+									wait()
+									local clone = Clone(Handle)
+									spawn(function()
+										ClearAllChildren(clone)
+										clone.CanCollide = false
+										clone.Anchored = true
+										clone.Parent = AntiFolder
+									end)
+									local Parts6
+									spawn(function()
+										Parts6 = Bounds(workspace,clone[iXEjH1Foy0("CFrame")],clone.Size)
+									end)
+									spawn(function()
+										if clone then
+											clone.Position = Vector3.new(0,9999,0)
+										end
+									end)
+									local Parts5
+									spawn(function()
+										Parts5 = InPart(workspace,clone)
+									end)
+									spawn(function()
+										Destroy(clone)
+									end)
+
+									spawn(function()
+										if find(Parts0,hit)  then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check A")
+												SD()
+												return
+											else
+												Warn("1FTI","FTI Check A")
+											end
+										elseif find(Parts4,hit) then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check B")
+												SD()
+												return
+											else
+												Warn("1FTI","FTI Check B")
+											end
+										elseif find(Parts5,hit) then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check C")
+												SD()
+												return
+											else
+												Warn("1FTI","FTI Check C")
+											end
+										end
+									end)
+
+									local result = 0
+									spawn(function()
+										if (Parts == nil or type(Parts) ~= "table") or (Parts2 == nil or type(Parts2) ~= "table") or (Parts3 == nil or type(Parts3) ~= "table") then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1GTP",random(1,1e9),tick())
+												SD()
+												return
+											else
+												Warn("1GTP")
+											end
+										end
+									end)
+									Parts0 = nil
+									Parts = nil
+									Parts2 = nil
+									Parts3 = nil
+									Parts4 = nil
+									Parts5 = nil
+									Parts6 = nil
+									Parts9 = nil
+								end
+							end
+
+							r = "D"
+							spawn(function()
+								if AntiSettings.Hitboxes and not AntiSettings.Silent then
+									if not FindFirstChildOfClass(hit,"SelectionBox") then
+										local box = Clone(Selectionbox)
+										box.Parent = hit
+										box.Adornee = hit
+										Debris[iXEjH1Foy0("AddItem")](Debris,box,.15)
+									end
+								end
+							end)
+							local toolanim
+							spawn(function()
+								toolanim = FindFirstChild(Object,"toolanim")
+							end)
+
+							local multiply = (2.5)
+							if toolanim then
+								local val
+								spawn(function()
+									val = toolanim[iXEjH1Foy0("Value")]
+								end)
+								if val == "Lunge" then
+									counts[6] = counts[6] + floor(Mag*(1.5))*multiply
+								elseif val == "Slash" then
+									counts[6] = counts[6] + floor(Mag)*multiply
+								end
+							else
+								counts[6] = counts[6] + floor(Mag)
+							end
+
+							if Hum[iXEjH1Foy0("Health")] > 0 then
+								if find({"Head","Torso","Left Arm","Right Arm","Left Leg","Right Leg"},hit.Name) then
+									local Pos = GetPosition(HRP)
+									local CF = GetCFrame(HRP)
+									local LimbToPos = {
+										Head = Pos + CF.UpVector*1.5,
+										Torso = Pos,
+										["Left Arm"] = Pos + CF.RightVector*-1.5,
+										["Right Arm"] = Pos + CF.RightVector*1.5,
+										["Left Leg"] = Pos + CF.RightVector*-0.5 - CF.UpVector*2,
+										["Right Leg"] = Pos + CF.RightVector*0.5 - CF.UpVector*2
+									}
+									local RealPosition = GetPosition(hit)
+									local ExpectedPosition = LimbToPos[hit.Name]
+									local Mag = (RealPosition - ExpectedPosition).Magnitude
+									if Mag > 3.45 then
+										InvokeServer(REMOTE,"1CB",random(1,1e9),tick(),("Limb affected: %s\nMagnitude between limb and expected position: %s"):format(hit[iXEjH1Foy0("Name")],Mag))
+									end
+								end
+							end
+						end
+						washit[hit] = false
+					end)
+
+
+					if ran and is_char then
+						wait(0.2)
+						if r == "WD" then
+							counts[4] = counts[4] + 0.5
+						end
+					end
+				end
+				
+				local onhit = function(hit) end
+
+				connections[#connections+1] = Connect(Handle["LocalSimulationTouched\000"],onhit)
+				
+				connections[#connections+1] = Connect(Handle["TouchEnded\000"],function(hit)
+					currenthit = hit
+					attacktick = tick()
+					local parent = ""
+					spawn(function()
+						parent = hit[iXEjH1Foy0("Parent")]
+					end)
+					if parent == "" then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+							SD()
+							return
+						else
+							Warn("4B","Yield")
+						end
+					end
+					
+					if not parent then
+						return
+					end
+					
+					if parent == AntiFolder then
+						return
+					end
+
+					if not (IsA(parent,"Model") and FindFirstChild(parent,"Humanoid")) then
+						return
+					end
+					
+					local ret
+					local ddd = false
+					spawn(function()
+						if AntiSettings.IgnoreTeammates then
+							local Enemy = Players[iXEjH1Foy0("GetPlayerFromCharacter")](Players,parent)
+							if Enemy then
+								if #GetChildren(Teams) > 0 or #GetChildren(Teams) >= 1 then
+									local TeamVerifier = FindFirstChild(Enemy,"TeamVerifier")
+									local Decrypted = WatchdogDecrypt(TeamVerifier.Value,"WatchdogTeam")
+									if Decrypted == Enemy.Name.."-"..tostring(Enemy.TeamColor).."-WatchdogTeam" then
+										if Enemy[iXEjH1Foy0("TeamColor")] == LocalPlayer[iXEjH1Foy0("TeamColor")] then
+											ret = true
+										end
+									else
+										if not AntiSettings.Silent then
+											InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Spoofing")
+											SD()
+											return
+										else
+											Warn("4B","Spoofing")
+										end
+									end
+									--if Enemy[iXEjH1Foy0("TeamColor")] == LocalPlayer[iXEjH1Foy0("TeamColor")] then
+									--	ret = true
+									--end
+								end
+							end
+						end
+						ddd = true
+					end)
+					if not ddd then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+							SD()
+							return
+						else
+							Warn("4B","Yield")
+						end
+					end
+					
+					if ret then
+						return
+					end
+					
+					local t = tick()-youhitmeatthistick
+					if t < 0.0001 then
+						sussyhitsinarow = sussyhitsinarow + 1
+						if sussyhitsinarow >= 10 then
+							if not AntiSettings.Silent then
+
+								InvokeServer(REMOTE,"0FTI",random(1,1e9),tick(),"FTI on "..hit:GetFullName())
+								SD()
+								return
+							else
+								Warn("0FTI","FTI on "..hit:GetFullName())
+							end
+							return
+						end
+					else
+						sussyhitsinarow = 0
+					end
+					
+					local found = false
+					
+					for i,v in pairs(frequenttimebetweenhitskillmeplease) do
+						if math.abs(t-i) < 0.00045 then
+							frequenttimebetweenhitskillmeplease[i] += 1
+							if frequenttimebetweenhitskillmeplease[i] >= 12 then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"0FTI",random(1,1e9),tick(),"FTI on "..hit:GetFullName())
+									SD()
+									return
+								else
+									Warn("0FTI","FTI on "..hit:GetFullName())
+								end
+							end 
+							found = true
+							break
+						end
+					end
+					
+					if not found then
+						for i,v in pairs(frequenttimebetweenhitskillmeplease) do
+							if v > 0 then
+								frequenttimebetweenhitskillmeplease[i] -= 1
+							end
+						end
+						frequenttimebetweenhitskillmeplease[t] = 0
+					end
+					
+					if not found and frequenttimebetweenhitskillmeplease[t] >= 12 then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"0FTI",random(1,1e9),tick(),"FTI on "..tostring(hit))
+							SD()
+							return
+						else
+							Warn("0FTI","FTI on "..tostring(hit))
+						end
+						return
+					end 
+				end)
+				
+				local handleat = function(hit,h)
+					--onhit(hit)
+					local olda,oldb = attacktick,youhitmeatthistick
+					
+					local p = Instance.new("Part")
+					p.Name = "\0"
+					p.Size = Vector3.new(2,2,2)
+					p.Transparency = 1
+					p.CanCollide = false
+					p.Anchored = true
+					
+					local st = tick()
+					local touched = false
+					
+					if not cancheck then
+						Destroy(p)
+						return HashFunction(tostring(hit).."T9kuQcVbx5"..h)
+					end
+					
+					p.Parent = workspace
+					
+					task.spawn(function()
+						while not touched and tick() - st < 3.5 do
+							p.CFrame = Handle.CFrame
+							task.wait(.05)
+							p.CFrame = CFrame.new(0,9999,0)
+							task.wait(.05)
+							if olda ~= attacktick or oldb ~= youhitmeatthistick then
+								touched = true
+								break
+							end
+						end
+					end)
+					
+					repeat wait(.1) until touched or tick() - st >= 3.5
+					
+					if not cancheck then
+						Destroy(p)
+						return HashFunction(tostring(hit).."T9kuQcVbx5"..h)
+					end
+					
+					Destroy(p)
+					
+					if not touched then
+						return generate_random_string(10)
+					end
+					
+					
+					
+					return HashFunction(tostring(hit).."T9kuQcVbx5"..h)
+				end
+
+				local function cleanup()
+					cleaning = true
+					if connections then
+						for i,v in pairs(connections) do
+							v:Disconnect()
+						end
+						connections = nil
+					end
+					if tagged[3] then
+						tagged[3] = nil
+					end
+					if TouchMod then
+						TouchMod.DisconnectAll()
+						TouchMod = nil
+					end
+					for i,v in pairs(MiniParts) do
+						Destroy(i)
+					end
+					tagged[1] = nil
+					SwordIgnore[Object] = nil
+				end
+
+				spawn(function()
+					while true do
+						wait(AntiSettings.ReduceLag and 8 or 5)
+						if Object  then
+							if LocalPlayer[iXEjH1Foy0("Character")] ~= Character then
+								cleanup()
+								break
+							end
+							if Object[iXEjH1Foy0("Parent")] == Character then
+								SetProperty(Handle,"Size",DefaultSize)
+								if Humanoid[iXEjH1Foy0("Health")] <= 0 then
+									Humanoid[iXEjH1Foy0("Health")] = 0
+									cleanup()
+									break
+								end
+								local done = 0
+								local needed = (AntiSettings.ReduceLag and 5 or 11)
+
+								spawn(function()
+									if Size ~= Handle.Size then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check C\nSword Size: "..tostring(Handle.Size))
+											SD()
+											return
+										else
+											Warn("1HRS","Resize Check C\nSword Size: "..tostring(Handle.Size))
+										end
+									end
+									if Handle["size\000"] ~= Size then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check B")
+											SD()
+											return
+										else
+											Warn("1HRS","Resize Check B")
+										end
+									end
+									if Size ~= Handle.size then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Spoof Check B")
+											SD()
+											return
+										else
+											Warn("1HRS","Spoof Check B")
+										end
+									end
+									if pcall(function() local a = Handle["s\000ize"] end) then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Spoof Check A")
+											SD()
+											return
+										else
+											Warn("1HRS","Spoof Check A")
+										end
+									end
+									if pcall(function() local a = Handle["Size\0\0\0\0"..rep("_",300)] end) then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Spoof Check C")
+											SD()
+											return
+										else
+											Warn("1HRS","Spoof Check C")
+										end
+									end
+									if Handle[iXEjH1Foy0("ExtentsSize")] ~= DefaultSize then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Spoof Check C")
+											SD()
+											return
+										else
+											Warn("1HRS","Spoof Check X")
+										end
+									end
+									
+									spawn(function()
+										local fake = Clone(Handle)
+										
+										local s, c = pcall(function()
+											OldNamecall(Handle)
+										end)
+										
+										if c ~= "Trying to call method on object of type: `Part` with incorrect arguments." then
+											warn(c)
+										end
+									end)
+									
+									done = done + 1
+								end)
+								wait(0.1)
+								spawn(function()
+									if FindFirstChild(Handle,"SelectionSphere") then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1SES")
+										end
+									end
+									if FindFirstChild(Object,"SelectionSphere",true) then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1SES")
+										end
+									end
+									if Handle then
+										for i,v in pairs(GetChildren(Handle)) do
+											if IsA(v,"SelectionSphere") then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1SES")
+												end
+											elseif v[iXEjH1Foy0("ClassName")] == "SelectionSphere" then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1SES")
+												end
+											end
+										end
+										for i,v in pairs(GetConnectedParts(Handle)) do
+											if v[iXEjH1Foy0("Size")] ~= DefaultSize and v ~= RightArm and not MiniParts[v] then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1SES",random(1,1e9),tick(),"Visualizer")
+													SD()
+													return
+												else
+													Warn("1SES","Visualizer")
+												end
+											end
+											if FindFirstChildOfClass(v,"SelectionSphere") then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1SES")
+												end
+											elseif v[iXEjH1Foy0("ClassName")] == "SelectionSphere" then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1SES",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1SES")
+												end
+											end
+										end
+									end
+									done = done + 1
+								end)
+								wait(0.1)
+								if not AntiSettings.ReduceLag then
+									spawn(function()
+										if Root ~= nil and Handle ~= nil and RightArm ~= nil then
+											local pos
+											local pos2
+											local pos3
+											local pos4
+											spawn(function()
+												pos = GetPosition(Handle)
+												pos2 = Root.Position
+												pos3 = Handle.Position
+												pos4 = RightArm.Position
+											end)
+											if not pos or not pos2 or not pos3 or not pos4 then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yield")
+													SD()
+													return
+												else
+													Warn("4B","Yield")
+												end
+											end
+
+											if (pos - pos2).Magnitude > 3.9 and IsDescendantOf(Object,Character) and Humanoid[iXEjH1Foy0("Health")] > 0 then
+												done = done + 1
+												local M = string.format("%.2f",(pos - pos2).Magnitude)
+												Warn("1HTP",tonumber(M))
+											end
+											if pos == pos2 then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1HTP1",random(1,1e9),tick(),"Spoof Attempt A")
+													SD()
+													return
+												else
+													Warn("1HTP1","Spoof Attempt A")
+												end
+											end
+											if pos3 == pos4 then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1HTP1",random(1,1e9),tick(),"Spoof Attempt B")
+													SD()
+													return
+												else
+													Warn("1HTP1","Spoof Attempt B")
+												end
+											end
+										end
+										done = done + 1
+									end)
+									wait(0.1)
+									spawn(function()
+										local suc,result
+										spawn(function()
+											suc,result = pcall(function()
+												return Handle:GetTouchingParts()
+											end)
+										end)
+										wait()
+										if not suc then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check I")
+												SD()
+												return
+											else
+												Warn("1FTI","FTI Check I")
+											end
+										end
+										if not result then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1GTP",random(1,1e9),tick(),"GetTouchingParts Bypass Attempt")
+												SD()
+												return
+											else
+												Warn("1GTP","GetTouchingParts Bypass Attempt")
+											end
+										end
+										done = done + 1
+									end)
+									wait(0.1)
+								end
+
+								spawn(function()
+									Handle[iXEjH1Foy0("CanTouch")] = false
+									local size = Handle.Size
+									local a = resize(Handle,Enum.NormalId.Top,1)
+									if a == nil then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1HSS","5")
+										end
+									else
+										if a then
+											if Handle.Size == size then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1HSS",6)
+												end
+											end
+										end
+									end
+									Handle[iXEjH1Foy0("Size")] = size
+									Handle[iXEjH1Foy0("CanTouch")] = true
+									done = done + 1
+								end)
+								wait(0.1)
+								spawn(function()
+									Handle[iXEjH1Foy0("CanTouch")] = false
+									local size = Handle.Size
+									local a
+									spawn(function()
+										a = Resize(Handle,Enum.NormalId.Top,1)
+									end)
+									if a == nil then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+											SD()
+											return
+										else
+											Warn("1HSS",7)
+										end
+									else
+										if a then
+											if Handle.Size == size then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"1HSS",random(1,1e9),tick())
+													SD()
+													return
+												else
+													Warn("1HSS",8)
+												end
+											end
+										end
+									end
+									Handle[iXEjH1Foy0("Size")] = size
+									Handle[iXEjH1Foy0("CanTouch")] = true
+									done = done + 1
+								end)
+								wait(0.1)
+								if not AntiSettings.ReduceLag then
+									spawn(function()
+										local Mass = Handle[iXEjH1Foy0("GetMass")](Handle)
+										if Mass >= 2.5 and Humanoid[iXEjH1Foy0("Health")] > 0 then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check G")
+												SD()
+												return
+											else
+												Warn("1HRS","Resize Check g")
+											end
+										end
+										done = done + 1
+									end)
+									spawn(function()
+										local P = Instance.new("Part")
+										P[iXEjH1Foy0("Name")] = ""
+										P[iXEjH1Foy0("Transparency")] = 1
+										P[iXEjH1Foy0("Anchored")] = true
+										P[iXEjH1Foy0("CanCollide")] = false
+										P[iXEjH1Foy0("Size")] = Vector3.new(1,1,1)
+										P[iXEjH1Foy0("Parent")] = workspace
+										P[iXEjH1Foy0("CFrame")] = Handle[iXEjH1Foy0("CFrame")] - Handle[iXEjH1Foy0("CFrame")].LookVector * 3
+										local Touching = find(GetTouchingParts(Handle),P) ~= nil
+										Destroy(P)
+										if Touching then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check D")
+												SD()
+												return
+											else
+												Warn("1HRS","Resize Check D")
+											end
+										end
+										done = done + 1
+									end)
+									wait(0.1)
+									spawn(function()
+										local con
+										local found = false
+										con = Connect(Handle[iXEjH1Foy0("Changed")],function(b)
+											if b == "AssemblyMass" then
+												found = true
+											end
+										end)
+										wait()
+										Create(TweenService,Handle,TweenInfo.new(0),{Size = DefaultSize}):Play() 
+										wait()
+										if found then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check E")
+												SD()
+												return
+											else
+												Warn("1HRS","Resize Check E")
+											end
+										else
+											Create(TweenService,Handle,TweenInfo.new(0),{Size = DefaultSize+Vector3.new(clamp(random()/100,0.06,math.huge),clamp(random()/100,0.06,math.huge),clamp(random()/100,0.06,math.huge))}):Play()
+											for i = 1,10 do wait() end
+											if not found and IsPC() and Object[iXEjH1Foy0("Parent")] == Character then
+												if not AntiSettings.Silent then
+
+													--InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check F")
+													--SD()
+													--return
+												else
+													--Warn("1HRS","Resize Check F")
+												end
+											end
+											Create(TweenService,Handle,TweenInfo.new(0),{Size = DefaultSize}):Play()
+										end
+										con:Disconnect()
+
+										if pcall(function() Create(TweenService,Handle,TweenInfo.new(0),{Mass = 2^31-1}) end) then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HSS",random(1,1e9),tick(),"Illegal Tween")
+												SD()
+												return
+											else
+												Warn("1HSS","Illegal Tween")
+											end
+										end
+
+										local S = Handle[iXEjH1Foy0("Size")]
+										pcall(function()
+											TweenService[iXEjH1Foy0("cReAtE")](Handle,TweenInfo.new(0),{Size = Vector3.new(2048,0,2048)})
+										end)
+										task.wait()
+										if Handle[iXEjH1Foy0("Size")] == Vector3.new(2048,0,2048) then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HRS",random(1,1e9),tick(),"Resize Check H")
+												SD()
+												return
+											else
+												Warn("1HRS","Resize Check H")
+											end
+										end
+
+										done = done + 1
+									end)
+									wait(0.1)
+								end
+
+								spawn(function()
+									local FullName = GetFullName(Handle)
+									if not FullName:find(PlayerName) and IsDescendantOf(Handle,Character) then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Handle")
+											SD()
+											return
+										else
+											Warn("1SS","Handle")
+										end
+									end
+									if Handle ~= FindFirstChild(Object,"Handle") and Handle[iXEjH1Foy0("Parent")] == Object then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Handle")
+											SD()
+											return
+										else
+											Warn("1SS","Handle")
+										end
+									end
+									done = done + 1
+								end)
+								wait(0.1)
+
+								if not AntiSettings.ReduceLag then
+									spawn(function()
+										local cl1 = Handle:Clone()
+										local cl2 = Clone(Handle)
+
+										do
+											local a
+											spawn(function()
+												a = Handle:GetMass()
+											end)
+											if type(a) ~= "number" then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Mass")
+													SD()
+													return
+												else
+													Warn("4B","Mass")
+												end
+											end
+										end
+
+										do
+											local a
+											spawn(function()
+												a = Handle.Size
+											end)
+											if typeof(a) ~= "Vector3" then
+												if not AntiSettings.Silent then
+
+													InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Size")
+													SD()
+													return
+												else
+													Warn("4B","Size")
+												end
+											end
+										end
+
+
+										if (cl1.Size ~= Handle.Size or cl1["Size\000"] ~= Handle.Size or cl1["size\000"] ~= Handle.Size) or (cl2.Size ~= Handle.Size or cl2["Size\000"] ~= Handle.Size or cl2["size\000"] ~= Handle.Size) then
+											if not AntiSettings.Silent then
+
+												InvokeServer(REMOTE,"1HSS",random(1,1e9),tick(),"Spoofing")
+												SD()
+												return
+											else
+												Warn("1HSS","Spoofing")
+											end
+										end
+
+										Destroy(cl1)
+										Destroy(cl2)
+										done = done + 1
+									end)
+									wait(0.1)
+								end
+
+								wait(1)
+
+								if done ~= needed and not BreakMainLoop then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Yielding/Tampering")
+										SD()
+										return
+									else
+										Warn("4B","Yielding/Tampering")
+									end
+								end
+							else
+
+								if Object[iXEjH1Foy0("Parent")] == nil then
+									cleanup()
+									break
+								end 
+								if Humanoid[iXEjH1Foy0("Health")] <= 0 then
+									Humanoid.Health = 0
+									cleanup()
+									break
+								end
+							end
+						else
+							cleanup()
+							break
+						end
+
+						if tagged[3] then
+							tagged[3].touch = 0
+							tagged[3]["local"] = 0
+							tagged[3]["custom"] = 0	
+						end
+					end
+				end)
+
+				spawn(function()
+					while true do
+						wait(.5)
+						if LocalPlayer[iXEjH1Foy0("Character")] ~= Character then
+							break
+						end
+						if Humanoid[iXEjH1Foy0("Health")] <= 0 then
+							Humanoid[iXEjH1Foy0("Health")] = 0
+							break
+						end
+						if cancheck then
+							local Touch
+							spawn(function()
+								Touch = GetTouchingParts(Handle)
+							end)
+
+							if not Touch or type(Touch) ~= "table" then
+								Warn("4B","Spoofing [I]")
+							end
+
+							for i,v in pairs(Touch) do
+								if MiniParts[v] or v == RightArm or IsDescendantOf(v,AntiFolder) then
+									Touch[i] = nil
+								end
+							end
+
+
+							if #Touch > 0 then
+								wait(.2)
+								if hitcount.real <= 0 then
+									--Warn("4B","Touch Disconnected")
+								end
+								hitcount.real = 0
+							else
+								local P = Instance.new("Part")
+								sussy = P
+								P[iXEjH1Foy0("Transparency")] = 1
+								P[iXEjH1Foy0("Size")] = Vector3.new(1,1,1)
+								P[iXEjH1Foy0("CanCollide")] = false
+								P[iXEjH1Foy0("Anchored")] = true
+								P[iXEjH1Foy0("Parent")] = workspace
+								for i = 1,7 do
+									P[iXEjH1Foy0("CFrame")] = GetCFrame(Handle) + Vector3.new(math.random(-1000,1000)/1000,math.random(-1000,1000)/1000,math.random(-1000,1000)/1000)
+									task.wait(.03)
+								end
+								wait(.1)
+								Destroy(P)
+
+								if hitcount.real <= 0 then
+									--Warn("4B","Touch Disconnected")
+								end
+								hitcount.real = 0
+							end
+						end
+					end
+				end)
+
+				spawn(function()
+					while true do
+						if LocalPlayer[iXEjH1Foy0("Character")] ~= Character then
+							cleanup()
+							break
+						end
+						if Humanoid[iXEjH1Foy0("Health")] <= 0 then
+							Humanoid[iXEjH1Foy0("Health")] = 0
+							break
+						end
+
+						if counts[6] >= 150 then
+							--InvokeServer(REMOTE,"1HD",random(1,1e9),tick(),floor(counts[6]))
+							Warn("1HD",floor(counts[6]))
+						end
+						counts[6] = 0
+
+						if tagged[4] then
+							for i,v in pairs(tagged[4]) do
+								if tick()-v >= 0.75 then
+									tagged[4][i] = nil
+								end
+							end
+						end
+
+
+						spawn(function()
+							local a = tick()
+							wait(0.5)
+							local b = tick()
+							if b == a or a > b or b-a < 0.45 then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"1TS",random(1,1e9),tick())
+									SD()
+									return
+								else
+									Warn("1TS")
+								end
+							end
+						end)
+
+						spawn(function()
+							local a = false
+							spawn(function()
+								wait()
+								a = true
+							end)
+							wait(0.2)
+							if not a then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"1TS",random(1,1e9),tick())
+									SD()
+									return
+								else
+									Warn("1TS")
+								end
+							end
+						end)
+
+						if yields > 25 then
+							Warn("1FTI","FTI Check W")
+						end
+
+						if suspicions[2] then
+							for i,v in pairs(suspicions[2]) do
+								if v >= AntiSettings.CheckXThreshold then
+									suspicions[2][i] = 0
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check X\nSuspicion Level: "..v)
+										SD()
+										break
+									else
+										Warn("1FTI","FTI Check X\nSuspicion Level: "..v)
+										break
+									end
+								end
+							end
+						end
+
+						if counts[4] >= 20 then
+							Warn("5FTI",counts[4])
+							counts[4] = 0
+						end
+
+						if counts[5] >= 30 then
+							Warn("5FTI",counts[5])
+							counts[5] = 0
+						end
+						suspicions[1] = clamp(suspicions[1]-0.5,0,math.huge)
+						if suspicions[2] then
+							for i,v in pairs(suspicions[2]) do
+								suspicions[2][i] = clamp(suspicions[2][i] - 6,0,math.huge)
+							end
+						end
+						counts[4] = clamp(counts[4]-1,0,math.huge)
+
+
+						if FTIInfo then
+							for i,v in pairs(FTIInfo) do
+								local normal = v[1]
+								local touch = v[2]
+								local average_diff = v[3]
+
+								if average_diff == -1 then
+									continue
+								end
+
+								if (abs(normal-touch) > CheckZCount and average_diff < 0.028) then
+									FTIInfo[i] = {0,0,-1,{}}
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"1FTI",random(1,1e9),tick(),"FTI Check Z\nDiff1: "..average_diff.."\nDiff2: "..abs(normal-touch))
+										SD()
+										break
+									else
+										Warn("1FTI","FTI Check Z\nDiff1: "..average_diff.."\nDiff2: "..abs(normal-touch))
+									end
+								else
+									if abs(normal-touch) >= 140 or normal >= 300 then
+										FTIInfo[i] = {0,0,-1,{}}
+									end
+								end
+							end
+						end
+
+						wait(2)
+					end
+				end)
+				SwordIgnore[Object] = handleat
+				local t2 = tick()
+
+				--randomseed(t2 % 1 * 1e9)
+
+				local ran = Random.new(t2 % 1 * 1e9)
+				InvokeServer(REMOTE,"CSA",HashFunction(floor((floor((floor((t2 * ran:NextNumber() * ran:NextNumber()) % 1 * 1e8 / 1e5)^0.5)^3.025)))),{t2,HashFunction(t2)},Handle,Handle.Size)
+			else
+				if not Handle then
+					local Clonee = Object:Clone()
+					local Clone2 = Clone(Object)
+
+					if FindFirstChild(Clonee,"Handle") then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check M")
+							SD()
+							return
+						else
+							Warn("1SS","Check M")
+						end
+					end
+					if FindFirstChild(Clone2,"Handle") then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check K")
+							SD()
+							return
+						else
+							Warn("1SS","Check K")
+						end
+					end
+					local prt = Instance.new("Part")
+					prt.Name = "Handle"
+					prt.Parent = Clonee
+					if not FindFirstChild(Clonee,"Handle") then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check I")
+							SD()
+							return
+						else
+							Warn("1SS","Check I")
+						end
+					end
+					prt.Parent = Clone2
+					if not FindFirstChild(Clone2,"Handle") then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check G")
+							SD()
+							return
+						else
+							Warn("1SS","Check G")
+						end
+					end
+					Destroy(Clone2)
+					Destroy(Clonee)
+					Destroy(prt)
+
+					Clone2 = nil
+					Clonee = nil
+					prt = nil
+				end
+			end
+		else
+			if pcall(function() local a = Object[iXEjH1Foy0("Activate")] end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check A")
+					SD()
+					return
+				else
+					Warn("1SS","Check A")
+				end
+			end
+			if pcall(function() local a = Object[iXEjH1Foy0("Grip")] end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check B")
+					SD()
+					return
+				else
+					Warn("1SS","Check B")
+				end
+			end
+			if pcall(function() local a = Object[iXEjH1Foy0("ToolTip")] end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check C")
+					SD()
+					return
+				else
+					Warn("1SS","Check C")
+				end
+			end
+			if pcall(function() local a = Object[iXEjH1Foy0("ManualActivationOnly")] end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check D")
+					SD()
+					return
+				else
+					Warn("1SS","Check D")
+				end
+			end
+			if pcall(function() Object:Deactivate() end) then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"1SS",random(1,1e9),tick(),"Check E")
+					SD()
+					return
+				else
+					Warn("1SS","Check E")
+				end
+			end
+		end
+	end
+
+	Connect(Character[iXEjH1Foy0("ChildRemoved")],function(obj)
+		wait(0.1)
+		if obj == Humanoid and Humanoid[iXEjH1Foy0("Health")] > 0 then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Humanoid Removal")
+				SD()
+				return
+			else
+				Warn("0CH","Humanoid Removal")
+			end
+		elseif find({"Left Arm","Right Arm","Left Leg","Right Leg"},tostring(obj)) then
+			if Humanoid and Humanoid[iXEjH1Foy0("Health")] > 0 then
+				if not AntiSettings.Silent then
+
+					InvokeServer(REMOTE,"0CH",random(1,1e9),tick(),"Limb Removal")
+					SD()
+					return
+				else
+					Warn("0CH","Limb Removal")
+				end
+			end
+		end
+	end)
+	Connect(Character[iXEjH1Foy0("childAdded")],childadded)
+	for i,v in pairs(GetChildren(Character)) do
+		if IsA(v,"Tool") then
+			childadded(v)
+		end
+	end
+end
+
+-- Setup [2]
+
+do -- Enemies
+	for i,v in pairs(Players[iXEjH1Foy0("GetPlayers")](Players)) do
+		if v ~= LocalPlayer then
+			Connect(v[iXEjH1Foy0("CharacterAdded")],EnemyCharacterAdded)
+			if v[iXEjH1Foy0("Character")] then
+				EnemyCharacterAdded(v[iXEjH1Foy0("Character")])
+			end
+		end
+	end
+	Connect(Players[iXEjH1Foy0("PlayerAdded")],function(plr)
+		if plr ~= LocalPlayer then
+			Connect(plr[iXEjH1Foy0("CharacterAdded")],EnemyCharacterAdded)
+			if plr[iXEjH1Foy0("Character")] then
+				EnemyCharacterAdded(plr[iXEjH1Foy0("GetPlayers")])
+			end
+		end
+	end)
+	Connect(Players[iXEjH1Foy0("PlayerRemoving")],function(plr)
+		Leaving[plr[iXEjH1Foy0("UserId")]] = true
+		if Watching[plr] then
+			Watching[plr] = nil
+		end
+	end)
+end
+
+do -- LocalPlayer
+	Connect(WaitForChild(LocalPlayer,"Backpack")[iXEjH1Foy0("childAdded")],function(obj)
+		local class = obj[iXEjH1Foy0("ClassName")]
+		if class ~= "Tool" and class ~= "LocalScript" then
+			if not AntiSettings.Silent then
+
+				InvokeServer(REMOTE,"1INS",random(1,1e9),tick(),"Object Name: "..tostring(obj).."\nObject Class: "..class)
+				SD()
+				return
+			else
+				Warn("1INS","Object Name: "..tostring(obj).."\nObject Class: "..class)
+			end
+		end
+	end)
+	Connect(LocalPlayer[iXEjH1Foy0("CharacterAdded")],CharacterAdded)
+
+	if LocalPlayer[iXEjH1Foy0("Character")] ~= nil then
+		CharacterAdded(LocalPlayer[iXEjH1Foy0("Character")])
+	end
+end
+
+
+do -- Miscellaneous Connections
+
+	if AntiSettings.HideDevConsole  then
+		pcall(function()
+			Connect(UIS[iXEjH1Foy0("TextBoxFocused")],function(box)
+				Last_Focus_Tick[1] = tick()
+
+				if not pcall(function() tostring(box) end) and not GuiService[iXEjH1Foy0("MenuIsOpen")] then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"TextBox")
+						SD()
+						return
+					else
+						Warn("3E","TextBox")
+					end
+				end
+			end)
+		end)
+	end
+
+	pcall(function()
+		Connect(game[iXEjH1Foy0("GetService")](game,"ScriptContext")[iXEjH1Foy0("Error")],Error)
+	end)
+end
+
+-- Setup [3]
+local namecolor = "rgb(0,0,0)"
+local chatcolor = "rgb(255,255,255)"
+local iskick = true
+local SystemChannel
+local debounce = false
+local chat = false
+
+if GetService(game,"TextChatService").ChatVersion == Enum.ChatVersion.TextChatService then
+	SystemChannel = FindFirstChild(GetService(game,"TextChatService"),"RBXSystem",true) 
+
+	GetService(game,"TextChatService").OnIncomingMessage = function(message)
+		local properties = Instance.new("TextChatMessageProperties")
+
+		if message.MessageId:split("-{")[1] == "0" and message.Text:find("[wac]") and chat then
+			chat = false
+			local new = message.Text:gsub("%[wac%]","")
+			properties.PrefixText = string.format(
+				"<font color='"..namecolor.."'><b>"..(iskick and "[Watchdog Kick]" or "[Watchdog Warning]").."</b></font>%s",
+				message.PrefixText
+			)
+			properties.Text = "<font color='"..chatcolor.."'>"..new.."</font>"
+		end
+
+		return properties
+	end
+
+	Connect(GetService(game,"TextChatService").MessageReceived,function(message)
+		if message.MessageId:split("-{")[1] == tostring(LocalPlayer.UserId) then
+			if debounce then
+				return
+			end
+			debounce = true
+			task.delay(.1,function()
+				debounce = false
+			end)
+			OpenLogsFunction(message.Text)
+		end
+	end)
+else
+	LocalPlayer.Chatted:Connect(OpenLogsFunction)
+end
+
+
+REMOTE.OnClientInvoke = function(METHOD,...)
+	local args = {...}
+	if METHOD == "LOG" then
+		LogFunction(args[1])
+	elseif METHOD == "ping" then
+		return true
+	elseif METHOD == "sword" then
+		if DebugMode and not AntiSettings.Silent then 
+			warn("[WATCHDOG DEBUG MODE]:","Server requested sword touches") 
+		end
+		if args[1] ~= nil and SwordIgnore[args[1]] then
+			return SwordIgnore[args[1]](args[2],args[3])
+		end
+		return "not found"
+	elseif METHOD == "isalive" then
+		local args = {BreakMainLoop,SELFDESTRUCT,Last_Tick,Last_Settings_Tick,Last_MS_Tick}
+		for i,v in pairs(args) do
+			args[i] = {v,HashFunction(tostring(v))}
+		end
+		return args
+	elseif METHOD == "message" then
+		iskick = args[1]
+		namecolor = args[2]
+		chatcolor = args[3]
+		if SystemChannel then
+			chat = true
+			SystemChannel:DisplaySystemMessage(args[4])
+		end
+	end
+end
+
+
+if AntiSettings.ConfuseExploiters then
+	local CE_Tick1 = tick()
+	local Objects = {workspace,ReplicatedStorage,StarterGui,Selectionbox,UIS,LocalPlayer}
+	local Properties = {"GetChildren","IsA","Name","Parent","Health","WalkSpeed","JumpPower","ClassName","CFrame","Position","Key","FindFirstChild","WaitForChild","Salt"}
+
+	local function ConfuseIndex(call)
+		local object = Objects[random(1,#Objects)]
+		local prop = Properties[random(1,#Properties)]
+		pcall(function()
+			if not call then
+				local _ = object[prop]
+			else
+				object[prop]()
+			end
+		end)
+	end
+
+	coroutine.resume(coroutine.create(function()
+		while true do
+			if tick() - CE_Tick1 >= 5 then
+				CE_Tick1 = tick()
+				for i = 1,random(7,13) do
+					ConfuseIndex()
+				end
+			end
+
+			wait(1)
+		end
+	end))
+end
+
+spawn(function()
+	while true do
+		local p = Players[iXEjH1Foy0("GetPlayers")](Players)
+		local c = 0
+		local c1 = #GetChildren(Players)
+		local c2 = Players[iXEjH1Foy0("NumPlayers")]
+
+		local function prs(tab)
+			return next, tab, nil
+		end
+
+		for i,v in prs(p) do
+			if PropertySpoofCheck(v,"ClassName","Player") then
+				Warn("3E","Spoofing ClassName")
+			end
+			if v[iXEjH1Foy0("ClassName")] ~= "Player" then
+				Warn("3E","Fake Players")
+			end
+
+			if Watching[v] then
+				local tbl = Watching[v]
+				local Char,Plr,FakeLimbs,CChildren,LeftLeg,Sizes,Humanoid = tbl[1],tbl[5],tbl[3],tbl[2],tbl[4],tbl[6],tbl[7]
+				local p = iXEjH1Foy0("Parent")
+
+				if Plr ~= nil and Leaving[Plr[iXEjH1Foy0("UserId")]] and not BreakMainLoop then
+					Watching[Plr] = nil
+				end
+				if Char[p] ~= workspace then
+					Watching[Plr] = nil
+				end
+
+				if LeftLeg and LeftLeg[p] == Char then
+					if not FindFirstChild(Char,"Left Leg") or FindFirstChild(Char,"Left Leg") ~= LeftLeg then
+						if not AntiSettings.Silent then
+
+							InvokeServer(REMOTE,"4B",random(1,1e9),tick(),"Integrity Check")
+							SD()
+							return
+						else
+							Warn("4B","Integrity Check")
+						end
+					end
+				end
+
+				if CChildren then
+					for i,v in prs(CChildren) do
+						if IsA(v,"BasePart") then
+							if tostring(v) == "Left Leg" and LeftLeg ~= v then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"2HBE",random(1,1e9),tick(),"Spoof Type F")
+									SD()
+									return
+								else
+									Warn("2HBE","Spoof Type F")
+								end
+							end
+							if v[iXEjH1Foy0("Parent")] ~= Char and (Humanoid[iXEjH1Foy0("Health")] > 0 or PropertySpoofCheck(Humanoid,"Health",Humanoid.Health)) then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"2HBE",random(1,1e9),tick(),"Spoof Type F")
+									SD()
+									return
+								else
+									Warn("2HBE","Spoof Type F")
+								end
+							end
+							if FakeStringTest(v,"Parent") then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"2HBE",random(1,1e9),tick(),"Spoof Type H")
+									SD()
+									return
+								else
+									Warn("2HBE","Spoof Type H")
+								end
+							end
+							if pcall(function() local a = v[get_fake_string("Size")] end) then
+								if not AntiSettings.Silent then
+
+									InvokeServer(REMOTE,"2HBE",random(1,1e9),tick(),"Spoof Type E")
+									SD()
+									return
+								else
+									Warn("2HBE","Spoof Type E")
+								end
+							end
+							local m = iXEjH1Foy0("Mass")
+							local n = tostring(v)
+							local s1 = v.Size
+							local s2 = v.size
+
+							if Sizes[n] then
+								if v[m] ~= v.Mass then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type F")
+										SD()
+										return
+									else
+										Warn("1HBE","Spoof Type F")
+									end
+								end
+								if pcall(function() local _ = v["Mass\0\0\0"..rep("_",300)] end) then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type V")
+										SD()
+										return
+									else
+										Warn("1HBE","Spoof Type V")
+									end
+								end
+
+								if PropertySpoofCheck(v,"Size",Sizes[n]) then
+									Warn("1HBE","Spoof Type X")
+								end
+
+								if s1 ~= Sizes[n] then
+									if not AntiSettings.Silent then
+
+										InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type B")
+										SD()
+										return
+									else
+										Warn("1HBE","Spoof Type B")
+									end
+								else
+									if s1 ~= s2 or s2 ~= v[iXEjH1Foy0("Size")] or s1 ~= v[iXEjH1Foy0("size")] then
+										if not AntiSettings.Silent then
+
+											InvokeServer(REMOTE,"1HBE",random(1,1e9),tick(),"Spoof Type A")
+											SD()
+											return
+										else
+											Warn("1HBE","Spoof Type A")
+										end
+									end
+								end
+							end
+						end
+					end
+				end
+				wait(.1)
+			end
+			c = c + 1
+		end
+		if c ~= c1 or c ~= c2 then
+			Warn("3E","Hiding Players")
+		end
+		wait(random()*13)
+	end
+end)
+
+if not AntiSettings.Silent then
+	warn("\n"..string.rep("-",100).."\n"..[[                       888            888           888                   
+                       888            888           888                   
+                       888            888           888                   
+888  888  888  8888b.  888888 .d8888b 88888b.   .d88888  .d88b.   .d88b.  
+888  888  888     "88b 888   d88P"    888 "88b d88" 888 d88""88b d88P"88b 
+888  888  888 .d888888 888   888      888  888 888  888 888  888 888  888 
+Y88b 888 d88P 888  888 Y88b. Y88b.    888  888 Y88b 888 Y88..88P Y88b 888 
+ "Y8888888P"  "Y888888  "Y888 "Y8888P 888  888  "Y88888  "Y88P"   "Y88888 
+                                                                      888 
+Version: ]]..tostring(WATCHDOG_VERSION)..[[                                                      Y8b d88P 
+Scripted by daily3014TheGod                                       "Y88P"
+Polished by ConfiguristTheGod
+]].."\n"..string.rep("-",100))
+end
+
+if DebugMode then
+	warn("Loaded in "..tick()-start_tick.." seconds")
+end
+
+local P = Instance.new("LocalScript")
+P.Disabled = true
+P.Parent = ReplicatedFirst
+P.Name = "\0"
+P.Destroying:Connect(function()
+	while true do end
+end)
+P = nil
+
+while true do
+	if BreakMainLoop then
+		break
+	end
+
+	local a = tick()
+
+	if a - Last_Tick >= 10 then
+		if AntiSettings.MaximumSecurityV2 and not AntiSettings.Silent then
+			local s = Instance.new("LocalScript")
+			s[iXEjH1Foy0("Name")] = generate_random_string()
+			--setfenv(0,{script = s})
+		end
+		if AntiSettings.EncryptRemotes and not AntiSettings.Silent then
+			spawn(Remote)
+		end
+		spawn(Character_Check)
+		spawn(Metatable_Check)
+		spawn(Aimbot)
+		spawn(Bypass)
+		spawn(HBE)
+
+		if AntiSettings.DetectGUIs then
+			spawn(GUI)
+		end
+		if AntiSettings.RandomizeServiceNames and not AntiSettings.Silent then
+			spawn(RandomizeName,workspace)
+			spawn(RandomizeName,ReplicatedStorage)
+			spawn(RandomizeName,Players)
+			spawn(RandomizeName,StarterGui)
+			spawn(RandomizeName,ACFolder)
+		end
+
+
+		if DebugMode and not AntiSettings.Silent then
+			warn("[WATCHDOG DEBUG MODE]:","Sending key to server")
+		end
+		if BreakMainLoop then 
+			if DebugMode and not AntiSettings.Silent then
+				warn("[WATCHDOG DEBUG MODE]:","[KEY] Denied Sending (1)") 
+			end 
+		else
+			local t = tick()
+			local ran
+			spawn(function()
+				coroutine.resume(coroutine.create(function()
+					pcall(function()
+						ran = Random.new(t % 1 * 1e9)
+					end)
+				end))
+			end)
+			wait(0.1)
+
+			local a = floor((floor((floor((t * ran:NextNumber() * ran:NextNumber()) % 1 * 1e8 / 1e5)^0.5)^3.1111)))
+			local h = HashFunction(a)
+
+			InvokeServer(REMOTE,"",h,{t,HashFunction(t)})
+		end
+
+		Last_Tick = tick()
+	end
+	if a - Last_Settings_Tick >= 10 then
+		local count = 0
+
+		for i,v in pairs(AntiSettings) do
+			if v == true then count = count + 1 end
+		end
+
+		local new_seed1 = SettingSeeds.seed_1
+		local new_seed2 = SettingSeeds.seed_2
+		local new_seed1b = SettingSeeds.seed_1b
+
+		new_seed1 = (new_seed1 / new_seed1b) - count
+		new_seed2 = new_seed2 - new_seed1
+
+
+		randomseed(new_seed2)
+		local ourval = random(1e5,1e9)
+		if ourval ~= SettingSeeds.val then
+			InvokeServer(REMOTE,"4ST",random(1,1e9),tick())
+			break
+		end
+		Last_Settings_Tick = tick()
+	end
+	if a - Last_MS_Tick >= 2.5 then
+
+		OnSuccess(function()
+			local a = workspace["\0"]["WATCHDOG"]
+		end,function()
+			InvokeServer(REMOTE,"3E",random(1,1e9),tick(),"Attempting to hide instances")
+			SD()
+			return
+		end)
+
+		if StatsService[iXEjH1Foy0("DataSendKbps")] >= 1500 then
+			InvokeServer(REMOTE,"5LAG",random(1,1e9),tick(),"User is sending too much data per second\nSend Kbps: "..StatsService[iXEjH1Foy0("DataSendKbps")])
+			SD()
+			break
+		end
+
+		if AntiSettings.AntiWorkspaceTampering or AntiSettings.DetectGUIs then
+			spawn(function()
+				local b = Last_WS_Tick
+				WS_Part[iXEjH1Foy0("Parent")] = workspace
+				WS_Part[iXEjH1Foy0("Parent")] = nil
+				if Last_WS_Tick == a then
+					if not AntiSettings.Silent then
+
+						InvokeServer(REMOTE,"2WT",random(1,1e9),tick(),"Bypass Attempt")
+						SD()
+						return
+					else
+						Warn("2WT","Bypass Attempt")
+					end
+				end
+			end)
+		end
+
+		if gcinfo() ~= gcinfo() then
+			if GCTries ~= 0 then
+				if tick()-Loop_Debounce >= 3 then
+					Loop_Debounce = tick()
+					InvokeServer(REMOTE,"4BSS",random(1,1e9),tick(),"gcinfo hook")
+				end
+			else
+				GCTries = 1
+			end
+		end
+
+		Last_MS_Tick = tick()
+	end
+
+	wait(0.1) 
+end
+-- END
