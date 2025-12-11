@@ -45,19 +45,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         ast.statements = LiftControlFlow(0, -1, visited);
         auto s = std::format(
             R"(
-    Fission -- Function Information:
-        - Upvalue Count: {}
-        - Argument Count: {}
-        - Debug Name: {}
-        - Bytecode ID: {}
-        - Registers Used: R0-R{}
+    Fission ~~ Function Information:
+        ~ Upvalue Count: {}
+        ~ Argument Count: {}
+        ~ Debug Name: {}
+        ~ Bytecode ID: {}
+        ~ Registers Used: R0-R{}
 )",
             analyzedFunction.lpLiftedFunction->lpDeserialized->nups, analyzedFunction.lpLiftedFunction->lpDeserialized->numparams,
             analyzedFunction.lpLiftedFunction->lpDeserialized->debugName.value_or("anon/no name"),
             analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId, analyzedFunction.lpLiftedFunction->lpDeserialized->maxstacksize - 1
         );
 
-        if (analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId == 1) {
+        if (analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain) {
             s = "\n    Decompiled with the Fission decompiler for RbxCli\n";
         }
 
@@ -646,29 +646,56 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
         return LiftExpression(def->operands[1], forceExpression);
 
     case LiftedOperation::CONCAT: {
-        std::shared_ptr<Expression> expr = nullptr;
         int startReg = def->operands[1].value.reg;
         int endReg = def->operands[2].value.reg;
+        std::vector<LiftedOperand> operands;
 
+        bool implicitCoversAll = false;
         if (m_currentFunction->implicitUses.contains(def)) {
             const auto &vers = m_currentFunction->implicitUses.at(def);
-            for (size_t i = 0; i < vers.size(); ++i) {
-                LiftedOperand partOp;
-                partOp.type = LiftedOperandType::Register;
-                partOp.value.reg = startReg + i;
-                partOp.ssaVersion = vers[i];
-                auto part = LiftExpression(partOp);
-                expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
+            if (vers.size() == (size_t)(endReg - startReg + 1)) {
+                implicitCoversAll = true;
+                for (size_t i = 0; i < vers.size(); ++i) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = startReg + i;
+                    op.ssaVersion = vers[i];
+                    operands.push_back(op);
+                }
             }
-        } else {
-            for (int r = startReg; r <= endReg; ++r) {
-                LiftedOperand partOp;
-                partOp.type = LiftedOperandType::Register;
-                partOp.value.reg = r;
-                partOp.ssaVersion = def->operands[1].ssaVersion;
-                auto part = LiftExpression(partOp);
-                expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
+        }
+
+        if (!implicitCoversAll) {
+            operands.push_back(def->operands[1]);
+
+            if (m_currentFunction->implicitUses.contains(def)) {
+                const auto &vers = m_currentFunction->implicitUses.at(def);
+                for (size_t i = 0; i < vers.size(); ++i) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = startReg + 1 + i;
+                    op.ssaVersion = vers[i];
+                    operands.push_back(op);
+                }
+            } else {
+                for (int r = startReg + 1; r < endReg; ++r) {
+                    LiftedOperand op;
+                    op.type = LiftedOperandType::Register;
+                    op.value.reg = r;
+                    op.ssaVersion = -1;
+                    operands.push_back(op);
+                }
             }
+
+            if (endReg > startReg) {
+                operands.push_back(def->operands[2]);
+            }
+        }
+
+        std::shared_ptr<Expression> expr = nullptr;
+        for (const auto &op : operands) {
+            auto part = LiftExpression(op);
+            expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
         }
         return expr ? expr : std::make_shared<StringLiteralNode>("");
     }

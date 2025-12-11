@@ -29,12 +29,13 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
           LiftedOperation::NAMECALL,  LiftedOperation::ADD,       LiftedOperation::SUB,        LiftedOperation::MUL,        LiftedOperation::DIV,
           LiftedOperation::MOD,       LiftedOperation::POW,       LiftedOperation::ADDK,       LiftedOperation::SUBK,       LiftedOperation::MULK,
           LiftedOperation::DIVK,      LiftedOperation::MODK,      LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
-          LiftedOperation::ANDK,      LiftedOperation::ORK,       LiftedOperation::CONCAT,     LiftedOperation::NOT,        LiftedOperation::MINUS,
-          LiftedOperation::LENGTH,    LiftedOperation::NEWTABLE,  LiftedOperation::DUPTABLE,   LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE,
-          LiftedOperation::SUBRK,     LiftedOperation::DIVRK,     LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
+          LiftedOperation::ANDK,      LiftedOperation::ORK,       LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
+          LiftedOperation::NEWTABLE,  LiftedOperation::DUPTABLE,  LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
+          LiftedOperation::DIVRK,     LiftedOperation::IDIV,      LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
         set(op, AccessType::Write);
     }
 
+    set(LiftedOperation::CONCAT, AccessType::ReadWrite);
     set(LiftedOperation::CALL, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Read);
 

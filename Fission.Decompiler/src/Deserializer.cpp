@@ -5,7 +5,7 @@
 #include "Deserializer.hpp"
 
 std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string &bytecode) {
-    BinaryReader reader {bytecode};
+    BinaryReader reader{bytecode};
     DeserializedBytecode result;
     result.bytecodeVersion = reader.Read<uint8_t>();
 
@@ -50,7 +50,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
     result.functions.resize(protoCount);
 
     for (auto i = 0llu; i < protoCount; i++) {
-        DeserializedFunction function { };
+        DeserializedFunction function{};
         function.bytecodeId = int(i);
         function.maxstacksize = reader.Read<uint8_t>();
         function.numparams = reader.Read<uint8_t>();
@@ -120,7 +120,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         function.constants.resize(sizek);
 
         for (auto j = 0llu; j < sizek; j++) {
-            function.constants[j] = LuauConstant { };
+            function.constants[j] = LuauConstant{};
             auto lbcConstant = reader.Read<uint8_t>();
             switch (lbcConstant) {
             case LBC_CONSTANT_NIL:
@@ -147,7 +147,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 auto z = reader.Read<float>();
                 auto w = reader.Read<float>();
                 function.constants[j].kType = LUA_TVECTOR;
-                function.constants[j].constantData = LuauVector {x, y, z, w};
+                function.constants[j].constantData = LuauVector{x, y, z, w};
                 break;
             }
 
@@ -177,7 +177,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                     vec.emplace_back(std::get<std::string>(constant.constantData));
                 }
                 function.constants[j].kType = LUA_TTABLE;
-                function.constants[j].constantData = LuauTable {vec};
+                function.constants[j].constantData = LuauTable{vec};
                 break;
             }
 
@@ -191,7 +191,6 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             default:
                 // ASSERT(false, "WARNING! Unknown constant!", lbcConstant);
                 break;
-
             }
         }
 
@@ -213,7 +212,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             int absoffset = (function.instructions.size() + 3) & ~3;
 
             const int sizelineinfo = absoffset + intervals * sizeof(int);
-            function.lineinfo = { };
+            function.lineinfo = {};
             function.lineinfo.resize(sizelineinfo);
 
             function.abslineinfo = reinterpret_cast<int *>(function.lineinfo.data() + absoffset);
@@ -235,7 +234,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
         if (debuginfo) {
             const int sizelocvars = reader.ReadVariableInteger();
-            function.locvars = { };
+            function.locvars = {};
             function.locvars.resize(sizelocvars);
 
             for (int j = 0; j < sizelocvars; ++j) {
@@ -253,7 +252,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             const int sizeupvalues = reader.ReadVariableInteger();
             // ASSERT(sizeupvalues == function.nups, "nups != sizeupvalues");
 
-            function.upvalueNames = { };
+            function.upvalueNames = {};
             function.upvalueNames.resize(sizeupvalues);
 
             for (int j = 0; j < sizeupvalues; ++j) {
@@ -268,6 +267,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
     auto mainfid = reader.ReadVariableInteger();
 
     result.lpMainFunction = result.functions.data() + mainfid;
+    result.lpMainFunction->bIsMain = true;
 
     // ASSERT(
     //     reader.GetCurrentReaderPosition() == reader.GetEndPosition(),
