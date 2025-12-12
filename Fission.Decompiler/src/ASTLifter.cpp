@@ -655,8 +655,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                         if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(val); lpBinExpr != nullptr)
                             if (auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(lpBinExpr->left); identifier != nullptr) {
                                 // expression is compound.
-                                statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(lpBinExpr->op, lpBinExpr->left, lpBinExpr->right));
-                                break;
+                                if (identifier->identifier->name == target->identifier->name) {
+                                    statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(lpBinExpr->op, lpBinExpr->left, lpBinExpr->right));
+                                    break;
+                                }
                             }
                     }
 
@@ -1059,25 +1061,38 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     }
 
     if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::NAMECALL) {
-        int regA = inst->operands[0].value.reg;
+        // int regA = inst->operands[0].value.reg;
 
         if (inst->operation == LiftedOperation::CALL && inst->operands[2].value.imm.n == 0)
             return true;
 
+        int usedDefs = 0;
+        SSARef usedRef;
+
         for (const auto &[ref, defInst] : m_currentFunction->definitionMap) {
-            if (defInst == inst && ref.regIndex == regA) {
-                auto users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
-                if (users.size() == 1) {
-                    auto op = users[0]->operation;
-                    // allow inlining returns, other Calls, and arith ops.
-                    if (op == LiftedOperation::RETURN || op == LiftedOperation::CALL || op == LiftedOperation::NAMECALL || op == LiftedOperation::ADD ||
-                        op == LiftedOperation::SUB || op == LiftedOperation::MUL || op == LiftedOperation::DIV || op == LiftedOperation::MOD ||
-                        op == LiftedOperation::POW || op == LiftedOperation::CONCAT || op == LiftedOperation::MINUS || op == LiftedOperation::NOT ||
-                        op == LiftedOperation::LENGTH) {
-                        return true;
-                    }
+            if (defInst == inst) {
+                if (m_currentFunction->useCounts[ref] > 0) {
+                    usedDefs++;
+                    usedRef = ref;
                 }
-                return false;
+            }
+        }
+
+        if (usedDefs > 1)
+            return false;
+        if (usedDefs == 0)
+            return false;
+
+        auto users = m_currentFunction->users[usedRef];
+        if (users.size() == 1) {
+            auto op = users[0]->operation;
+            if (op == LiftedOperation::RETURN || op == LiftedOperation::CALL || op == LiftedOperation::NAMECALL || op == LiftedOperation::ADD ||
+                op == LiftedOperation::SUB || op == LiftedOperation::MUL || op == LiftedOperation::DIV || op == LiftedOperation::MOD ||
+                op == LiftedOperation::POW || op == LiftedOperation::CONCAT || op == LiftedOperation::MINUS || op == LiftedOperation::NOT ||
+                op == LiftedOperation::LENGTH || op == LiftedOperation::JUMPIFEQ || op == LiftedOperation::JUMPIFNOTEQ || op == LiftedOperation::JUMPIFLT ||
+                op == LiftedOperation::JUMPIFNOTLT || op == LiftedOperation::JUMPIFLE || op == LiftedOperation::JUMPIFNOTLE || op == LiftedOperation::JUMPIF ||
+                op == LiftedOperation::JUMPIFNOT || op == LiftedOperation::JUMPXEQK) {
+                return true;
             }
         }
         return false;
