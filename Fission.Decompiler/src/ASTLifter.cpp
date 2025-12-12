@@ -91,26 +91,156 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
-            uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
 
+            uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
             if (mergeIdx == static_cast<uint32_t>(-1) && stopBlockId != static_cast<uint32_t>(-1))
                 mergeIdx = stopBlockId;
 
-            std::shared_ptr<Expression> cond = std::make_shared<BooleanLiteralNode>(true);
-            if (block.lpTail) {
-                cond = LiftExpression(block.lpTail->operands[0]);
+            bool isSequential = CanReach(trueIdx, falseIdx, mergeIdx, visited);
+
+            if (isSequential)
+                mergeIdx = falseIdx;
+
+            std::shared_ptr<Expression> cond;
+            switch (block.lpTail->operation) {
+            case LiftedOperation::JUMPIFNOTEQ: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    "==", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIFEQ: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    "~=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIFLT: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    "<", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIFNOTLT: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    ">", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIFLE: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    "<=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIFNOTLE: {
+                cond = std::make_shared<BinaryExpressionNode>(
+                    ">=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
+                );
+                break;
+            }
+            case LiftedOperation::JUMPIF: {
+                cond = this->LiftExpression(block.lpTail->operands[0]);
+                break;
+            case LiftedOperation::JUMPIFNOT: {
+                cond = std::make_shared<UnaryExpressionNode>("not ", this->LiftExpression(block.lpTail->operands[0]));
+                break;
+            }
+            }
+            case LiftedOperation::JUMPXEQK: {
+                auto kIdx = block.lpTail->operands[2].value.imm.k;
+                auto notFlag = block.lpTail->operands[3].value.imm.b;
+                std::shared_ptr<Expression> rhs;
+                const auto &k = this->m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+                switch (k.kType) {
+                case LUA_TNIL:
+                    rhs = std::make_shared<NilLiteralNode>();
+                    break;
+                case LUA_TBOOLEAN:
+                    rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                    break;
+                case LUA_TNUMBER:
+                    rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                    break;
+                case LUA_TSTRING:
+                    rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                    break;
+                default:
+                    rhs = std::make_shared<NilLiteralNode>(); // fallback
+                    break;
+                }
+
+                if (notFlag)
+                    cond = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(block.lpTail->operands[0]), rhs);
+                else
+                    cond = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(block.lpTail->operands[0]), rhs);
+                break;
+            }
+
+            default:
+                cond = std::make_shared<BooleanLiteralNode>(true);
+                break;
+            }
+
+            bool bInvert = false;
+            // if the false branch is an immediate return/break, we should invert it
+            // to keep cflow flat.
+            if (!isSequential && falseIdx < m_currentFunction->basicBlocks.size()) {
+                BlockType bt = m_currentFunction->basicBlocks[falseIdx].bType;
+                if (bt == BlockType::Return || bt == BlockType::Break) {
+                    bInvert = true;
+                }
+            }
+
+            if (bInvert) {
+                if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
+                    cond = unary->operand;
+                } else if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(cond)) {
+                    if (binary->op == "==")
+                        binary->op = "~=";
+                    else if (binary->op == "~=")
+                        binary->op = "==";
+                    else if (binary->op == "<")
+                        binary->op = ">=";
+                    else if (binary->op == ">")
+                        binary->op = "<=";
+                    else if (binary->op == "<=")
+                        binary->op = ">";
+                    else if (binary->op == ">=")
+                        binary->op = "<";
+                    else
+                        cond = std::make_shared<UnaryExpressionNode>("not ", cond);
+                } else {
+                    cond = std::make_shared<UnaryExpressionNode>("not ", cond);
+                }
+
+                std::swap(trueIdx, falseIdx);
             }
 
             std::set<uint32_t> subVisited = visited;
-            auto thenBody = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, subVisited));
-            subVisited = visited;
-            auto elseBody = CreateBlock(LiftControlFlow(falseIdx, mergeIdx, subVisited));
+            auto thenStmts = LiftControlFlow(trueIdx, mergeIdx, subVisited);
+
+            std::vector<std::shared_ptr<Statement>> elseStmts;
+            if (!isSequential && !bInvert) {
+                subVisited = visited;
+                elseStmts = LiftControlFlow(falseIdx, mergeIdx, subVisited);
+            }
 
             auto ifStmt = std::make_shared<IfStatementNode>();
             ifStmt->condition = cond;
-            ifStmt->thenBranch = thenBody;
-            ifStmt->elseBranch = elseBody;
-            nodes.push_back(ifStmt);
+            ifStmt->thenBranch = CreateBlock(thenStmts);
+
+            if (bInvert) {
+                subVisited = visited;
+                auto mainBodyStmts = LiftControlFlow(falseIdx, mergeIdx, subVisited);
+                nodes.push_back(ifStmt);
+                nodes.insert(nodes.end(), mainBodyStmts.begin(), mainBodyStmts.end());
+            } else {
+                if (!elseStmts.empty()) {
+                    ifStmt->elseBranch = CreateBlock(elseStmts);
+                }
+                nodes.push_back(ifStmt);
+            }
 
             auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
             nodes.insert(nodes.end(), after.begin(), after.end());
@@ -347,7 +477,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 }
             }
 
-            if (i == block.lpTail->instructionIndex && inst.operation == LiftedOperation::RETURN && rets.empty())
+            if (i == (int32_t)this->m_currentFunction->lpLiftedFunction->instructions.size() - 1 && inst.operation == LiftedOperation::RETURN && rets.empty())
                 continue; // ignore last return if and only if there's no returns.
 
             statements.push_back(std::make_shared<ReturnStatementNode>(rets));
@@ -538,6 +668,46 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         }
     }
     return statements;
+}
+
+bool ASTLifter::CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const std::set<uint32_t> &visitedScopes) {
+    if (start == target)
+        return true;
+
+    std::queue<uint32_t> q;
+    std::set<uint32_t> visited;
+
+    q.push(start);
+    visited.insert(start);
+
+    while (!q.empty()) {
+        uint32_t curr = q.front();
+        q.pop();
+
+        if (curr == target)
+            return true;
+        if (curr == stopBlock)
+            continue;
+
+        if (visited.size() > 5000)
+            return false;
+
+        const auto &block = m_currentFunction->basicBlocks[curr];
+
+        for (uint32_t succ : block.successors) {
+            if (block.bType == BlockType::LoopLatch && succ < curr)
+                continue;
+
+            if (visitedScopes.contains(succ))
+                continue;
+
+            if (!visited.contains(succ)) {
+                visited.insert(succ);
+                q.push(succ);
+            }
+        }
+    }
+    return false;
 }
 
 std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &operand, bool forceExpression) {

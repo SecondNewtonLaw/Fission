@@ -51,6 +51,8 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
 
     switch (lpInstruction->operation) {
     case LiftedOperation::JUMP:
+        if (lpInstruction->operands[0].value.imm.n == 1)
+            return 2;
         return lpInstruction->operands[0].value.imm.n;
 
     case LiftedOperation::LOADNJUMP:
@@ -645,18 +647,6 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             }
         }
     }
-
-    for (BasicBlock &block : blocks) {
-        if (block.bType == BlockType::IfHeader) {
-            for (int32_t pred : block.predecessors) {
-                auto &pB = func.basicBlocks.at(pred);
-                if (pB.bType == BlockType::IfHeader) {
-                    block.bType = BlockType::IfElseHeader;
-                    break;
-                }
-            }
-        }
-    }
 }
 
 void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
@@ -758,8 +748,6 @@ std::string GraphVisualizer::BlockTypeToString(BlockType type) {
         return "Standard";
     case BlockType::IfHeader:
         return "If";
-    case BlockType::IfElseHeader:
-        return "IfElse";
     case BlockType::LoopHeader:
         return "LoopHead";
     case BlockType::LoopLatch:

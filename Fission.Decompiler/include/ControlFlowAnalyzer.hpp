@@ -17,7 +17,6 @@ enum class BlockType {
 
     // structures
     IfHeader,     // The start of an 'if' (has conditional branches).
-    IfElseHeader, // The start of an 'elseif' (has conditional branches).
     LoopHeader,   // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
     LoopLatch,    // bottom of a loop (negative jump).
 

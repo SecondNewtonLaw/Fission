@@ -51,6 +51,7 @@ class ASTLifter {
 
     std::vector<std::shared_ptr<Statement>> LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited);
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const BasicBlock &block);
+    bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const std::set<uint32_t> &visitedScopes);
     std::shared_ptr<Expression> LiftExpression(const LiftedOperand &operand, bool forceExpression = false);
     std::shared_ptr<Expression> LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested);
     std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst);
