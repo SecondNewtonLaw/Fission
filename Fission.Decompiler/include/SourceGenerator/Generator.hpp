@@ -260,12 +260,19 @@ class SourceGenerator : public Visitor {
     void Visit(StringLiteralNode *lpNode) override {
         (void)lpNode;
 
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
         if (lpNode->value.find('\n') != std::string::npos) {
             buffer << "[[" << lpNode->value << "]]";
+            if (lpNode->bUseParenthesis)
+                buffer << ")";
             return;
         }
 
         buffer << "\"" << lpNode->value << "\"";
+
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
     }
 
     void Visit(NumberLiteralNode *lpNode) override {
@@ -279,12 +286,20 @@ class SourceGenerator : public Visitor {
             if (const auto lastThatIsNotZero = num.find_last_not_of('0'); lastThatIsNotZero != std::string::npos && lastThatIsNotZero >= dot)
                 resultLength = lastThatIsNotZero + (lastThatIsNotZero != dot);
         num.resize(resultLength);
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
         buffer << num;
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
     }
 
     void Visit(BooleanLiteralNode *lpNode) override {
         (void)lpNode;
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
         buffer << (lpNode->value ? "true" : "false");
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
     }
 
     void Visit(IdentifierExpressionNode *lpNode) override {
@@ -310,10 +325,16 @@ class SourceGenerator : public Visitor {
     }
     void Visit(NilLiteralNode *lpNode) override {
         (void)lpNode;
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
         buffer << "nil";
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
     }
 
     void Visit(TableLiteralNode *lpNode) override {
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
         buffer << "{ ";
         for (size_t i = 0; i < lpNode->expressions.size(); i++) {
             lpNode->expressions.at(i)->Accept(this);
@@ -321,6 +342,8 @@ class SourceGenerator : public Visitor {
                 buffer << ", ";
         }
         buffer << " }";
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
     }
 
     void Visit(NameCallExpressionNode *lpNode) override {

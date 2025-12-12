@@ -196,40 +196,46 @@ class VariableDeclarationNode : public Declaration {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
-class NilLiteralNode : public Expression {
+class LiteralNode : public Expression {
+public:
+    bool bUseParenthesis= false;
+};
+
+class NilLiteralNode : public LiteralNode {
   public:
+    NilLiteralNode() { this->nodeKind = ASTNodeKind::LiteralValue; }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
-class BooleanLiteralNode : public Expression {
+class BooleanLiteralNode : public LiteralNode {
   public:
     bool value;
-    BooleanLiteralNode(bool v) : value(v) {}
+    BooleanLiteralNode(bool v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
-class NumberLiteralNode : public Expression {
+class NumberLiteralNode : public LiteralNode {
   public:
     double value;
-    NumberLiteralNode(double v) : value(v) {}
+    NumberLiteralNode(double v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
-class StringLiteralNode : public Expression {
+class StringLiteralNode : public LiteralNode {
   public:
     std::string value;
-    StringLiteralNode(std::string v) : value(v) {}
+    StringLiteralNode(std::string v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
-class TableLiteralNode : public Expression {
+class TableLiteralNode : public LiteralNode {
   public:
     std::vector<std::shared_ptr<Expression>> expressions;
-    TableLiteralNode() : expressions() {}
-    TableLiteralNode(const std::vector<std::shared_ptr<Expression>> &expressions) : expressions(expressions) {}
+    TableLiteralNode() : expressions() { this->nodeKind = ASTNodeKind::LiteralValue; }
+    TableLiteralNode(const std::vector<std::shared_ptr<Expression>> &expressions) : expressions(expressions) { this->nodeKind = ASTNodeKind::LiteralValue; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

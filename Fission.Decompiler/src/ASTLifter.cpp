@@ -777,6 +777,12 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     else
         callee = LiftExpression(inst.operands[0], false);
 
+    if (callee->nodeKind == ASTNodeKind::LiteralValue) {
+        auto literal = std::dynamic_pointer_cast<LiteralNode>(callee);
+        if (literal != nullptr)
+            literal->bUseParenthesis = true;
+    }
+
     if (m_currentFunction->implicitUses.contains(&callInfoInst)) {
         const auto &argVersions = m_currentFunction->implicitUses.at(&callInfoInst);
         int startOffset = isNameCall ? 1 : 0;
@@ -892,10 +898,14 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
             if (defInst == inst && ref.regIndex == regA) {
                 auto users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
                 if (users.size() == 1) {
-                    if (users[0]->operation == LiftedOperation::RETURN)
+                    auto op = users[0]->operation;
+                    // allow inlining returns, other Calls, and arith ops.
+                    if (op == LiftedOperation::RETURN || op == LiftedOperation::CALL || op == LiftedOperation::NAMECALL || op == LiftedOperation::ADD ||
+                        op == LiftedOperation::SUB || op == LiftedOperation::MUL || op == LiftedOperation::DIV || op == LiftedOperation::MOD ||
+                        op == LiftedOperation::POW || op == LiftedOperation::CONCAT || op == LiftedOperation::MINUS || op == LiftedOperation::NOT ||
+                        op == LiftedOperation::LENGTH) {
                         return true;
-                    if (users[0]->operation == LiftedOperation::CALL || users[0]->operation == LiftedOperation::NAMECALL)
-                        return true;
+                    }
                 }
                 return false;
             }
@@ -903,9 +913,8 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
         return false;
     }
 
-    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0])) {
+    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]))
         return true;
-    }
 
     if (m_currentFunction->IsSingleUse(inst->operands[0])) {
         if (m_currentFunction->IsConsumedByPhi(inst->operands[0]))

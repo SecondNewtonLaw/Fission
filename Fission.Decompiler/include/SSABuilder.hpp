@@ -22,9 +22,6 @@ class SSABuilder {
      */
     std::vector<int> versionCounter;
 
-    static AccessType GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex);
-    std::vector<int> GetImplicitDefinitions(const LiftedInstruction &inst);
-
     int32_t NewVersion(int32_t reg);
 
     int32_t CurrentVersion(int32_t reg);
@@ -34,5 +31,8 @@ class SSABuilder {
     void Rename(int blockId, AnalyzedFunction &func, const std::map<int32_t, DominatorInfo> &domInfo);
 
   public:
+    static AccessType GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex);
+    static std::vector<int> GetImplicitDefinitions(const LiftedInstruction &inst);
+
     void Build(AnalyzedFunction &func);
 };

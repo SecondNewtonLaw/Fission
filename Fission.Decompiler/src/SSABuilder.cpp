@@ -5,6 +5,8 @@
 #include "Deserializer.hpp"
 #include <algorithm>
 #include <array>
+#include <queue>
+#include <set>
 #include <vector>
 
 static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
@@ -31,11 +33,10 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
           LiftedOperation::DIVK,      LiftedOperation::MODK,      LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
           LiftedOperation::ANDK,      LiftedOperation::ORK,       LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
           LiftedOperation::NEWTABLE,  LiftedOperation::DUPTABLE,  LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
-          LiftedOperation::DIVRK,     LiftedOperation::IDIV,      LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
+          LiftedOperation::CONCAT,    LiftedOperation::DIVRK,     LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
         set(op, AccessType::Write);
     }
 
-    set(LiftedOperation::CONCAT, AccessType::ReadWrite);
     set(LiftedOperation::CALL, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Read);
 
@@ -110,6 +111,126 @@ int32_t SSABuilder::CurrentVersion(int32_t reg) {
     return versionStack[reg].back();
 }
 
+static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn) {
+    size_t numBlocks = func->basicBlocks.size();
+    liveIn.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    std::vector<std::vector<bool>> use(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    std::vector<std::vector<bool>> def(numBlocks, std::vector<bool>(maxRegs + 1, false));
+
+    for (const auto &block : func->basicBlocks) {
+        if (!block.lpHead)
+            continue;
+        uint32_t bid = block.dwBlockId;
+
+        for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
+            if (inst->operation == LiftedOperation::NOP)
+                continue;
+
+            auto markRead = [&](int r) {
+                if (r >= 0 && r <= maxRegs && !def[bid][r]) {
+                    use[bid][r] = true;
+                }
+            };
+            auto markWrite = [&](int r) {
+                if (r >= 0 && r <= maxRegs) {
+                    def[bid][r] = true;
+                }
+            };
+
+            for (size_t i = 0; i < inst->operands.size(); ++i) {
+                const auto &op = inst->operands[i];
+                if (op.type == LiftedOperandType::Register) {
+                    AccessType mode = SSABuilder::GetRegisterAccess(*inst, i);
+                    if (mode == AccessType::Read || mode == AccessType::ReadWrite) {
+                        markRead(op.value.reg);
+                    }
+                }
+            }
+
+            if (inst->operation == LiftedOperation::CONCAT) {
+                int start = inst->operands[1].value.reg;
+                int end = inst->operands[2].value.reg;
+                for (int r = start; r <= end; ++r)
+                    markRead(r);
+            } else if (inst->operation == LiftedOperation::CALL) {
+                int32_t regFunc = inst->operands[0].value.reg;
+                int32_t argCount = inst->operands[1].value.imm.n - 1;
+
+                int effectiveArgCount = (argCount == -1) ? 1 : argCount;
+                if (effectiveArgCount > 0)
+                    for (int32_t k = 0; k < effectiveArgCount; ++k)
+                        markRead(regFunc + 1 + k);
+
+                int32_t retCount = inst->operands[2].value.imm.n;
+                int32_t baseReg = inst->operands[0].value.reg;
+
+                int effectiveRetCount = (retCount == 0) ? 1 : (retCount - 1);
+
+                for (int32_t k = 0; k < effectiveRetCount; ++k) {
+                    int32_t retReg = baseReg + k;
+                    markWrite(retReg);
+                }
+            } else if (inst->operation == LiftedOperation::NAMECALL) {
+                int base = inst->operands[0].value.reg;
+                markWrite(base); // self
+                markRead(inst->operands[1].value.reg);
+            } else if (inst->operation == LiftedOperation::RETURN) {
+                int base = inst->operands[0].value.reg;
+                int count = inst->operands[1].value.imm.n - 1;
+                if (count == -1)
+                    count = 0;
+                for (int k = 0; k < count; ++k)
+                    markRead(base + k);
+            } else if (inst->operation == LiftedOperation::SETLIST) {
+                int base = inst->operands[1].value.reg;
+                int count = inst->operands[2].value.imm.n;
+                for (int k = 0; k < count; ++k)
+                    markRead(base + k);
+            }
+
+            for (size_t i = 0; i < inst->operands.size(); ++i) {
+                const auto &op = inst->operands[i];
+                if (op.type == LiftedOperandType::Register) {
+                    AccessType mode = SSABuilder::GetRegisterAccess(*inst, i);
+                    if (mode == AccessType::Write || mode == AccessType::ReadWrite) {
+                        markWrite(op.value.reg);
+                    }
+                }
+            }
+            std::vector<int> implicitDefs = SSABuilder::GetImplicitDefinitions(*inst);
+            for (int r : implicitDefs)
+                markWrite(r);
+        }
+    }
+
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (const auto &block : func->basicBlocks) {
+            uint32_t bid = block.dwBlockId;
+            bool blockChanged = false;
+
+            for (int r = 0; r <= maxRegs; ++r) {
+                bool isLiveOut = false;
+                for (uint32_t succ : block.successors) {
+                    if (liveIn[succ][r]) {
+                        isLiveOut = true;
+                        break;
+                    }
+                }
+
+                bool isLiveIn = use[bid][r] || (isLiveOut && !def[bid][r]);
+                if (liveIn[bid][r] != isLiveIn) {
+                    liveIn[bid][r] = isLiveIn;
+                    blockChanged = true;
+                }
+            }
+            if (blockChanged)
+                changed = true;
+        }
+    }
+}
+
 void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std::map<int32_t, DominatorInfo> &domInfo) {
     if (lpOriginalFunction->basicBlocks.empty())
         return;
@@ -120,6 +241,9 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
         maxRegs = lpOriginalFunction->lpLiftedFunction->lpDeserialized->maxstacksize;
         numParams = lpOriginalFunction->lpLiftedFunction->lpDeserialized->numparams;
     }
+
+    std::vector<std::vector<bool>> liveIn;
+    ComputeLiveness(lpOriginalFunction, maxRegs, liveIn);
 
     std::vector<std::vector<int>> defBlocks(maxRegs + 1);
 
@@ -211,6 +335,10 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 if (frontierId >= hasPhi.size())
                     continue;
 
+                // skip dead Phis
+                if (!liveIn[frontierId][reg])
+                    continue;
+
                 if (hasPhi[frontierId] != visitedToken) {
                     hasPhi[frontierId] = visitedToken;
 
@@ -259,6 +387,27 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
         for (LiftedInstruction *inst = block.lpHead; inst <= block.lpTail; ++inst) {
             if (inst->operation == LiftedOperation::NOP)
                 continue;
+
+            if (inst->operation == LiftedOperation::CONCAT) {
+                func.definitionMap[{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion}] = inst;
+                int32_t startReg = inst->operands[1].value.reg;
+                int32_t endReg = inst->operands[2].value.reg;
+                std::vector<int32_t> rangeVersions;
+
+                for (int32_t r = startReg; r <= endReg; ++r) {
+                    int32_t v = CurrentVersion(r);
+                    if (v == -1)
+                        v = NewVersion(r);
+
+                    rangeVersions.push_back(v);
+
+                    if (r != startReg && r != endReg) {
+                        func.useCounts[{r, v}]++;
+                        func.users[{r, v}].push_back(inst);
+                    }
+                }
+                func.implicitUses[inst] = std::move(rangeVersions);
+            }
 
             for (size_t i = 0; i < inst->operands.size(); ++i) {
                 auto &op = inst->operands[i];
@@ -374,21 +523,6 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
 
                 func.implicitUses[inst] = std::move(itemVersions);
-            } else if (inst->operation == LiftedOperation::CONCAT) {
-                int32_t startReg = inst->operands[1].value.reg;
-                int32_t endReg = inst->operands[2].value.reg;
-                std::vector<int32_t> rangeVersions;
-
-                for (int32_t r = startReg + 1; r <= endReg - 1; ++r) {
-                    int32_t v = CurrentVersion(r);
-                    if (v == -1)
-                        v = NewVersion(r);
-
-                    rangeVersions.push_back(v);
-                    func.useCounts[{r, v}]++;
-                    func.users[{r, v}].push_back(inst);
-                }
-                func.implicitUses[inst] = std::move(rangeVersions);
             } else if (inst->operation == LiftedOperation::GETVARARGS) {
                 int32_t count = inst->operands[1].value.imm.n;
                 if (count > 1) {
