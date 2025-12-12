@@ -33,7 +33,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         auto rS = reader.ReadString(stringLength);
         bool bNeedsRebuilding = false;
         for (const auto &c : rS) {
-            if (!isalnum(c)) { // must be rebuilt
+            if (!isalnum(c) && !isspace(c)) { // must be rebuilt
                 bNeedsRebuilding = true;
                 break;
             }
@@ -41,8 +41,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
         if (bNeedsRebuilding) {
             std::stringstream ss;
-            for (const auto &c : rS) { // escape strings into luau format on deserialization.
-                if (!isalnum(c)) {     // must be rebuilt
+            for (const auto &c : rS) {            // escape strings into luau format on deserialization.
+                if (!isalnum(c) && !isspace(c)) { // must be rebuilt
                     ss << "\\" << static_cast<int>(c);
                 } else {
                     ss << c;
