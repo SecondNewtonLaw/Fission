@@ -863,7 +863,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             const auto &versions = m_currentFunction->implicitUses.at(setListInst);
             int startReg = setListInst->operands[1].value.reg;
 
-            for (size_t k = 0; k < versions.size(); ++k) {
+            for (size_t k = 0; k < versions.size() - 1; ++k) {
                 LiftedOperand itemOp;
                 itemOp.type = LiftedOperandType::Register;
                 itemOp.value.reg = startReg + k;
