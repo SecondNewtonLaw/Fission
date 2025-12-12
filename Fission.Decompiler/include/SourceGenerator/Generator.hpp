@@ -423,4 +423,18 @@ class SourceGenerator : public Visitor {
         lpNode->right->Accept(this);
         this->NextLine();
     }
+
+    void Visit(RepeatStatementNode *lpNode) override {
+        (void)lpNode;
+        buffer << this->GetIndentation() << "repeat";
+        this->NextLine();
+        this->IncreaseIndentation();
+        lpNode->body->Accept(this);
+        this->DecreaseIndentation();
+        this->NextLine();
+        buffer << this->GetIndentation() << "until (";
+        lpNode->condition->Accept(this);
+        buffer << ")";
+        this->NextLine();
+    }
 };

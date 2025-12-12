@@ -26,6 +26,7 @@ class ASTLifter {
     explicit ASTLifter();
 
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
+    std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
 
     std::unordered_set<int32_t> m_definedRegisters;
     std::unordered_set<int32_t> m_pinnedRegisters;

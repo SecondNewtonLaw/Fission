@@ -1,33 +1,40 @@
 --!optimize 0
+local function test(A, B, C)
+    local acc = 0
+    local t = {10, 20, 30, 40, 50}
+    local f = function(x) return x * 3, x - 1 end
 
-local game = game
-function test()
-    local a = 2
-    local b = 3
-    local c = 6
-    print(a, b, c, game.Name)
-    return c, b, a
+    for i = 1, #t do
+        local v = t[i]
+
+        if v % 3 == 1 then
+            local p, q = f(v + A)
+            acc = acc + p
+            if q < 0 then
+                return acc
+            end
+        elseif v % 4 == 2 then
+            acc = acc + (v * 2)
+        else
+            acc = acc - B
+        end
+   end
+
+   return acc - 5
 end
 
-game:FindFirstChild(print(getRet(test()))):FindFirstChild("ByeByeBye!")
+repeat
+    repeat
+        error("bye bye bye!")
+    until x
+    warn("hi")
+    print("hi")
+    repeat
+        error("hello hello hello!")
+    until x
+until x
 
-local g = game:FindFirstChild(tostring("g"))
-print(g:WaitForChild("Test").Bypass:FilteringEnabled())
-warn(g)
-
-local acc = 0
-while true do
-    acc += 1
+while x do
+    warn("bye")
+    warn("can you believe this?")
 end
-print(acc)
-
-for i=1, 50, 2 do
-    error(i + 1)
-end
-print"hi"
-
-if x then
-    error("if branch")
-end
-
-error("BODY END")

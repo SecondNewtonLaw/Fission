@@ -119,6 +119,15 @@ class WhileStatementNode : public Statement {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class RepeatStatementNode : public Statement {
+public:
+    std::shared_ptr<Expression> condition;
+    std::shared_ptr<BlockStatementNode> body;
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+
 class CompoundBinaryExpressionNode : public Expression {
   public:
     std::string op;

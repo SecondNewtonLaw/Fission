@@ -72,6 +72,59 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     return ast;
 }
 
+std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *inst) {
+    if (!inst)
+        return std::make_shared<BooleanLiteralNode>(true);
+
+    switch (inst->operation) {
+    case LiftedOperation::JUMPIFNOTEQ:
+        return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFEQ:
+        return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFLT:
+        return std::make_shared<BinaryExpressionNode>("<", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFNOTLT:
+        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFLE:
+        return std::make_shared<BinaryExpressionNode>("<=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFNOTLE:
+        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIF:
+        return LiftExpression(inst->operands[0]);
+    case LiftedOperation::JUMPIFNOT:
+        return std::make_shared<UnaryExpressionNode>("not ", LiftExpression(inst->operands[0]));
+    case LiftedOperation::JUMPXEQK: {
+        auto kIdx = inst->operands[2].value.imm.k;
+        auto notFlag = inst->operands[3].value.imm.b;
+        std::shared_ptr<Expression> rhs;
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+        switch (k.kType) {
+        case LUA_TNIL:
+            rhs = std::make_shared<NilLiteralNode>();
+            break;
+        case LUA_TBOOLEAN:
+            rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+            break;
+        case LUA_TNUMBER:
+            rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+            break;
+        case LUA_TSTRING:
+            rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+            break;
+        default:
+            rhs = std::make_shared<NilLiteralNode>();
+            break;
+        }
+        if (notFlag)
+            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+        else
+            return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+    }
+    default:
+        return std::make_shared<BooleanLiteralNode>(true);
+    }
+}
+
 std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited) {
     std::vector<std::shared_ptr<Statement>> nodes;
 
@@ -101,86 +154,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             if (isSequential)
                 mergeIdx = falseIdx;
 
-            std::shared_ptr<Expression> cond;
-            switch (block.lpTail->operation) {
-            case LiftedOperation::JUMPIFNOTEQ: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    "==", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIFEQ: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    "~=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIFLT: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    "<", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIFNOTLT: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    ">", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIFLE: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    "<=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIFNOTLE: {
-                cond = std::make_shared<BinaryExpressionNode>(
-                    ">=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                );
-                break;
-            }
-            case LiftedOperation::JUMPIF: {
-                cond = this->LiftExpression(block.lpTail->operands[0]);
-                break;
-            case LiftedOperation::JUMPIFNOT: {
-                cond = std::make_shared<UnaryExpressionNode>("not ", this->LiftExpression(block.lpTail->operands[0]));
-                break;
-            }
-            }
-            case LiftedOperation::JUMPXEQK: {
-                auto kIdx = block.lpTail->operands[2].value.imm.k;
-                auto notFlag = block.lpTail->operands[3].value.imm.b;
-                std::shared_ptr<Expression> rhs;
-                const auto &k = this->m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
-                switch (k.kType) {
-                case LUA_TNIL:
-                    rhs = std::make_shared<NilLiteralNode>();
-                    break;
-                case LUA_TBOOLEAN:
-                    rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-                    break;
-                case LUA_TNUMBER:
-                    rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-                    break;
-                case LUA_TSTRING:
-                    rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-                    break;
-                default:
-                    rhs = std::make_shared<NilLiteralNode>(); // fallback
-                    break;
-                }
-
-                if (notFlag)
-                    cond = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(block.lpTail->operands[0]), rhs);
-                else
-                    cond = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(block.lpTail->operands[0]), rhs);
-                break;
-            }
-
-            default:
-                cond = std::make_shared<BooleanLiteralNode>(true);
-                break;
-            }
+            std::shared_ptr<Expression> cond = LiftCondition(block.lpTail);
 
             bool bInvert = false;
             // if the false branch is an immediate return/break, we should invert it
@@ -249,6 +223,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     }
     case BlockType::LoopHeader: {
         if (block.loopLatch.has_value()) {
+            uint32_t latchIdx = block.loopLatch.value();
             uint32_t exitIdx = block.loopExit.value_or(block.loopLatch.value_or(-1));
 
             std::set<uint32_t> loopVisited = visited;
@@ -305,100 +280,127 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 }
                 nodes.push_back(forNode);
             } else {
-                auto whileNode = std::make_shared<WhileStatementNode>();
-                switch (block.lpTail->operation) {
-                case LiftedOperation::JUMPIFNOTEQ: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        "==", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
+                bool isRepeat = true;
+                bool headerIsConditional = false;
+                uint32_t falseSucc = -1;
+
+                if (block.lpTail) {
+                    auto op = block.lpTail->operation;
+                    if (op == LiftedOperation::JUMPIF || op == LiftedOperation::JUMPIFNOT || op == LiftedOperation::JUMPIFEQ ||
+                        op == LiftedOperation::JUMPIFNOTEQ || op == LiftedOperation::JUMPIFLT || op == LiftedOperation::JUMPIFNOTLT ||
+                        op == LiftedOperation::JUMPIFLE || op == LiftedOperation::JUMPIFNOTLE || op == LiftedOperation::JUMPXEQK) {
+
+                        headerIsConditional = true;
+
+                        if (op == LiftedOperation::JUMPIFNOT) {
+                            if (!block.successors.empty())
+                                falseSucc = block.successors[0];
+                        } else {
+                            if (block.successors.size() > 1)
+                                falseSucc = block.successors[1];
+                        }
+
+                        if (falseSucc == latchIdx) {
+                            isRepeat = true;
+                        } else {
+                            for (auto s : block.successors) {
+                                if (s == exitIdx) {
+                                    isRepeat = false;
+                                    break;
+                                }
+                            }
+                        }
+                    } else {
+                        isRepeat = true;
+                    }
                 }
-                case LiftedOperation::JUMPIFEQ: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        "~=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFLT: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        "<", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFNOTLT: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        ">", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFLE: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        "<=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIFNOTLE: {
-                    whileNode->condition = std::make_shared<BinaryExpressionNode>(
-                        ">=", this->LiftExpression(block.lpTail->operands[0]), this->LiftExpression(block.lpTail->operands[2])
-                    );
-                    break;
-                }
-                case LiftedOperation::JUMPIF: {
-                case LiftedOperation::JUMPIFNOT: {
-                    whileNode->condition = this->LiftExpression(block.lpTail->operands[0]);
-                    break;
-                }
-                }
-                case LiftedOperation::JUMPXEQK: {
-                    auto kIdx = block.lpTail->operands[2].value.imm.k;
-                    auto notFlag = block.lpTail->operands[3].value.imm.b;
-                    std::shared_ptr<Expression> rhs;
-                    const auto &k = this->m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
-                    switch (k.kType) {
-                    case LUA_TNIL:
-                        rhs = std::make_shared<NilLiteralNode>();
-                        break;
-                    case LUA_TBOOLEAN:
-                        rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-                        break;
-                    case LUA_TNUMBER:
-                        rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-                        break;
-                    case LUA_TSTRING:
-                        rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-                        break;
-                    default:
-                        rhs = std::make_shared<NilLiteralNode>(); // fallback
-                        break;
+
+                if (isRepeat) {
+                    auto repeatNode = std::make_shared<RepeatStatementNode>();
+                    std::vector<std::shared_ptr<Statement>> bodyStmts = stmts;
+
+                    if (currentBlockId != latchIdx) {
+                        uint32_t bodyStart = -1;
+                        if (headerIsConditional) {
+                            if (block.lpTail->operation == LiftedOperation::JUMPIFNOT) {
+                                if (block.successors.size() > 1)
+                                    bodyStart = block.successors[1];
+                            } else {
+                                if (!block.successors.empty())
+                                    bodyStart = block.successors[0];
+                            }
+                        } else {
+                            if (!block.successors.empty())
+                                bodyStart = block.successors[0];
+                        }
+
+                        if (bodyStart != static_cast<uint32_t>(-1) && bodyStart != latchIdx) {
+                            std::set<uint32_t> cloopVisited = visited;
+                            cloopVisited.insert(latchIdx);
+                            cloopVisited.insert(exitIdx);
+                            auto inner = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
+
+                            if (headerIsConditional) {
+                                auto cond = LiftCondition(block.lpTail);
+                                if (block.lpTail->operation == LiftedOperation::JUMPIFNOT) {
+                                    if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
+                                        cond = unary->operand;
+                                    } else {
+                                        cond = std::make_shared<UnaryExpressionNode>("not ", cond);
+                                    }
+                                }
+
+                                auto ifStmt = std::make_shared<IfStatementNode>();
+                                ifStmt->condition = cond;
+                                ifStmt->thenBranch = CreateBlock(inner);
+                                bodyStmts.push_back(ifStmt);
+                            } else {
+                                bodyStmts.insert(bodyStmts.end(), inner.begin(), inner.end());
+                            }
+                        }
+
+                        const auto &latchBlock = m_currentFunction->basicBlocks[latchIdx];
+                        auto latchStmts = LiftBlockInstructions(latchBlock);
+                        bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
+
+                        auto jumpCond = LiftCondition(latchBlock.lpTail);
+                        repeatNode->condition = std::make_shared<UnaryExpressionNode>("not ", jumpCond);
+                    } else {
+                        auto jumpCond = LiftCondition(block.lpTail);
+                        repeatNode->condition = std::make_shared<UnaryExpressionNode>("not ", jumpCond);
                     }
 
-                    if (notFlag)
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>("==", this->LiftExpression(block.lpTail->operands[0]), rhs);
-                    else
-                        whileNode->condition = std::make_shared<BinaryExpressionNode>("~=", this->LiftExpression(block.lpTail->operands[0]), rhs);
-                    break;
-                }
+                    repeatNode->body = CreateBlock(bodyStmts);
+                    nodes.push_back(repeatNode);
 
-                default:
-                    // not a conditional likely, as such, this is a while true do ... end that was potentially simplified during O1+.
-                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
-                    break;
-                }
-
-                auto bodyIdx = block.successors[0] == exitIdx && block.successors.size() > 1 ? block.successors[1] : block.successors[0];
-                if (bodyIdx != exitIdx) {
-                    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
-                    whileNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
-                    nodes.push_back(whileNode);
                 } else {
-                    nodes.resize(
-                        nodes.size() - stmts.size()
-                    );                                    // remove current block statements (LoopHeader), we are the body in this case, one of an inf loop.
-                    whileNode->body = CreateBlock(stmts); // this means we are in an infinite loop, with no exit.
+                    // While Loop
+                    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+
+                    auto whileNode = std::make_shared<WhileStatementNode>();
+                    whileNode->condition = LiftCondition(block.lpTail);
+
+                    uint32_t bodyStart = -1;
+                    for (auto s : block.successors)
+                        if (s != exitIdx)
+                            bodyStart = s;
+
+                    if (bodyStart != static_cast<uint32_t>(-1)) {
+                        std::set<uint32_t> cloopVisited = visited;
+                        cloopVisited.insert(latchIdx);
+                        cloopVisited.insert(exitIdx);
+                        auto bodyStmts = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
+
+                        if (latchIdx != currentBlockId) {
+                            auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
+                            bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
+                        }
+
+                        whileNode->body = CreateBlock(bodyStmts);
+                    } else {
+                        whileNode->body = CreateBlock({});
+                    }
                     nodes.push_back(whileNode);
-                    auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
-                    nodes.insert(nodes.end(), after.begin(), after.end());
-                    return nodes;
                 }
             }
 
