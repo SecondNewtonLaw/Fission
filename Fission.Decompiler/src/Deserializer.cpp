@@ -3,6 +3,7 @@
 //
 
 #include "Deserializer.hpp"
+#include <sstream>
 
 std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string &bytecode) {
     BinaryReader reader{bytecode};
@@ -28,7 +29,29 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
     for (unsigned int i = 0; i < stringCount; i++) {
         auto stringLength = reader.ReadVariableInteger();
-        result.stringTable.emplace_back(reader.ReadString(stringLength));
+
+        auto rS = reader.ReadString(stringLength);
+        bool bNeedsRebuilding = false;
+        for (const auto &c : rS) {
+            if (!isalnum(c)) { // must be rebuilt
+                bNeedsRebuilding = true;
+                break;
+            }
+        }
+
+        if (bNeedsRebuilding) {
+            std::stringstream ss;
+            for (const auto &c : rS) { // escape strings into luau format on deserialization.
+                if (!isalnum(c)) {     // must be rebuilt
+                    ss << "\\" << static_cast<int>(c);
+                } else {
+                    ss << c;
+                }
+            }
+            rS = ss.str();
+        }
+
+        result.stringTable.emplace_back(rS);
     }
 
     if (result.typesVersion == 3) {
