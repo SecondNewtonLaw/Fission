@@ -16,6 +16,36 @@ static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::sh
     return block;
 }
 
+std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Expression> &cond) {
+    if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
+        return unary->operand;
+    }
+
+    if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(cond)) {
+        if (binary->op == "==") {
+            binary->op = "~=";
+            return binary;
+        } else if (binary->op == "~=") {
+            binary->op = "==";
+            return binary;
+        } else if (binary->op == "<") {
+            binary->op = ">=";
+            return binary;
+        } else if (binary->op == ">") {
+            binary->op = "<=";
+            return binary;
+        } else if (binary->op == "<=") {
+            binary->op = ">";
+            return binary;
+        } else if (binary->op == ">=") {
+            binary->op = "<";
+            return binary;
+        }
+    }
+
+    return std::make_shared<UnaryExpressionNode>("not ", cond);
+}
+
 ASTLifter::ASTLifter() {}
 
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
@@ -74,7 +104,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
 
 std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *inst) {
     if (!inst)
-        return std::make_shared<BooleanLiteralNode>(true);
+        return std::make_shared<BooleanLiteralNode>(false);
 
     switch (inst->operation) {
     case LiftedOperation::JUMPIFNOTEQ:
@@ -84,11 +114,11 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     case LiftedOperation::JUMPIFLT:
         return std::make_shared<BinaryExpressionNode>("<", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLT:
-        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFLE:
         return std::make_shared<BinaryExpressionNode>("<=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLE:
-        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIF:
         return LiftExpression(inst->operands[0]);
     case LiftedOperation::JUMPIFNOT:
@@ -117,12 +147,12 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
         }
 
         if (notFlag)
-            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+            return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
 
-        return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+        return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
     }
     default:
-        return std::make_shared<BooleanLiteralNode>(true);
+        return std::make_shared<BooleanLiteralNode>(false);
     }
 }
 
@@ -138,10 +168,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     const auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
     auto stmts = LiftBlockInstructions(block);
-    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
 
     switch (block.bType) {
     case BlockType::IfHeader: {
+        nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
@@ -155,11 +186,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             if (isSequential)
                 mergeIdx = falseIdx;
 
-            std::shared_ptr<Expression> cond = LiftCondition(block.lpTail);
+            std::shared_ptr<Expression> jumpCond = LiftCondition(block.lpTail);
+            std::shared_ptr<Expression> cond = InvertCondition(jumpCond);
 
             bool bInvert = false;
-            // if the false branch is an immediate return/break, we should invert it
-            // to keep cflow flat.
             if (!isSequential && falseIdx < m_currentFunction->basicBlocks.size()) {
                 BlockType bt = m_currentFunction->basicBlocks[falseIdx].bType;
                 if (bt == BlockType::Return || bt == BlockType::Break) {
@@ -168,27 +198,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             }
 
             if (bInvert) {
-                if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
-                    cond = unary->operand;
-                } else if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(cond)) {
-                    if (binary->op == "==")
-                        binary->op = "~=";
-                    else if (binary->op == "~=")
-                        binary->op = "==";
-                    else if (binary->op == "<")
-                        binary->op = ">=";
-                    else if (binary->op == ">")
-                        binary->op = "<=";
-                    else if (binary->op == "<=")
-                        binary->op = ">";
-                    else if (binary->op == ">=")
-                        binary->op = "<";
-                    else
-                        cond = std::make_shared<UnaryExpressionNode>("not ", cond);
-                } else {
-                    cond = std::make_shared<UnaryExpressionNode>("not ", cond);
-                }
-
+                cond = jumpCond;
                 std::swap(trueIdx, falseIdx);
             }
 
@@ -226,10 +236,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
             std::set<uint32_t> loopVisited = visited;
 
+            if (nodes.size() >= stmts.size())
+                nodes.resize(nodes.size() - stmts.size());
+
             if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
                 uint32_t bodyIdx = -1;
                 for (auto succ : block.successors) {
-                    if (succ != block.loopLatch.value_or(block.loopExit.value_or(-1))) { // determine body by != exit.
+                    if (succ != block.loopLatch.value_or(block.loopExit.value_or(-1))) {
                         bodyIdx = succ;
                         break;
                     }
@@ -277,7 +290,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     this->m_currentFunction->ClearVersionName(baseReg, block.lpTail->operands[0].ssaVersion);
                 }
                 nodes.push_back(forNode);
-            } else {
+            } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
                 bool isRepeat = true;
                 bool headerIsConditional = false;
                 uint32_t falseSucc = -1;
@@ -408,11 +421,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         break;
     }
     case BlockType::Break:
+        nodes.insert(nodes.end(), stmts.begin(), stmts.end());
         nodes.push_back(std::make_shared<BreakStatementNode>());
         break;
     case BlockType::Return:
+        nodes.insert(nodes.end(), stmts.begin(), stmts.end());
         break;
     default: {
+        nodes.insert(nodes.end(), stmts.begin(), stmts.end());
         if (!block.successors.empty()) {
             auto next = LiftControlFlow(block.successors[0], stopBlockId, visited);
             nodes.insert(nodes.end(), next.begin(), next.end());

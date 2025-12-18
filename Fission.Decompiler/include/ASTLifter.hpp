@@ -23,6 +23,7 @@ struct ASTFunction {
 
 class ASTLifter {
   public:
+    std::shared_ptr<Expression> InvertCondition(const std::shared_ptr<Expression> &cond);
     explicit ASTLifter();
 
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
