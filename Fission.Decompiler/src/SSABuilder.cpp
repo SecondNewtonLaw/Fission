@@ -38,7 +38,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
     }
 
     set(LiftedOperation::CALL, AccessType::Read);
-    set(LiftedOperation::RETURN, AccessType::Read);
+    set(LiftedOperation::RETURN, AccessType::Deferred);
 
     return table;
 }();
@@ -501,7 +501,18 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     func.users[{reg, v}].push_back(inst);
                 }
 
+                if (effectiveCount > 0) {
+                    // set version on first argument, which is a reg, fixing some issues relating to lifting and representation for RETURN IR ops.
+                    int reg = inst->operands[0].value.reg;
+                    if (CurrentVersion(reg) == -1) {
+                        inst->operands[0].ssaVersion = NewVersion(reg);
+                    } else {
+                        inst->operands[0].ssaVersion = CurrentVersion(reg);
+                    }
+                }
+
                 func.implicitUses[inst] = std::move(retVersions);
+
             } else if (inst->operation == LiftedOperation::SETLIST) {
                 int newItemsStartReg = inst->operands[1].value.reg;
                 int newItemsCount = inst->operands[2].value.imm.n;
