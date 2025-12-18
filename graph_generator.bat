@@ -28,4 +28,3 @@ if %errorlevel% equ 0 (
     echo [ERROR] Failed to generate SVG. Check if the dot file is valid.
 )
 
-pause
