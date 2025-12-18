@@ -51,8 +51,8 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
 
     switch (lpInstruction->operation) {
     case LiftedOperation::JUMP:
-        if (lpInstruction->operands[0].value.imm.n == 1)
-            return 2;
+        if (lpInstruction->operands[0].value.imm.n >= 1)
+            return lpInstruction->operands[0].value.imm.n + 1;
         return lpInstruction->operands[0].value.imm.n;
 
     case LiftedOperation::LOADNJUMP:
@@ -291,7 +291,11 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 }
 
                 block.bType = BlockType::Continue; // possibly breaking out of a loop.
+            } else {
+                // JUMP of this kind is realistically only injected for BREAKs out of loops.
+                block.bType = BlockType::Break;
             }
+
             break;
         }
         case LiftedOperation::LOADNJUMP: // DO NOT FUCKING ADD FORXPREP OPERATIONS HERE, THEY ARE NOT A TERMINATOR.
