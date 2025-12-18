@@ -62,5 +62,6 @@ int main() {
         ) == DecompileResult::Success,
         "Decompilation failed."
     );
-    return 0;
+
+    system("graph_generator.bat");
 }
