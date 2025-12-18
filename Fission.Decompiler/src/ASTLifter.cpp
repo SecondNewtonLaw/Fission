@@ -78,9 +78,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
 
     switch (inst->operation) {
     case LiftedOperation::JUMPIFNOTEQ:
-        return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
-    case LiftedOperation::JUMPIFEQ:
         return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+    case LiftedOperation::JUMPIFEQ:
+        return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFLT:
         return std::make_shared<BinaryExpressionNode>("<", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLT:
@@ -115,10 +115,11 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
             rhs = std::make_shared<NilLiteralNode>();
             break;
         }
+
         if (notFlag)
             return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
-        else
-            return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+
+        return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
     }
     default:
         return std::make_shared<BooleanLiteralNode>(true);
@@ -191,13 +192,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 std::swap(trueIdx, falseIdx);
             }
 
-            std::set<uint32_t> subVisited = visited;
-            auto thenStmts = LiftControlFlow(trueIdx, mergeIdx, subVisited);
+            auto thenStmts = LiftControlFlow(trueIdx, mergeIdx, visited);
 
             std::vector<std::shared_ptr<Statement>> elseStmts;
             if (!isSequential && !bInvert) {
-                subVisited = visited;
-                elseStmts = LiftControlFlow(falseIdx, mergeIdx, subVisited);
+                elseStmts = LiftControlFlow(falseIdx, mergeIdx, visited);
             }
 
             auto ifStmt = std::make_shared<IfStatementNode>();
@@ -205,8 +204,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             ifStmt->thenBranch = CreateBlock(thenStmts);
 
             if (bInvert) {
-                subVisited = visited;
-                auto mainBodyStmts = LiftControlFlow(falseIdx, mergeIdx, subVisited);
+                auto mainBodyStmts = LiftControlFlow(falseIdx, mergeIdx, visited);
                 nodes.push_back(ifStmt);
                 nodes.insert(nodes.end(), mainBodyStmts.begin(), mainBodyStmts.end());
             } else {
@@ -635,6 +633,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         }
 
         case LiftedOperation::MOVE:
+            break;
+
+        case LiftedOperation::FORNLOOP:
+        case LiftedOperation::FORGLOOP:
             break;
 
         default: {
