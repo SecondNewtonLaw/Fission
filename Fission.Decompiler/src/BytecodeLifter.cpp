@@ -660,8 +660,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             } else {
                 instr.operands[0].value.imm.n = instruction.GetD();
             }
-            if (opCode == LOP_JUMPBACK)
-                instr.operands[0].value.imm.n++;
+            instr.operands[0].value.imm.n++; // JUMP(X/BACK) instructions needs to jump one further, else we have to compensate at analysis time.
             instr.instructionRemarks = std::format("INFO: Jump PC to {}", currentIndex + instr.operands[0].value.imm.n);
 
             if (opCode == LOP_JUMPBACK) { // Jump back leaks information that the next instruction following it is actually the beginning of a loop. Jumpback
