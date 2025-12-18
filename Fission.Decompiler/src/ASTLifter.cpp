@@ -114,11 +114,11 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     case LiftedOperation::JUMPIFLT:
         return std::make_shared<BinaryExpressionNode>("<", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLT:
-        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFLE:
         return std::make_shared<BinaryExpressionNode>("<=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLE:
-        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIF:
         return LiftExpression(inst->operands[0]);
     case LiftedOperation::JUMPIFNOT:
@@ -161,10 +161,18 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
     if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= m_currentFunction->basicBlocks.size())
         return nodes;
-    if (currentBlockId == stopBlockId || visited.contains(currentBlockId))
-        return nodes;
 
-    visited.insert(currentBlockId);
+    // return blocks are allowed to be duplicated, as they have no successors.
+    // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
+    // fuck you luauc.
+    if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
+        if (currentBlockId == stopBlockId || visited.contains(currentBlockId))
+            return nodes;
+    }
+
+    if (!visited.contains(currentBlockId))
+        visited.insert(currentBlockId); // prevent double insertion product of block above.
+
     const auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
     auto stmts = LiftBlockInstructions(block);
@@ -172,7 +180,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     switch (block.bType) {
     case BlockType::IfHeader: {
         nodes.insert(nodes.end(), stmts.begin(), stmts.end());
-
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
@@ -186,46 +193,55 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             if (isSequential)
                 mergeIdx = falseIdx;
 
-            std::shared_ptr<Expression> jumpCond = LiftCondition(block.lpTail);
-            std::shared_ptr<Expression> cond = InvertCondition(jumpCond);
+            uint32_t fallthroughIdx = (!block.successors.empty()) ? block.successors[0] : -1;
 
-            bool bInvert = false;
-            if (!isSequential && falseIdx < m_currentFunction->basicBlocks.size()) {
-                BlockType bt = m_currentFunction->basicBlocks[falseIdx].bType;
-                if (bt == BlockType::Return || bt == BlockType::Break) {
-                    bInvert = true;
-                }
-            }
+            auto jumpCond = LiftCondition(block.lpTail);
+            std::shared_ptr<Expression> cond;
 
-            if (bInvert) {
+            if (trueIdx == fallthroughIdx) {
                 cond = jumpCond;
-                std::swap(trueIdx, falseIdx);
+            } else {
+                cond = InvertCondition(jumpCond);
             }
 
             auto thenStmts = LiftControlFlow(trueIdx, mergeIdx, visited);
 
             std::vector<std::shared_ptr<Statement>> elseStmts;
-            if (!isSequential && !bInvert) {
+            if (!isSequential) {
                 elseStmts = LiftControlFlow(falseIdx, mergeIdx, visited);
+            }
+
+            if (thenStmts.empty() && !elseStmts.empty()) {
+                cond = InvertCondition(jumpCond);
+                std::swap(thenStmts, elseStmts);
             }
 
             auto ifStmt = std::make_shared<IfStatementNode>();
             ifStmt->condition = cond;
             ifStmt->thenBranch = CreateBlock(thenStmts);
 
-            if (bInvert) {
-                auto mainBodyStmts = LiftControlFlow(falseIdx, mergeIdx, visited);
-                nodes.push_back(ifStmt);
-                nodes.insert(nodes.end(), mainBodyStmts.begin(), mainBodyStmts.end());
-            } else {
-                if (!elseStmts.empty()) {
+            if (!elseStmts.empty()) {
+                bool thenIsTerminal = !thenStmts.empty() && (std::dynamic_pointer_cast<ReturnStatementNode>(thenStmts.back()) ||
+                                                             std::dynamic_pointer_cast<BreakStatementNode>(thenStmts.back()));
+
+                if (thenIsTerminal) {
+                    nodes.push_back(ifStmt);
+                    nodes.insert(nodes.end(), elseStmts.begin(), elseStmts.end());
+                } else {
                     ifStmt->elseBranch = CreateBlock(elseStmts);
+                    nodes.push_back(ifStmt);
                 }
+            } else {
                 nodes.push_back(ifStmt);
             }
 
             auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
             nodes.insert(nodes.end(), after.begin(), after.end());
+        } else {
+            nodes.insert(
+                nodes.end(),
+                std::make_shared<CommentNode>("Fission: Warning! Failed to determine TRUE and FALSE block! Control flow graph may be malformed.", true)
+            );
         }
         break;
     }
@@ -291,128 +307,36 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 }
                 nodes.push_back(forNode);
             } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
-                bool isRepeat = true;
-                bool headerIsConditional = false;
-                uint32_t falseSucc = -1;
+                /*
+                 *
+                 */
 
-                if (block.lpTail) {
-                    auto op = block.lpTail->operation;
-                    if (op == LiftedOperation::JUMPIF || op == LiftedOperation::JUMPIFNOT || op == LiftedOperation::JUMPIFEQ ||
-                        op == LiftedOperation::JUMPIFNOTEQ || op == LiftedOperation::JUMPIFLT || op == LiftedOperation::JUMPIFNOTLT ||
-                        op == LiftedOperation::JUMPIFLE || op == LiftedOperation::JUMPIFNOTLE || op == LiftedOperation::JUMPXEQK) {
+                // uint32_t falseSucc = -1;
+                auto whileNode = std::make_shared<WhileStatementNode>();
 
-                        headerIsConditional = true;
+                whileNode->condition = InvertCondition(LiftCondition(block.lpTail)); // it appears we have a better expression when inverting the node, why?
 
-                        if (op == LiftedOperation::JUMPIFNOT) {
-                            if (!block.successors.empty())
-                                falseSucc = block.successors[0];
-                        } else {
-                            if (block.successors.size() > 1)
-                                falseSucc = block.successors[1];
-                        }
+                uint32_t bodyStart = -1;
+                for (auto s : block.successors)
+                    if (s != exitIdx)
+                        bodyStart = s;
 
-                        if (falseSucc == latchIdx) {
-                            isRepeat = true;
-                        } else {
-                            for (auto s : block.successors) {
-                                if (s == exitIdx) {
-                                    isRepeat = false;
-                                    break;
-                                }
-                            }
-                        }
-                    } else {
-                        isRepeat = true;
-                    }
-                }
+                if (bodyStart != static_cast<uint32_t>(-1)) {
+                    std::set<uint32_t> cloopVisited = visited;
+                    cloopVisited.insert(latchIdx);
+                    cloopVisited.insert(exitIdx);
+                    auto bodyStmts = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
 
-                if (isRepeat) {
-                    auto repeatNode = std::make_shared<RepeatStatementNode>();
-                    std::vector<std::shared_ptr<Statement>> bodyStmts = stmts;
-
-                    if (currentBlockId != latchIdx) {
-                        uint32_t bodyStart = -1;
-                        if (headerIsConditional) {
-                            if (block.lpTail->operation == LiftedOperation::JUMPIFNOT) {
-                                if (block.successors.size() > 1)
-                                    bodyStart = block.successors[1];
-                            } else {
-                                if (!block.successors.empty())
-                                    bodyStart = block.successors[0];
-                            }
-                        } else {
-                            if (!block.successors.empty())
-                                bodyStart = block.successors[0];
-                        }
-
-                        if (bodyStart != static_cast<uint32_t>(-1) && bodyStart != latchIdx) {
-                            std::set<uint32_t> cloopVisited = visited;
-                            cloopVisited.insert(latchIdx);
-                            cloopVisited.insert(exitIdx);
-                            auto inner = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
-
-                            if (headerIsConditional) {
-                                auto cond = LiftCondition(block.lpTail);
-                                if (block.lpTail->operation == LiftedOperation::JUMPIFNOT) {
-                                    if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
-                                        cond = unary->operand;
-                                    } else {
-                                        cond = std::make_shared<UnaryExpressionNode>("not ", cond);
-                                    }
-                                }
-
-                                auto ifStmt = std::make_shared<IfStatementNode>();
-                                ifStmt->condition = cond;
-                                ifStmt->thenBranch = CreateBlock(inner);
-                                bodyStmts.push_back(ifStmt);
-                            } else {
-                                bodyStmts.insert(bodyStmts.end(), inner.begin(), inner.end());
-                            }
-                        }
-
-                        const auto &latchBlock = m_currentFunction->basicBlocks[latchIdx];
-                        auto latchStmts = LiftBlockInstructions(latchBlock);
+                    if (latchIdx != currentBlockId) {
+                        auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
                         bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
-
-                        auto jumpCond = LiftCondition(latchBlock.lpTail);
-                        repeatNode->condition = std::make_shared<UnaryExpressionNode>("not ", jumpCond);
-                    } else {
-                        auto jumpCond = LiftCondition(block.lpTail);
-                        repeatNode->condition = std::make_shared<UnaryExpressionNode>("not ", jumpCond);
                     }
 
-                    repeatNode->body = CreateBlock(bodyStmts);
-                    nodes.push_back(repeatNode);
-
+                    whileNode->body = CreateBlock(bodyStmts);
                 } else {
-                    // While Loop
-                    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
-
-                    auto whileNode = std::make_shared<WhileStatementNode>();
-                    whileNode->condition = LiftCondition(block.lpTail);
-
-                    uint32_t bodyStart = -1;
-                    for (auto s : block.successors)
-                        if (s != exitIdx)
-                            bodyStart = s;
-
-                    if (bodyStart != static_cast<uint32_t>(-1)) {
-                        std::set<uint32_t> cloopVisited = visited;
-                        cloopVisited.insert(latchIdx);
-                        cloopVisited.insert(exitIdx);
-                        auto bodyStmts = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
-
-                        if (latchIdx != currentBlockId) {
-                            auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
-                            bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
-                        }
-
-                        whileNode->body = CreateBlock(bodyStmts);
-                    } else {
-                        whileNode->body = CreateBlock({});
-                    }
-                    nodes.push_back(whileNode);
+                    whileNode->body = CreateBlock({});
                 }
+                nodes.push_back(whileNode);
             }
 
             auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
@@ -493,8 +417,17 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 }
             }
 
-            if (i == (int32_t)this->m_currentFunction->lpLiftedFunction->instructions.size() - 1 && inst.operation == LiftedOperation::RETURN && rets.empty())
+            if (i == (int32_t)this->m_currentFunction->lpLiftedFunction->instructions.size() - 1 && inst.operation == LiftedOperation::RETURN && rets.empty()) {
+                for (const auto &pred : block.predecessors)
+                    if (this->m_currentFunction->basicBlocks.at(pred).bType == BlockType::IfHeader ||
+                        this->m_currentFunction->basicBlocks.at(pred).bType == BlockType::LoopHeader ||
+                        this->m_currentFunction->basicBlocks.at(pred).bType ==
+                            BlockType::LoopLatch) { // the compiler may inline the break as a RETURN instruction instead.
+                        statements.push_back(std::make_shared<ReturnStatementNode>(rets));
+                        break;
+                    }
                 continue; // ignore last return if and only if there's no returns.
+            }
 
             statements.push_back(std::make_shared<ReturnStatementNode>(rets));
             break;
@@ -1148,6 +1081,10 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
     if (branchA == branchB)
         return static_cast<int32_t>(branchA);
 
+    if (this->m_currentFunction->basicBlocks.at(branchA).bType == BlockType::Return ||
+        this->m_currentFunction->basicBlocks.at(branchB).bType == BlockType::Return)
+        return -1; // no merge block when one of them is a return.
+
     std::set<uint32_t> reachableFromA;
     std::queue<uint32_t> q;
 
@@ -1197,5 +1134,6 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
             }
         }
     }
+
     return -1;
 }
