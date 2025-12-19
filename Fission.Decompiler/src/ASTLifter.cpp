@@ -989,7 +989,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             if (versions.size() != 0) {
                 int startReg = setListInst->operands[1].value.reg;
 
-                for (size_t k = 0; k < versions.size() - 1; ++k) {
+                for (size_t k = 0; k < versions.size(); ++k) {
                     LiftedOperand itemOp;
                     itemOp.type = LiftedOperandType::Register;
                     itemOp.value.reg = startReg + k;
@@ -1013,6 +1013,22 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
         SSARef defRef{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
         if (m_phiConsumers.contains(defRef))
             return false;
+    }
+
+    if (inst->operation == LiftedOperation::NEWTABLE) {
+        SSARef defRef{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
+        if (m_currentFunction->useCounts.contains(defRef)) {
+            const auto &users = m_currentFunction->users[defRef];
+            int realUses = 0;
+            for (const auto *user : users) {
+                if (user->operation == LiftedOperation::SETLIST && user->operands[0].value.reg == inst->operands[0].value.reg)
+                    continue;
+                realUses++;
+            }
+            // there is exactly one real user of the register, the rest are product of the syntactic sugar, inline it.
+            if (realUses == 1)
+                return true;
+        }
     }
 
     if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::NAMECALL) {
