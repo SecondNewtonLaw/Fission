@@ -986,14 +986,16 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         m_processedInstructions.insert(setListInst->instructionIndex);
         if (m_currentFunction->implicitUses.contains(setListInst)) {
             const auto &versions = m_currentFunction->implicitUses.at(setListInst);
-            int startReg = setListInst->operands[1].value.reg;
+            if (versions.size() != 0) {
+                int startReg = setListInst->operands[1].value.reg;
 
-            for (size_t k = 0; k < versions.size() - 1; ++k) {
-                LiftedOperand itemOp;
-                itemOp.type = LiftedOperandType::Register;
-                itemOp.value.reg = startReg + k;
-                itemOp.ssaVersion = versions[k];
-                elements.push_back(LiftExpression(itemOp));
+                for (size_t k = 0; k < versions.size() - 1; ++k) {
+                    LiftedOperand itemOp;
+                    itemOp.type = LiftedOperandType::Register;
+                    itemOp.value.reg = startReg + k;
+                    itemOp.ssaVersion = versions[k];
+                    elements.push_back(LiftExpression(itemOp));
+                }
             }
         }
     }
