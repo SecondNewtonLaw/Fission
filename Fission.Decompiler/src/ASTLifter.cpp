@@ -1047,8 +1047,21 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     if (!inst || inst->operands.size() < 1)
         return false;
-    if (inst->operation == LiftedOperation::RETURN)
+
+    // these statements have side-effects which cannot be skipped.
+    // the values they produce aren't inlineable in any way, doing so would break them anyway!
+    switch (inst->operation) {
+    case LiftedOperation::RETURN:
+    case LiftedOperation::SETGLOBAL:
+    case LiftedOperation::SETUPVAL:
+    case LiftedOperation::SETTABLE:
+    case LiftedOperation::SETTABLEKS:
+    case LiftedOperation::SETTABLEN:
+    case LiftedOperation::SETLIST:
         return false;
+    default:
+        break;
+    }
 
     if (inst->operands.size() > 0 && inst->operands[0].type == LiftedOperandType::Register &&
         (inst->operation != LiftedOperation::MOVE && m_currentFunction->IsSingleUse(inst->operands[0]))) {
@@ -1068,8 +1081,7 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
                 realUses++;
             }
             // there is exactly one real user of the register, the rest are product of the syntactic sugar, inline it.
-            if (realUses == 1)
-                return true;
+            return realUses == 1;
         }
     }
 
