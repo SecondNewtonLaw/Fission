@@ -120,13 +120,12 @@ class WhileStatementNode : public Statement {
 };
 
 class RepeatStatementNode : public Statement {
-public:
+  public:
     std::shared_ptr<Expression> condition;
     std::shared_ptr<BlockStatementNode> body;
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
-
 
 class CompoundBinaryExpressionNode : public Expression {
   public:
@@ -177,10 +176,16 @@ class IndexExpressionNode : public Expression {
 
 class MemberExpressionNode : public Expression {
   public:
-    std::shared_ptr<Expression> table;
-    std::string keyName;
+    std::shared_ptr<Expression> table; // may be nil for inlined expressions, particularly used in TABLE initializations.
+    std::shared_ptr<Expression> key;
 
-    MemberExpressionNode(std::shared_ptr<Expression> table, std::string keyName) : table(std::move(table)), keyName(std::move(keyName)) {
+    MemberExpressionNode(std::shared_ptr<Expression> keyExpression) : key(std::move(keyExpression)) {
+        this->nodeKind = ASTNodeKind::MemberExpression;
+        table = nullptr;
+    }
+
+    MemberExpressionNode(std::shared_ptr<Expression> table, std::string keyName)
+        : table(std::move(table)), key(std::dynamic_pointer_cast<Expression>(std::make_shared<StringLiteralNode>(std::move(keyName)))) {
         this->nodeKind = ASTNodeKind::MemberExpression;
     }
 
@@ -206,8 +211,8 @@ class VariableDeclarationNode : public Declaration {
 };
 
 class LiteralNode : public Expression {
-public:
-    bool bUseParenthesis= false;
+  public:
+    bool bUseParenthesis = false;
 };
 
 class NilLiteralNode : public LiteralNode {

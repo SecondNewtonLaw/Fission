@@ -138,14 +138,17 @@ class SourceGenerator : public Visitor {
 
     void Visit(MemberExpressionNode *lpNode) override {
         (void)lpNode;
-        lpNode->table->Accept(this);
-        if (this->IsLegalLuauIndex(lpNode->keyName)) {
-            buffer << "." << lpNode->keyName;
-        } else {
-            buffer << "[\"";
-            buffer << lpNode->keyName;
-            buffer << "\"]";
+        if (lpNode->table != nullptr) {
+            lpNode->table->Accept(this);
+            if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->key)) {
+                if (this->IsLegalLuauIndex(lpStringLiteral->value))
+                    buffer << "." << lpStringLiteral->value;
+                return;
+            }
         }
+        buffer << "[";
+        lpNode->key->Accept(this);
+        buffer << "]";
     }
 
     void Visit(ReturnStatementNode *lpNode) override {

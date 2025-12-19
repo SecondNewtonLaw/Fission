@@ -964,41 +964,83 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
 
 std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst) {
     std::vector<std::shared_ptr<Expression>> elements;
-    const LiftedInstruction *setListInst = nullptr;
     int32_t tableReg = inst.operands[0].value.reg;
-    size_t scanLimit = 50;
+    size_t scanLimit = 100;
     size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
 
     for (size_t i = inst.instructionIndex + 1; i < inst.instructionIndex + scanLimit && i < maxIdx; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
-        if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF || candidate.operation == LiftedOperation::RETURN)
+
+        if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF ||
+            candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::RETURN ||
+            candidate.operation == LiftedOperation::BREAK)
             break;
+
+        bool isInitializer = false;
 
         if (candidate.operation == LiftedOperation::SETLIST) {
             if (candidate.operands[0].value.reg == tableReg) {
-                setListInst = &candidate;
-                break;
-            }
-        }
-    }
+                isInitializer = true;
 
-    if (setListInst) {
-        m_processedInstructions.insert(setListInst->instructionIndex);
-        if (m_currentFunction->implicitUses.contains(setListInst)) {
-            const auto &versions = m_currentFunction->implicitUses.at(setListInst);
-            if (versions.size() != 0) {
-                int startReg = setListInst->operands[1].value.reg;
+                if (m_currentFunction->implicitUses.contains(&candidate)) {
+                    const auto &versions = m_currentFunction->implicitUses.at(&candidate);
+                    int startReg = candidate.operands[1].value.reg;
 
-                for (size_t k = 0; k < versions.size(); ++k) {
-                    LiftedOperand itemOp;
-                    itemOp.type = LiftedOperandType::Register;
-                    itemOp.value.reg = startReg + k;
-                    itemOp.ssaVersion = versions[k];
-                    elements.push_back(LiftExpression(itemOp));
+                    for (size_t k = 0; k < versions.size(); ++k) {
+                        LiftedOperand itemOp;
+                        itemOp.type = LiftedOperandType::Register;
+                        itemOp.value.reg = startReg + k;
+                        itemOp.ssaVersion = versions[k];
+                        elements.push_back(LiftExpression(itemOp));
+                    }
                 }
             }
+        } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
+            if (candidate.operands[1].value.reg == tableReg) {
+                isInitializer = true;
+
+                auto kIdx = candidate.operands[2].value.imm.k;
+                const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+                std::string keyStr = std::get<std::string>(k.constantData);
+
+                auto keyExpr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(keyStr));
+                auto valExpr = LiftExpression(candidate.operands[0]);
+
+                elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+            }
+        } else if (candidate.operation == LiftedOperation::SETTABLEN) {
+            if (candidate.operands[1].value.reg == tableReg) {
+                isInitializer = true;
+                int idx = candidate.operands[2].value.imm.n + 1;
+
+                auto keyExpr = std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx));
+                auto valExpr = LiftExpression(candidate.operands[0]);
+
+                // SETTABLEN opcodes are emitted sometimes where
+                // local v = 2
+                // t[v] = n
+                // this emits as
+                // SETTABLEN TABLEREG, VALUEREG, INDEX (i dont care for the ordering, cope reader).
+                // because of this, we have to imply that the keyExpr will be a literal ['']
+
+                elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+            }
+        } else if (candidate.operation == LiftedOperation::SETTABLE) {
+            if (candidate.operands[1].value.reg == tableReg) {
+                isInitializer = true;
+
+                auto keyExpr = LiftExpression(candidate.operands[2]);
+                auto valExpr = LiftExpression(candidate.operands[0]);
+
+                elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+            }
+        }
+
+        if (isInitializer) {
+            m_processedInstructions.insert(candidate.instructionIndex);
         }
     }
+
     return std::make_shared<TableLiteralNode>(elements);
 }
 
