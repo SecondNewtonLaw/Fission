@@ -1078,6 +1078,13 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
             for (const auto *user : users) {
                 if (user->operation == LiftedOperation::SETLIST && user->operands[0].value.reg == inst->operands[0].value.reg)
                     continue;
+
+                if (user->operation == LiftedOperation::SETLIST && user->operands[0].value.reg != inst->operands[0].value.reg)
+                    return true; // two SETLIST references means that this is a nested table. Nested tables are to be inlined.
+
+                if (user->operation == LiftedOperation::MOVE)
+                    // MOVE instructions points to the table being reused. It cannot be inlined because of this.
+                    return false;
                 realUses++;
             }
             // there is exactly one real user of the register, the rest are product of the syntactic sugar, inline it.
