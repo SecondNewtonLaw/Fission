@@ -1014,10 +1014,34 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     }
 
     if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::NAMECALL) {
-        // int regA = inst->operands[0].value.reg;
-
         if (inst->operation == LiftedOperation::CALL && inst->operands[2].value.imm.n == 0)
             return true;
+
+        if (inst->operation == LiftedOperation::NAMECALL) {
+            int regA = inst->operands[0].value.reg;
+
+            if (inst->operation == LiftedOperation::CALL && inst->operands[2].value.imm.n == 0)
+                return true;
+
+            for (const auto &[ref, defInst] : m_currentFunction->definitionMap) {
+                if (defInst == inst && ref.regIndex == regA) {
+                    auto users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
+                    if (users.size() == 1) {
+                        auto op = users[0]->operation;
+                        // allow inlining returns, other Calls, and arith ops.
+                        if (op == LiftedOperation::RETURN || op == LiftedOperation::CALL || op == LiftedOperation::NAMECALL || op == LiftedOperation::ADD ||
+                            op == LiftedOperation::SUB || op == LiftedOperation::MUL || op == LiftedOperation::DIV || op == LiftedOperation::MOD ||
+                            op == LiftedOperation::POW || op == LiftedOperation::CONCAT || op == LiftedOperation::MINUS || op == LiftedOperation::NOT ||
+                            op == LiftedOperation::LENGTH) {
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            }
+
+            return false;
+        }
 
         int usedDefs = 0;
         SSARef usedRef;
