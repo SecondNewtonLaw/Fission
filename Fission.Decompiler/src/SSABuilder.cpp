@@ -183,15 +183,10 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                     markRead(base + k);
             } else if (inst->operation == LiftedOperation::SETLIST) { // TODO: Handle vararg SETLIST properly.
                 int base = inst->operands[1].value.reg;
-                int count = inst->operands[2].value.imm.n - 1;
-
-                if (count == -1) {
-                    // up to stack top, lazy.
-                    markRead(base);
-                } else {
-                    for (int k = 0; k < count; ++k)
-                        markRead(base + k);
-                }
+                int count = inst->operands[2].value.imm.n;
+                int effectiveCount = (count > 0) ? (count - 1) : 1; // assume base is read, as we may use it.
+                for (int k = 0; k < effectiveCount; ++k)
+                    markRead(base + k);
             }
 
             for (size_t i = 0; i < inst->operands.size(); ++i) {
@@ -521,27 +516,21 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
             } else if (inst->operation == LiftedOperation::SETLIST) {
                 int newItemsStartReg = inst->operands[1].value.reg;
-                int newItemsCount = inst->operands[2].value.imm.n - 1;
+                int newItemsCount = inst->operands[2].value.imm.n;
+                int effectiveCount = (newItemsCount == 0) ? 1 : (newItemsCount - 1);
 
                 std::vector<int32_t> itemVersions;
-                itemVersions.reserve(newItemsCount > 0 ? newItemsCount : 0);
+                itemVersions.reserve(effectiveCount);
 
-                if (newItemsCount > 0) {
-                    for (int32_t k = 0; k < newItemsCount; ++k) {
-                        int32_t argReg = newItemsStartReg + k;
-                        int32_t v = CurrentVersion(argReg);
-                        if (v == -1)
-                            v = NewVersion(argReg);
+                for (int32_t k = 0; k < effectiveCount; ++k) {
+                    int32_t argReg = newItemsStartReg + k;
+                    int32_t v = CurrentVersion(argReg);
+                    if (v == -1)
+                        v = NewVersion(argReg);
 
-                        itemVersions.push_back(v);
-                        func.useCounts[{argReg, v}]++;
-                        func.users[{argReg, v}].push_back(inst);
-                    }
-                } else {
-                    // MULTIRET
-                    itemVersions.push_back(CurrentVersion(newItemsStartReg));
-                    func.useCounts[{newItemsStartReg, CurrentVersion(newItemsStartReg)}]++;
-                    func.users[{newItemsStartReg, CurrentVersion(newItemsStartReg)}].push_back(inst);
+                    itemVersions.push_back(v);
+                    func.useCounts[{argReg, v}]++;
+                    func.users[{argReg, v}].push_back(inst);
                 }
 
                 func.implicitUses[inst] = std::move(itemVersions);
