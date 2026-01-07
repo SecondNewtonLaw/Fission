@@ -104,8 +104,6 @@ class SourceGenerator : public Visitor {
                     buffer << ", ";
             }
 
-            if (lpNode->bIsVariadicCall)
-                buffer << ", ...";
             buffer << ")";
             this->NextLine();
         } else {
@@ -116,8 +114,6 @@ class SourceGenerator : public Visitor {
                 if (i < lpNode->arguments.size() - 1)
                     buffer << ", ";
             }
-            if (lpNode->bIsVariadicCall)
-                buffer << ", ...";
             buffer << ")";
         }
     }
@@ -363,8 +359,6 @@ class SourceGenerator : public Visitor {
                     buffer << ", ";
             }
 
-            if (lpNode->bIsVariadicCall)
-                buffer << ", ...";
             buffer << ")";
 
             if (!lpNode->inlineCall)
@@ -389,8 +383,6 @@ class SourceGenerator : public Visitor {
                 buffer << ", ";
         }
 
-        if (lpNode->bIsVariadicCall)
-            buffer << ", ...";
         buffer << ")";
 
         if (!lpNode->inlineCall)
@@ -439,5 +431,9 @@ class SourceGenerator : public Visitor {
         lpNode->condition->Accept(this);
         buffer << ")";
         this->NextLine();
+    }
+    void Visit(VarArgExpression *lpNode) override {
+        (void)lpNode;
+        buffer << "..."; /* legitimately. */
     }
 };

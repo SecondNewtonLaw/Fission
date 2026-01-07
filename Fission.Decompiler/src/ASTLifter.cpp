@@ -1055,7 +1055,8 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
             }
             if (def && def->operation == LiftedOperation::GETVARARGS) {
                 isVararg = true;
-                break;
+                args.push_back(std::make_shared<VarArgExpression>()); // var arg may be present in the middle of arguments, unfunny.
+                continue;
             }
             args.push_back(LiftExpression(op, false));
         }

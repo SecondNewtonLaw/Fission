@@ -318,6 +318,13 @@ class CallExpressionNode : public Expression {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class VarArgExpression : public Expression {
+  public:
+    VarArgExpression() = default;
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class ExpressionStatementNode : public Statement {
   public:
     std::shared_ptr<Expression> expression;
