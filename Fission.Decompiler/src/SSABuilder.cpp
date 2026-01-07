@@ -57,6 +57,27 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
     return baseType;
 }
 
+int CalculateLuaStackForInstruction(AnalyzedFunction &func, LiftedInstruction &inst) {
+    if (LiftedOperation::CALL != inst.operation)
+        return 0; // why bro.
+
+    if (inst.operands[1].value.imm.n != 0 /* not actually var arg, why the fuck was this called? */)
+        return 0;
+
+    uint8_t maxRegister = inst.operands[0].value.reg;
+
+    for (const auto &insn : func.lpLiftedFunction->instructions) {
+        if (insn.instructionIndex == inst.instructionIndex)
+            break; // going further will break this.
+        for (const auto &ops : insn.operands) {
+            if (ops.type == LiftedOperandType::Register)
+                maxRegister = std::max(maxRegister, ops.value.reg);
+        }
+    }
+
+    return maxRegister - inst.operands[0].value.reg; // regMax - regStart ; basic for fucking vararg.
+}
+
 std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &inst) {
     std::vector<int> defs;
     switch (inst.operation) {
@@ -156,10 +177,15 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 int32_t regFunc = inst->operands[0].value.reg;
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
-                int effectiveArgCount = (argCount == -1) ? 1 : argCount;
+                int effectiveArgCount = argCount;
                 if (effectiveArgCount > 0)
                     for (int32_t k = 0; k < effectiveArgCount; ++k)
                         markRead(regFunc + 1 + k);
+                else {
+                    auto max = CalculateLuaStackForInstruction(*func, *inst);
+                    for (int32_t k = 0; k < max; ++k)
+                        markRead(regFunc + 1 + k);
+                }
 
                 int32_t retCount = inst->operands[2].value.imm.n;
                 int32_t baseReg = inst->operands[0].value.reg;
@@ -450,10 +476,21 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
                 std::vector<int32_t> argVersions;
-                int effectiveArgCount = (argCount == -1) ? 1 : argCount;
+                int effectiveArgCount = argCount;
                 if (effectiveArgCount > 0) {
                     argVersions.reserve(effectiveArgCount);
                     for (int32_t k = 0; k < effectiveArgCount; ++k) {
+                        int32_t argReg = regFunc + 1 + k;
+                        int32_t v = CurrentVersion(argReg);
+                        if (v == -1)
+                            v = NewVersion(argReg);
+                        argVersions.push_back(v);
+                        func.useCounts[{argReg, v}]++;
+                        func.users[{argReg, v}].push_back(inst);
+                    }
+                } else {
+                    auto max = CalculateLuaStackForInstruction(func, *inst);
+                    for (int32_t k = 0; k < max; ++k) {
                         int32_t argReg = regFunc + 1 + k;
                         int32_t v = CurrentVersion(argReg);
                         if (v == -1)

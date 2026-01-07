@@ -219,7 +219,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             std::shared_ptr<Expression> cond;
 
             if (trueIdx == fallthroughIdx) {
-                cond = jumpCond;
+                if (!isSequential)
+                    cond = InvertCondition(jumpCond);
+                else
+                    cond = (jumpCond);
             } else {
                 cond = InvertCondition(jumpCond);
             }
@@ -399,6 +402,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             continue;
 
         switch (inst.operation) {
+        case LiftedOperation::GETVARARGS: {
+            break; // not handled here.
+        }
         case LiftedOperation::SETGLOBAL: {
             const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[inst.operands[1].value.imm.k];
             auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(k.constantData)));
