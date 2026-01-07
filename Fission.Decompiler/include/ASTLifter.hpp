@@ -48,10 +48,22 @@ class ASTLifter {
 
     std::set<SSARef> m_phiConsumers;
 
+    std::unordered_map<std::string, DeserializedFunction *> m_takenFunctionNames;
+    int32_t m_dwLastFunctionIndex = 0;
+
   private:
     AnalyzedFunction *m_currentFunction = nullptr;
 
     std::vector<std::shared_ptr<Statement>> LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited);
+    std::string GetFunctionName(DeserializedFunction *lpDeserialized) {
+        if (lpDeserialized->debugName.has_value())
+            return std::format("{}", *lpDeserialized->debugName);
+
+        if (this->m_dwLastFunctionIndex == 0)
+            this->m_dwLastFunctionIndex = rand(); // randomize the starter value to prevent known value name duplication attacks.
+        return std::format("anon_{}_{}", this->m_dwLastFunctionIndex++, lpDeserialized->bytecodeId);
+    }
+
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const BasicBlock &block);
     bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const std::set<uint32_t> &visitedScopes);
     std::shared_ptr<Expression> LiftExpression(const LiftedOperand &operand, bool forceExpression = false);

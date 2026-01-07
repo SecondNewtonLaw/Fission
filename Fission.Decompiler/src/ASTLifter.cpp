@@ -263,7 +263,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         } else {
             nodes.insert(
                 nodes.end(),
-                std::make_shared<CommentNode>("Fission: Warning! Failed to determine TRUE and FALSE block! Control flow graph may be malformed.", true)
+                std::make_shared<CommentNode>(
+                    std::format(
+                        "Fission: Warning! Failed to determine TRUE and FALSE block! Control flow graph may be malformed. True Status: {}, False Status: {}",
+                        block.ifStatementTrue ? "Present" : "Not Present", block.ifStatementFalse ? "Present" : "Not Present"
+                    ),
+                    true
+                )
             );
         }
         break;
@@ -521,11 +527,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     bUsesCapturesAndMarked = true;
                     statements.push_back(
                         std::make_shared<CommentNode>(
-                            std::format(
-                                "Fission: Beginning captures for function with name '{}'",
-                                duplicatedFunction->debugName.value_or(std::format("f{}", duplicatedFunction->bytecodeId))
-                            ),
-                            true
+                            std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true
                         )
                     );
                 }
@@ -550,8 +552,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 statements.push_back(
                     std::make_shared<CommentNode>(
                         std::format(
-                            "Fission: Ending captures for function with name '{}'",
-                            duplicatedFunction->debugName.value_or(std::format("f{}", duplicatedFunction->bytecodeId))
+                            "Fission: Ending captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)
+
                         ),
                         true
                     )
@@ -561,7 +563,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             ASTLifter subLifter;
             ASTFunction subAst = subLifter.Lift(*targetFunc);
 
-            std::string funcName = duplicatedFunction->debugName.value_or(std::format("f{}", duplicatedFunction->bytecodeId));
+            std::string funcName = this->GetFunctionName(duplicatedFunction);
             m_currentFunction->SetGlobalName(inst.operands[0].value.reg, funcName);
 
             std::unordered_map<int32_t, std::string> argNames;
@@ -571,6 +573,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     argName = std::format("a{}", j);
                 argNames[j] = argName;
             }
+
+            if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
+                argNames[duplicatedFunction->numparams] = "...";        // insert vararg.
 
             auto bodyBlock = std::make_shared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;
@@ -628,10 +633,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     bUsesCapturesAndMarked = true;
                     statements.push_back(
                         std::make_shared<CommentNode>(
-                            std::format(
-                                "Fission: Beginning captures for function with name '{}'", proto->debugName.value_or(std::format("f{}", proto->bytecodeId))
-                            ),
-                            true
+                            std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(proto)), true
                         )
                     );
                 }
@@ -654,17 +656,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             if (bUsesCapturesAndMarked) {
                 statements.push_back(
-                    std::make_shared<CommentNode>(
-                        std::format("Fission: Ending captures for function with name '{}'", proto->debugName.value_or(std::format("f{}", proto->bytecodeId))),
-                        true
-                    )
+                    std::make_shared<CommentNode>(std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true)
                 );
             }
 
             ASTLifter subLifter;
             ASTFunction subAst = subLifter.Lift(*targetFunc);
 
-            std::string funcName = proto->debugName.value_or(std::format("f{}", proto->bytecodeId));
+            std::string funcName = this->GetFunctionName(proto);
 
             std::unordered_map<int32_t, std::string> argNames;
             for (int j = 0; j < proto->numparams; ++j) {
@@ -673,6 +672,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     argName = std::format("a{}", j);
                 argNames[j] = argName;
             }
+
+            if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
+                argNames[proto->numparams] = "...";                     // insert vararg.
 
             auto bodyBlock = std::make_shared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;
@@ -863,6 +865,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
     case LiftedOperation::MULK:
     case LiftedOperation::DIVK:
     case LiftedOperation::MODK:
+    case LiftedOperation::ORK:
     case LiftedOperation::POWK: {
         std::string op = "+";
         if (def->operation == LiftedOperation::SUBK)
@@ -875,15 +878,37 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
             op = "%";
         else if (def->operation == LiftedOperation::POWK)
             op = "^";
+        else if (def->operation == LiftedOperation::ANDK)
+            op = "and";
+        else if (def->operation == LiftedOperation::ORK)
+            op = "or";
 
         auto left = LiftExpression(def->operands[1]);
         const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[2].value.imm.k];
-        auto right = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+        std::shared_ptr<Expression> right;
+        switch (k.kType) {
+        case LUA_TNIL:
+            right = std::make_shared<NilLiteralNode>();
+            break;
+        case LUA_TBOOLEAN:
+            right = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+            break;
+        case LUA_TNUMBER:
+            right = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+            break;
+        case LUA_TSTRING:
+            right = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+            break;
+        default:
+            right = std::make_shared<NilLiteralNode>();
+            break;
+        }
+
         return std::make_shared<BinaryExpressionNode>(op, left, right);
     }
 
     case LiftedOperation::NOT:
-        return std::make_shared<UnaryExpressionNode>("not", LiftExpression(def->operands[1]));
+        return std::make_shared<UnaryExpressionNode>("not " /* not is extra space. */, LiftExpression(def->operands[1]));
     case LiftedOperation::MINUS:
         return std::make_shared<UnaryExpressionNode>("-", LiftExpression(def->operands[1]));
     case LiftedOperation::LENGTH:
@@ -947,6 +972,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
         return expr ? expr : std::make_shared<StringLiteralNode>("");
     }
 
+    case LiftedOperation::DUPTABLE:
     case LiftedOperation::NEWTABLE:
         return LiftTableLiteral(*def);
 
@@ -1087,9 +1113,11 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
 
 std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst) {
     std::vector<std::shared_ptr<Expression>> elements;
+    std::vector<int32_t> candidatesIndexes;
     int32_t tableReg = inst.operands[0].value.reg;
     size_t scanLimit = 100;
     size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
+    bool bFoundSetList = false;
 
     for (size_t i = inst.instructionIndex + 1; i < inst.instructionIndex + scanLimit && i < maxIdx; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
@@ -1099,12 +1127,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             candidate.operation == LiftedOperation::BREAK)
             break;
 
-        bool isInitializer = false;
-
         if (candidate.operation == LiftedOperation::SETLIST) {
             if (candidate.operands[0].value.reg == tableReg) {
-                isInitializer = true;
-
                 if (m_currentFunction->implicitUses.contains(&candidate)) {
                     const auto &versions = m_currentFunction->implicitUses.at(&candidate);
                     int startReg = candidate.operands[1].value.reg;
@@ -1117,11 +1141,11 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                         elements.push_back(LiftExpression(itemOp));
                     }
                 }
+                bFoundSetList = true;
+                candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
             if (candidate.operands[1].value.reg == tableReg) {
-                isInitializer = true;
-
                 auto kIdx = candidate.operands[2].value.imm.k;
                 const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
                 std::string keyStr = std::get<std::string>(k.constantData);
@@ -1130,10 +1154,10 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 auto valExpr = LiftExpression(candidate.operands[0]);
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+                candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEN) {
             if (candidate.operands[1].value.reg == tableReg) {
-                isInitializer = true;
                 int idx = candidate.operands[2].value.imm.n + 1;
 
                 auto keyExpr = std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx));
@@ -1147,24 +1171,29 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 // because of this, we have to imply that the keyExpr will be a literal ['']
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+                candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
             if (candidate.operands[1].value.reg == tableReg) {
-                isInitializer = true;
-
                 auto keyExpr = LiftExpression(candidate.operands[2]);
                 auto valExpr = LiftExpression(candidate.operands[0]);
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+                candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
-        }
-
-        if (isInitializer) {
-            m_processedInstructions.insert(candidate.instructionIndex);
         }
     }
 
-    return std::make_shared<TableLiteralNode>(elements);
+    if (bFoundSetList)
+        // the instructions are processed, since they're inlined.
+        for (const auto &ins : candidatesIndexes)
+            m_processedInstructions.insert(ins);
+
+    if (bFoundSetList)
+        return std::make_shared<TableLiteralNode>(elements);
+    else
+        return std::make_shared<TableLiteralNode>(
+        ); // the list is likely instanciated and then added to. This can cause some malformations in some cases, reject inlining.
 }
 
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {

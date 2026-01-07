@@ -53,8 +53,12 @@ class SourceGenerator : public Visitor {
 
         for (int32_t i = 0; i < lpNode->argumentCount; i++) {
             buffer << lpNode->argumentsNames.at(i);
-            if (i < lpNode->argumentCount - 1)
+            if (i < (lpNode->argumentCount - 1))
                 buffer << ", ";
+        }
+        if ((lpNode->argumentsNames.size() - 1) == static_cast<size_t>(lpNode->argumentCount)) {
+            // vararg very likely.
+            buffer << ", ...";
         }
 
         buffer << ")";
