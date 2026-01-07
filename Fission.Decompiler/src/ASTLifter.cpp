@@ -124,32 +124,52 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     case LiftedOperation::JUMPIFNOT:
         return std::make_shared<UnaryExpressionNode>("not ", LiftExpression(inst->operands[0]));
     case LiftedOperation::JUMPXEQK: {
-        auto kIdx = inst->operands[2].value.imm.k;
-        auto notFlag = inst->operands[3].value.imm.b;
-        std::shared_ptr<Expression> rhs;
-        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
-        switch (k.kType) {
-        case LUA_TNIL:
-            rhs = std::make_shared<NilLiteralNode>();
-            break;
-        case LUA_TBOOLEAN:
-            rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-            break;
-        case LUA_TNUMBER:
-            rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-            break;
-        case LUA_TSTRING:
-            rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-            break;
-        default:
-            rhs = std::make_shared<NilLiteralNode>();
-            break;
+        if (inst->operands[2].type == LiftedOperandType::ImmediateConstant) {
+            auto kIdx = inst->operands[2].value.imm.k;
+            auto notFlag = inst->operands[3].value.imm.b;
+            std::shared_ptr<Expression> rhs;
+            const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+            switch (k.kType) {
+            case LUA_TNIL:
+                rhs = std::make_shared<NilLiteralNode>();
+                break;
+            case LUA_TBOOLEAN:
+                rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                break;
+            case LUA_TNUMBER:
+                rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                break;
+            case LUA_TSTRING:
+                rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                break;
+            default:
+                rhs = std::make_shared<NilLiteralNode>();
+                break;
+            }
+
+            if (notFlag)
+                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+
+            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+        }
+        if (inst->operands[2].type == LiftedOperandType::ImmediateBool) {
+            auto bValue = inst->operands[2].value.imm.b;
+            auto notFlag = inst->operands[3].value.imm.b;
+            std::shared_ptr<Expression> rhs = std::make_shared<BooleanLiteralNode>(bValue);
+            if (notFlag)
+                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+
+            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
         }
 
-        if (notFlag)
-            return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+        if (inst->operands[2].type == LiftedOperandType::ImmediateNil) {
+            auto notFlag = inst->operands[3].value.imm.b;
+            std::shared_ptr<Expression> rhs = std::make_shared<NilLiteralNode>();
+            if (notFlag)
+                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
 
-        return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+        }
     }
     default:
         return std::make_shared<BooleanLiteralNode>(false);
