@@ -248,16 +248,19 @@ class SourceGenerator : public Visitor {
         (void)lpNode;
         buffer << this->GetIndentation();
         lpNode->left->Accept(this);
-        buffer << " = ";
+        buffer << " = (";
         lpNode->right->Accept(this);
+        buffer << ")";
         this->NextLine();
     }
 
     void Visit(BinaryExpressionNode *lpNode) override {
         (void)lpNode;
+        buffer << "(";
         lpNode->left->Accept(this);
         buffer << " " << lpNode->op << " ";
         lpNode->right->Accept(this);
+        buffer << ")";
     }
 
     void Visit(StringLiteralNode *lpNode) override {
