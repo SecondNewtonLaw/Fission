@@ -6,6 +6,7 @@
 #include "Visitor.hpp"
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -78,6 +79,18 @@ class Expression : public Statement {
 };
 class Declaration : public Statement {
   public:
+};
+
+class FunctionArgumentExpression : public Statement {
+  public:
+    std::shared_ptr<Expression> argumentName;
+    std::optional<std::shared_ptr<Expression>> type = std::nullopt;
+    explicit FunctionArgumentExpression(std::shared_ptr<Expression> argName, const std::optional<std::shared_ptr<Expression>> &tt)
+        : argumentName(std::move(argName)), type(tt) {
+        this->nodeKind = ASTNodeKind::Identifier;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
 class Identifier : public Declaration {
@@ -258,13 +271,13 @@ class FunctionDeclarationNode : public Expression {
   public:
     std::string functionName;
     int32_t argumentCount = 0;
-    std::unordered_map<int32_t, std::string> argumentsNames{}; // arg1 -> it's name inside syntax
+    std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argumentsNames{}; // arg1 -> it's name inside syntax
     bool bIsVarArg = false;
     bool bIsLocalDeclaration = false; // to be defined in lifter. If the only usage of this is inside of a function, and such function holds no debug name.
     std::shared_ptr<BlockStatementNode> lpFunctionBody = nullptr;
 
     FunctionDeclarationNode(
-        std::string functionName, const int32_t argumentCount, std::unordered_map<int32_t, std::string> names, bool isVarArg,
+        std::string functionName, const int32_t argumentCount, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> names, bool isVarArg,
         std::shared_ptr<BlockStatementNode> funcBody, bool bIsLocalDeclaration
     )
         : functionName(std::move(functionName)), argumentCount(argumentCount), argumentsNames(std::move(names)), bIsVarArg(isVarArg),

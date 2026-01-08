@@ -2,7 +2,6 @@
 // Created by Dottik on 28/5/2025.
 //
 
-
 #pragma once
 #include <string>
 
@@ -12,12 +11,17 @@ class BinaryReader {
     const std::uint8_t *m_lpBufferEnd;
     const std::uint8_t *m_lpCurrentBufferPointer;
 
-public:
+  public:
+    explicit BinaryReader(uint8_t *bufferStart, size_t size) {
+        this->m_lpBufferStart = reinterpret_cast<const std::uint8_t *>(bufferStart);
+        this->m_lpBufferEnd = reinterpret_cast<const std::uint8_t *>(bufferStart) + size;
+        this->m_lpCurrentBufferPointer = this->m_lpBufferStart;
+    }
+
     explicit BinaryReader(const std::string &buffer) {
         this->m_backingBuffer = buffer;
         this->m_lpBufferStart = reinterpret_cast<const std::uint8_t *>(this->m_backingBuffer.data());
-        this->m_lpBufferEnd =
-            reinterpret_cast<const std::uint8_t *>(this->m_backingBuffer.data()) + this->m_backingBuffer.size();
+        this->m_lpBufferEnd = reinterpret_cast<const std::uint8_t *>(this->m_backingBuffer.data()) + this->m_backingBuffer.size();
         this->m_lpCurrentBufferPointer = this->m_lpBufferStart;
     }
 
@@ -25,7 +29,7 @@ public:
         unsigned int result = 0;
         unsigned int shift = 0;
 
-        uint8_t byte { };
+        uint8_t byte{};
 
         do {
             byte = this->Read<uint8_t>();
@@ -36,14 +40,13 @@ public:
         return result;
     }
 
-    template <typename T>
-    T Read(const bool advance = true) {
+    template <typename T> T Read(const bool advance = true) {
         const auto advanceBy = sizeof(T);
         // ASSERT(
         //     this->m_lpCurrentBufferPointer + advanceBy <= this->m_lpBufferEnd,
         //     "structure is too big for the given buffer, cannot read!"
         // );
-        T tmp { };
+        T tmp{};
         memcpy(&tmp, this->m_lpCurrentBufferPointer, advanceBy);
 
         if (advance) [[likely]]
@@ -76,6 +79,7 @@ public:
     }
 
     const std::uint8_t *GetCurrentReaderPosition() const { return this->m_lpCurrentBufferPointer; }
+    std::uint8_t *GetCurrentReaderPositionMut() { return const_cast<uint8_t *>(this->m_lpCurrentBufferPointer); }
 
     const std::uint8_t *GetEndPosition() const { return this->m_lpBufferEnd; }
 };

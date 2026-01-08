@@ -74,6 +74,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
     for (auto i = 0llu; i < protoCount; i++) {
         DeserializedFunction function{};
+        function.uTypeVersion = result.typesVersion;
+        function.uBytecodeVersion = result.bytecodeVersion;
         function.bytecodeId = int(i);
         function.maxstacksize = reader.Read<uint8_t>();
         function.numparams = reader.Read<uint8_t>();
@@ -127,7 +129,55 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                     reader.AdvanceBy(typesize);
 
                     if (result.typesVersion == 3) {
-                        // nothing to do here, becuase it's simply runtime-userdata remapping.
+                        // not much to do here, since we just have to remap types. However UDs are unmapped and they're done at Runtime, which we cannot really do.
+                        BinaryReader _reader{std::string(function.typeinfo.data(), function.typeinfo.data() + function.typeinfo.size())};
+
+                        auto count = function.typeinfo.size();
+
+                        auto typeSize = _reader.ReadVariableInteger();
+                        auto upvalCount = _reader.ReadVariableInteger();
+                        auto localCount = _reader.ReadVariableInteger();
+
+                        if (typeSize != 0) {
+                            uint8_t *_types = _reader.GetCurrentReaderPositionMut();
+
+                            // Skip two bytes of function type introduction
+                            for (uint32_t k = 2; k < typeSize; k++) {
+                                auto index = static_cast<uint32_t>(_types[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
+
+                                if (index < count)
+                                    _types[k] = (uint8_t)LBC_TYPE_USERDATA; /* we do not have runtime mappings. */ // userdataRemapping[index];
+                            }
+
+                            _reader.AdvanceBy(typeSize);
+                        }
+
+                        if (upvalCount != 0) {
+                            uint8_t *_types = _reader.GetCurrentReaderPositionMut();
+
+                            for (uint32_t k = 0; k < upvalCount; k++) {
+                                auto index = static_cast<uint32_t>(_types[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
+
+                                if (index < count)
+                                    _types[k] = (uint8_t)LBC_TYPE_USERDATA; /* we do not have runtime mappings. */ // userdataRemapping[index];
+                            }
+
+                            _reader.AdvanceBy(upvalCount);
+                        }
+
+                        if (localCount != 0) {
+                            for (uint32_t k = 0; k < localCount; k++) {
+                                auto index = static_cast<uint32_t>(_reader.GetCurrentReaderPositionMut()[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
+
+                                if (index < count)
+                                    *_reader.GetCurrentReaderPositionMut() = (uint8_t)LBC_TYPE_USERDATA;
+                                /* we do not have runtime mappings. */ // userdataRemapping[index];
+
+                                _reader.AdvanceBy(2);
+                                _reader.ReadVariableInteger();
+                                _reader.ReadVariableInteger();
+                            }
+                        }
                     }
                 }
             }

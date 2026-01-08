@@ -34,6 +34,7 @@ class ForNumericNode;
 class CompoundBinaryExpressionNode;
 class RepeatStatementNode;
 class VarArgExpression;
+class FunctionArgumentExpression;
 
 class Visitor {
   public:
@@ -67,4 +68,5 @@ class Visitor {
     virtual void Visit(CompoundBinaryExpressionNode *lpNode) = 0;
     virtual void Visit(RepeatStatementNode *lpNode) = 0;
     virtual void Visit(VarArgExpression *lpNode) = 0;
+    virtual void Visit(FunctionArgumentExpression *lpNode) = 0;
 };

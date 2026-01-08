@@ -52,7 +52,7 @@ class SourceGenerator : public Visitor {
         buffer << std::format("function {}(", lpNode->functionName);
 
         for (int32_t i = 0; i < lpNode->argumentCount; i++) {
-            buffer << lpNode->argumentsNames.at(i);
+            lpNode->argumentsNames.at(i)->Accept(this);
             if (i < (lpNode->argumentCount - 1))
                 buffer << ", ";
         }
@@ -99,6 +99,14 @@ class SourceGenerator : public Visitor {
 
         if (lpNode->bNewLine)
             this->NextLine();
+    }
+
+    void Visit(FunctionArgumentExpression *lpNode) override {
+        lpNode->argumentName->Accept(this);
+        if (lpNode->type) {
+            buffer << ": ";
+            lpNode->type.value()->Accept(this);
+        }
     }
 
     void Visit(CallExpressionNode *lpNode) override {

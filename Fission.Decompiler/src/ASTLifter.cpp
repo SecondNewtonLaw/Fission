@@ -73,6 +73,12 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     if (!analyzedFunction.basicBlocks.empty()) {
         std::set<uint32_t> visited;
         ast.statements = LiftControlFlow(0, -1, visited);
+        std::string ttinfo = "Unavailable";
+
+        if (analyzedFunction.lpLiftedFunction->lpDeserialized->typeinfo.size() != 0) {
+            ttinfo = "Available";
+        }
+
         auto s = std::format(
             R"(
     Fission ~~ Function Information:
@@ -81,10 +87,11 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         ~ Debug Name: {}
         ~ Bytecode ID: {}
         ~ Registers Used: R0-R{}
+        ~ Type Information: {}
 )",
             analyzedFunction.lpLiftedFunction->lpDeserialized->nups, analyzedFunction.lpLiftedFunction->lpDeserialized->numparams,
             analyzedFunction.lpLiftedFunction->lpDeserialized->debugName.value_or("anon/no name"),
-            analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId, analyzedFunction.lpLiftedFunction->lpDeserialized->maxstacksize - 1
+            analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId, analyzedFunction.lpLiftedFunction->lpDeserialized->maxstacksize - 1, ttinfo
         );
 
         if (analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain) {
@@ -566,16 +573,26 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             std::string funcName = this->GetFunctionName(duplicatedFunction);
             m_currentFunction->SetGlobalName(inst.operands[0].value.reg, funcName);
 
-            std::unordered_map<int32_t, std::string> argNames;
+            std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argNames;
             for (int j = 0; j < duplicatedFunction->numparams; ++j) {
                 std::string argName = targetFunc->GetVarName(j, 0);
                 if (argName.empty() || argName == std::format("v{}", j))
                     argName = std::format("a{}", j);
-                argNames[j] = argName;
+
+                auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
+                if (duplicatedFunction->typeinfo.size() > static_cast<uint32_t>(j)) {
+                    auto n = Deserializer::GetTypeName(duplicatedFunction, j);
+                    argNames[j] =
+                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(n)));
+                } else {
+                    argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
+                }
             }
 
             if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
-                argNames[duplicatedFunction->numparams] = "...";        // insert vararg.
+                argNames[duplicatedFunction->numparams] = std::make_shared<FunctionArgumentExpression>(
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("...")), std::nullopt
+                ); // insert vararg.
 
             auto bodyBlock = std::make_shared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;
@@ -665,16 +682,26 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             std::string funcName = this->GetFunctionName(proto);
 
-            std::unordered_map<int32_t, std::string> argNames;
+            std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argNames;
             for (int j = 0; j < proto->numparams; ++j) {
                 std::string argName = targetFunc->GetVarName(j, 0);
                 if (argName.empty() || argName == std::format("v{}", j))
                     argName = std::format("a{}", j);
-                argNames[j] = argName;
+
+                auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
+                if (proto->typeinfo.size() > static_cast<uint32_t>(j)) {
+                    auto n = Deserializer::GetTypeName(proto, j);
+                    argNames[j] =
+                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(n)));
+                } else {
+                    argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
+                }
             }
 
             if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
-                argNames[proto->numparams] = "...";                     // insert vararg.
+                argNames[proto->numparams] = std::make_shared<FunctionArgumentExpression>(
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("...")), std::nullopt
+                ); // insert vararg.
 
             auto bodyBlock = std::make_shared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;

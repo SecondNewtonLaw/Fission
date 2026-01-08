@@ -16,6 +16,7 @@
 
 #define USERDATA_TYPE_LIMIT (LBC_TYPE_TAGGED_USERDATA_END - LBC_TYPE_TAGGED_USERDATA_BASE)
 
+struct DeserializedBytecode;
 struct LuauLocalVar {
     std::string varname;
     int startpc;
@@ -87,6 +88,9 @@ struct LuauConstant {
 };
 
 struct DeserializedFunction {
+    std::uint8_t uTypeVersion;
+    std::uint8_t uBytecodeVersion;
+
     std::uint8_t bytecodeId{};
     std::uint8_t maxstacksize{};
     std::uint8_t numparams{};
@@ -127,5 +131,79 @@ struct DeserializedBytecode {
 class Deserializer {
 
   public:
+    static std::string GetTypeName(DeserializedFunction *lpFunc, uint8_t arg) {
+        if (lpFunc->uTypeVersion == 1) {
+            return "any"; // idk cannot replicate so i cannot add it :sob:
+        }
+
+        BinaryReader reader{lpFunc->typeinfo.data(), lpFunc->typeinfo.size()};
+
+        auto typeSize = reader.ReadVariableInteger();
+        reader.ReadVariableInteger();
+        reader.ReadVariableInteger();
+
+        if (typeSize == 0)
+            return "any";
+
+        auto types = reader.GetCurrentReaderPosition();
+        auto typeByte = types[2 /* skip func type + argc */ + arg];
+        // skip introductory bytes.
+
+        uint8_t baseType = typeByte & ~LBC_TYPE_OPTIONAL_BIT;
+        bool isOptional = (typeByte & LBC_TYPE_OPTIONAL_BIT) != 0;
+
+        std::string typeName;
+
+        if (baseType >= LBC_TYPE_TAGGED_USERDATA_BASE && baseType < LBC_TYPE_TAGGED_USERDATA_END) {
+            // typeName = typeMap[baseType - LBC_TYPE_TAGGED_USERDATA_BASE];
+            typeName = "any /* userdata, unmapped */";
+        } else {
+            switch (baseType) {
+            case LBC_TYPE_NIL:
+                typeName = "nil";
+                break;
+            case LBC_TYPE_BOOLEAN:
+                typeName = "boolean";
+                break;
+            case LBC_TYPE_NUMBER:
+                typeName = "number";
+                break;
+            case LBC_TYPE_STRING:
+                typeName = "string";
+                break;
+            case LBC_TYPE_TABLE:
+                typeName = "table";
+                break;
+            case LBC_TYPE_FUNCTION:
+                typeName = "function";
+                break;
+            case LBC_TYPE_THREAD:
+                typeName = "thread";
+                break;
+            case LBC_TYPE_USERDATA:
+                typeName = "userdata";
+                break;
+            case LBC_TYPE_VECTOR:
+                typeName = "vector";
+                break;
+            case LBC_TYPE_BUFFER:
+                typeName = "buffer";
+                break;
+            case LBC_TYPE_ANY:
+                typeName = "any";
+                break;
+            default:
+                typeName = "unknown";
+                break;
+            }
+        }
+
+        if (isOptional) {
+            typeName += "?";
+        }
+
+        return typeName;
+    }
+
     std::optional<DeserializedBytecode> Deserialize(const std::string &bytecode);
 };
