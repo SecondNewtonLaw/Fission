@@ -72,7 +72,6 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(CommentNode *lpNode) override {
-        (void)lpNode;
 
         if (lpNode->comment.find('\n') == std::string::npos) {
             buffer << this->GetIndentation() << "-- " << lpNode->comment;
@@ -81,7 +80,22 @@ class SourceGenerator : public Visitor {
             return;
         }
 
-        buffer << this->GetIndentation() << "--[[ " << lpNode->comment << " ]]";
+        std::string indent = this->GetIndentation();
+        buffer << indent << "--[[ ";
+
+        const std::string &text = lpNode->comment;
+        for (size_t i = 0; i < text.length(); ++i) {
+            buffer << text[i];
+
+            if (text[i] == '\n' && i != text.length() - 1) {
+                buffer << indent;
+            }
+        }
+
+        if (*text.rbegin() != '\n')
+            this->NextLine();
+
+        buffer << indent << "]]";
 
         if (lpNode->bNewLine)
             this->NextLine();
