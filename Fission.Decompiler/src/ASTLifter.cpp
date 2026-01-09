@@ -121,11 +121,11 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     case LiftedOperation::JUMPIFLT:
         return std::make_shared<BinaryExpressionNode>("<", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLT:
-        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFLE:
         return std::make_shared<BinaryExpressionNode>("<=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIFNOTLE:
-        return std::make_shared<BinaryExpressionNode>(">=", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
+        return std::make_shared<BinaryExpressionNode>(">", LiftExpression(inst->operands[0]), LiftExpression(inst->operands[2]));
     case LiftedOperation::JUMPIF:
         return LiftExpression(inst->operands[0]);
     case LiftedOperation::JUMPIFNOT:
@@ -206,78 +206,63 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
     switch (block.bType) {
     case BlockType::IfHeader: {
-        nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+        nodes.insert(nodes.end(), stmts.begin(), stmts.end()); // Body before conditional statement.
+
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
 
-            uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
-            if (mergeIdx == static_cast<uint32_t>(-1) && stopBlockId != static_cast<uint32_t>(-1))
-                mergeIdx = stopBlockId;
-
-            bool isSequential = CanReach(trueIdx, falseIdx, mergeIdx, visited);
-
-            if (isSequential)
-                mergeIdx = falseIdx;
-
-            uint32_t fallthroughIdx = (!block.successors.empty()) ? block.successors[0] : -1;
-
             auto jumpCond = LiftCondition(block.lpTail);
-            std::shared_ptr<Expression> cond;
+            std::shared_ptr<Expression> trueCond = jumpCond;
+            uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
 
-            if (trueIdx == fallthroughIdx) {
-                if (!isSequential)
-                    cond = InvertCondition(jumpCond);
-                else
-                    cond = (jumpCond);
-            } else {
-                cond = InvertCondition(jumpCond);
-            }
+            if (mergeIdx == (uint32_t)-1) {
+                bool trueIsReturn = (m_currentFunction->basicBlocks[trueIdx].bType == BlockType::Return);
+                bool falseIsReturn = (m_currentFunction->basicBlocks[falseIdx].bType == BlockType::Return);
 
-            auto thenStmts = LiftControlFlow(trueIdx, mergeIdx, visited);
-
-            std::vector<std::shared_ptr<Statement>> elseStmts;
-            if (!isSequential) {
-                elseStmts = LiftControlFlow(falseIdx, mergeIdx, visited);
-            }
-
-            if (thenStmts.empty() && !elseStmts.empty()) {
-                cond = InvertCondition(jumpCond);
-                std::swap(thenStmts, elseStmts);
+                if (trueIsReturn && !falseIsReturn) {
+                    mergeIdx = falseIdx;
+                } else if (!trueIsReturn && falseIsReturn) {
+                    mergeIdx = trueIdx;
+                }
             }
 
             auto ifStmt = std::make_shared<IfStatementNode>();
-            ifStmt->condition = cond;
-            ifStmt->thenBranch = CreateBlock(thenStmts);
+            auto visitedCopy = visited;
+            if (mergeIdx != (uint32_t)-1)
+                visitedCopy.insert(mergeIdx);
 
-            if (!elseStmts.empty()) {
-                bool thenIsTerminal = !thenStmts.empty() && (std::dynamic_pointer_cast<ReturnStatementNode>(thenStmts.back()) ||
-                                                             std::dynamic_pointer_cast<BreakStatementNode>(thenStmts.back()));
-
-                if (thenIsTerminal) {
-                    nodes.push_back(ifStmt);
-                    nodes.insert(nodes.end(), elseStmts.begin(), elseStmts.end());
-                } else {
-                    ifStmt->elseBranch = CreateBlock(elseStmts);
-                    nodes.push_back(ifStmt);
-                }
+            if (mergeIdx == falseIdx) {
+                ifStmt->condition = (trueCond);
+                ifStmt->thenBranch = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
+            } else if (mergeIdx == trueIdx) {
+                ifStmt->condition = InvertCondition(trueCond);
+                ifStmt->thenBranch = CreateBlock(LiftControlFlow(falseIdx, mergeIdx, visitedCopy));
             } else {
-                nodes.push_back(ifStmt);
+                ifStmt->condition = (trueCond);
+                ifStmt->thenBranch = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
+
+                auto elseStmts = LiftControlFlow(falseIdx, mergeIdx, visitedCopy);
+                if (!elseStmts.empty()) {
+                    ifStmt->elseBranch = CreateBlock(elseStmts);
+                }
+
+                if (ifStmt->thenBranch->body.empty()) { // simplify cflow.
+                    // swap and invert.
+                    std::swap(ifStmt->thenBranch, ifStmt->elseBranch);
+                    ifStmt->condition = InvertCondition(trueCond);
+                }
             }
 
-            auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
-            nodes.insert(nodes.end(), after.begin(), after.end());
+            nodes.push_back(ifStmt);
+
+            if (mergeIdx != (uint32_t)-1) {
+                auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
+                nodes.insert(nodes.end(), after.begin(), after.end());
+            }
+
         } else {
-            nodes.insert(
-                nodes.end(),
-                std::make_shared<CommentNode>(
-                    std::format(
-                        "Fission: Warning! Failed to determine TRUE and FALSE block! Control flow graph may be malformed. True Status: {}, False Status: {}",
-                        block.ifStatementTrue ? "Present" : "Not Present", block.ifStatementFalse ? "Present" : "Not Present"
-                    ),
-                    true
-                )
-            );
+            nodes.push_back(std::make_shared<CommentNode>("Fission: Warning - Malformed IfHeader", true));
         }
         break;
     }
@@ -732,8 +717,25 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             break;
         }
 
-        case LiftedOperation::MOVE:
+        case LiftedOperation::MOVE: {
+            auto isDefined = m_definedRegisters.contains(inst.operands[0].value.reg);
+
+            if (!isDefined) {
+                statements.push_back(
+                    std::make_shared<CommentNode>(
+                        "Fission: Warning, data control flow failure. A MOVE into an undefined register has been detected. This may point to significant "
+                        "information loss, decompilation may be incorrect!",
+                        true
+                    )
+                );
+            }
+
+            auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
+            auto val = LiftExpression(inst.operands[1], false);
+
+            statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
             break;
+        }
 
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
@@ -1160,12 +1162,22 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                     const auto &versions = m_currentFunction->implicitUses.at(&candidate);
                     int startReg = candidate.operands[1].value.reg;
 
-                    for (size_t k = 0; k < versions.size(); ++k) {
+                    for (size_t k = 0; k < versions.size(); k++) {
                         LiftedOperand itemOp;
                         itemOp.type = LiftedOperandType::Register;
                         itemOp.value.reg = startReg + k;
                         itemOp.ssaVersion = versions[k];
-                        elements.push_back(LiftExpression(itemOp));
+                        std::shared_ptr<Expression> expr = nullptr;
+                        if (auto lpDef = m_currentFunction->GetDefinition(itemOp)) {
+                            if (lpDef->operation == LiftedOperation::LOAD) {
+                                expr = LiftExpression(itemOp, true);
+                                this->m_processedInstructions.insert(lpDef->instructionIndex); // mark as processed.
+                            } else {
+                                expr = LiftExpression(itemOp, false);
+                            }
+                        }
+
+                        elements.push_back(expr);
                     }
                 }
                 bFoundSetList = true;
@@ -1333,7 +1345,8 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
         return false;
     }
 
-    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]))
+    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]) &&
+        inst->operands[0].ssaVersion != 1 /* first version cannot be inlined. It is a declaration */)
         return true;
 
     if (m_currentFunction->IsSingleUse(inst->operands[0])) {

@@ -50,9 +50,7 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
 
         LiftedInstruction *currentInst = block.lpHead;
         while (true) {
-            auto instructionIndex = std::distance(rawFunc->instructions.data(), currentInst);
-
-            stream << GetIndentation(indentationLevel + 6) << "_" << instructionIndex << ": " << OperationToString(currentInst->operation) << " ";
+            stream << GetIndentation(indentationLevel + 6) << "_" << currentInst->instructionIndex << ": " << OperationToString(currentInst->operation) << " ";
 
             for (std::size_t i = 0; i < currentInst->operands.size(); i++) {
                 const auto &operand = currentInst->operands[i];

@@ -149,29 +149,58 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
                 if (!isNot) {
                     // The condition has to be met.
-                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
-                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + 2, leaderToBlockId);
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
                 }
 
                 // fallthrough (else)
-                nextInstructions.push_back(currentBlock.lpTail + 1);
+                nextInstructions.push_back(currentBlock.lpTail + 2);
 
                 if (isNot) {
-                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
-                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 2, leaderToBlockId);
                     // push afterward, the condition doesn't have to be met to jump.
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
                 }
             } else {
                 // jump (True/False depends on opcode)
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
-                nextInstructions.push_back((currentBlock.lpTail) + offset);
-                currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
 
                 // fallthrough (else)
-                nextInstructions.push_back(currentBlock.lpTail + 1);
-                currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                switch (currentBlock.lpTail->operation) {
+                case LiftedOperation::JUMPIFNOT:
+                default:
+                    nextInstructions.push_back(currentBlock.lpTail + 1);
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    nextInstructions.push_back((currentBlock.lpTail) + offset);
+                    break;
+                case LiftedOperation::JUMPIF:
+                    nextInstructions.push_back((currentBlock.lpTail) + offset);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    nextInstructions.push_back(currentBlock.lpTail + 1);
+                    break;
+
+                case LiftedOperation::JUMPIFEQ:
+                case LiftedOperation::JUMPIFLE:
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + 2, leaderToBlockId);
+                    nextInstructions.push_back(currentBlock.lpTail + 2);
+                    nextInstructions.push_back((currentBlock.lpTail) + offset);
+                    break;
+
+                case LiftedOperation::JUMPIFNOTEQ:
+                case LiftedOperation::JUMPIFNOTLE:
+                case LiftedOperation::JUMPIFNOTLT:
+                case LiftedOperation::JUMPIFLT:
+                    currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 2, leaderToBlockId);
+                    currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
+                    nextInstructions.push_back(currentBlock.lpTail + 2);
+                    nextInstructions.push_back((currentBlock.lpTail) + offset);
+                    break;
+                }
             }
             break;
         }
@@ -216,7 +245,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             if (instruction->operation == LiftedOperation::FORNLOOP || instruction->operation == LiftedOperation::FORGLOOP ||
                 instruction->operation == LiftedOperation::FORNPREP || instruction->operation == LiftedOperation::FORGPREP ||
                 instruction->operation == LiftedOperation::FORGPREP_INEXT || instruction->operation == LiftedOperation::FORGPREP_NEXT ||
-                instruction->operation == LiftedOperation::JUMP) {
+                instruction->operation == LiftedOperation::JUMP || instruction->operation == LiftedOperation::RETURN) {
                 leaderIndexes.insert(currentIndex);
             }
 
@@ -248,6 +277,8 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         block.dwBlockId = blockIdCounter++;
         block.lpHead = &lpLiftedFunction->instructions[startIndex];
         block.lpTail = &lpLiftedFunction->instructions[endIndex];
+        if (block.lpHead->operation == LiftedOperation::NOP && block.lpHead != block.lpTail) // blocks may be a lonely NOP sometimes.
+            block.lpHead++; // NOPs are injected for AUXs, they musn't be heads or CFA will begin failing.
 
         LiftedInstruction *tailInst = block.lpTail;
 
@@ -291,7 +322,8 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 block.bType = BlockType::Continue; // possibly breaking out of a loop.
             } else {
                 // JUMP of this kind is realistically only injected for BREAKs out of loops.
-                block.bType = BlockType::Break;
+                // TODO: we must perform dominance analysis to determine this properly.
+                // block.bType = BlockType::Break;
             }
 
             break;
@@ -300,8 +332,10 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             block.bTerminator = BlockTerminator::Unconditional;
             if (GetJumpOffset(tailInst) < 0)
                 block.bType = BlockType::LoopLatch;
-            else
-                block.bType = BlockType::Break; // possibly breaking out of a loop.
+            else {
+                // TODO: we must perform dominance analysis to determine this properly.
+                // block.bType = BlockType::Break; // possibly breaking out of a loop.
+            }
 
             if (LiftedOperation::LOADNJUMP == tailInst->operation)
                 block.bType = BlockType::Standard;
@@ -342,10 +376,11 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 break;
             }
 
-            if ((tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::JUMP ||
-                (tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::LOADNJUMP) {
+            if (((tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::JUMP ||
+                 (tailInst + (GetJumpOffset(tailInst)))->operation == LiftedOperation::LOADNJUMP)) {
                 // this likely means this belongs to a break instruction from a loop.
-                block.bType = BlockType::Break;
+                // block.bType = BlockType::Break;
+                block.bType = BlockType::Standard;
                 break;
             }
             break;
