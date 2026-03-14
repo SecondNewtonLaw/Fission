@@ -59,7 +59,7 @@ int main() {
         decompiler.DecompileTestCodeFromFile(
             "test.txt",
             DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::GenerateIRGraph
-        ) == DecompileResult::Success,
+        ).resultCode == DecompileResult::Success,
         "Decompilation failed."
     );
 

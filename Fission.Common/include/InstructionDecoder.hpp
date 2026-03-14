@@ -10,6 +10,7 @@
 namespace Fission {
     class InstructionDecoder {
     public:
+        virtual ~InstructionDecoder() = default;
         virtual uint32_t DecodeInstruction(uint32_t instruction) {
             return instruction;
         }
@@ -17,7 +18,7 @@ namespace Fission {
 
     class RobloxClientDecoder : public InstructionDecoder {
     public:
-        virtual uint32_t DecodeInstruction(uint32_t instruction) {
+        uint32_t DecodeInstruction(uint32_t instruction) override {
             auto abc = (instruction & 0xFFFFFF00);
             constexpr int32_t MULTIPLICATION_MAGIC = 203u;
             uint8_t opcode = static_cast<uint8_t>(instruction & 0xFF) * MULTIPLICATION_MAGIC;

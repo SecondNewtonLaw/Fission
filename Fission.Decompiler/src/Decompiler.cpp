@@ -140,12 +140,13 @@ std::optional<std::string> readfile(const std::filesystem::path &path, const boo
     return buffer;
 }
 
-DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
+DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
+    DecompilationResult res{};
     const auto deserializeStart = std::chrono::steady_clock::now();
     const auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
     if (!deserializedBytecode || deserializedBytecode->functions.empty())
-        return DecompileResult::FailedToDeserialize;
+        return {"", "", DecompileResult::FailedToDeserialize};
 
     auto bytecodeLifter = BytecodeLifter{decoder};
     const auto bytecodeLiftStart = std::chrono::steady_clock::now();
@@ -213,7 +214,7 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
     }
 
     if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown) {
-        std::println(
+        res.timingStatistics = std::format(
             "Decompilation Breakdown:\n\t"
             "Deserializing Bytecode: {}\n\t"
             "Lifting into IR: {}\n\t"
@@ -235,32 +236,34 @@ DecompileResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, F
         );
     }
 
-    return DecompileResult::Success;
+    res.resultCode = DecompileResult::Success;
+    res.decompilationOutput = std::move(generator);
+    return res;
 }
 
-DecompileResult Decompiler::DecompileTestCode(const std::string &testCode, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
+DecompilationResult Decompiler::DecompileTestCode(const std::string &testCode, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
     const auto compiledBytecode = Luau::compile(testCode, compileOpts);
     auto normalDecoder = Fission::InstructionDecoder{};
     return CommonDecompilerEntry(compiledBytecode, &normalDecoder, flags);
 }
 
-DecompileResult Decompiler::DecompileTestCodeFromFile(const std::string &fileName, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
+DecompilationResult Decompiler::DecompileTestCodeFromFile(const std::string &fileName, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
     const auto readFile = readfile(std::filesystem::path(fileName));
     if (!readFile)
-        return DecompileResult::FailedToReadFile;
+        return {"", "", DecompileResult::FailedToReadFile};
 
     return DecompileTestCode(*readFile, flags, compileOpts);
 }
 
-DecompileResult Decompiler::DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags) {
+DecompilationResult Decompiler::DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags) {
     auto robloxDecoder = Fission::RobloxClientDecoder{};
     return CommonDecompilerEntry(bytecode, &robloxDecoder, flags);
 }
 
-DecompileResult Decompiler::DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags) {
+DecompilationResult Decompiler::DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags) {
     const auto readFile = readfile(std::filesystem::path(fileName), true);
     if (!readFile)
-        return DecompileResult::FailedToReadFile;
+        return {"", "", DecompileResult::FailedToReadFile};
 
     return DecompileRobloxBytecode(*readFile, flags);
 }

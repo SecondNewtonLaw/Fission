@@ -47,6 +47,11 @@ inline DecompilerFlags &operator&=(DecompilerFlags &lhs, DecompilerFlags rhs) {
     return lhs;
 }
 
+struct DecompilationResult {
+    std::string decompilationOutput;
+    std::string timingStatistics;
+    DecompileResult resultCode;
+};
 class Decompiler {
     Deserializer deserializer{};
     ControlFlowAnalyzer controlFlowAnalyzer{};
@@ -55,14 +60,14 @@ class Decompiler {
     SourceGenerator SourceGenerator{};
     GraphVisualizer visualizer{};
 
-    DecompileResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
+    DecompilationResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
 
   public:
-    DecompileResult
+    DecompilationResult
     DecompileTestCode(const std::string &testCode, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {1, 2});
-    DecompileResult DecompileTestCodeFromFile(
+    DecompilationResult DecompileTestCodeFromFile(
         const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0), const Luau::CompileOptions &compileOpts = {1, 2}
     );
-    DecompileResult DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
-    DecompileResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    DecompilationResult DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    DecompilationResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
 };

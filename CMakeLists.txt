@@ -17,6 +17,15 @@ set(ENABLE_PGO_CLANG_USE OFF) # enables PGO usage.
 set(ENABLE_ASAN OFF)
 set(ENABLE_UBSAN OFF)
 
+
+# be lenient in C for pointer types and fn decls, deps may fail to compile else.
+add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)
+add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
+add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
+add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-unused-parameter>)
+add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-c2y-extensions>)
+
+
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     if (USE_LTO AND (ENABLE_ASAN OR ENABLE_UBSAN))
         message(FATAL_ERROR "You must disable Link Time Optimization to use sanitisers.")

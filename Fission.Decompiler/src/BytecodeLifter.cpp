@@ -1147,13 +1147,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_JUMPXEQKNIL:
         case LOP_JUMPXEQKB: {
-            if (instruction.GetD() == 1u) {
-                // instruction doesn't contribute to CFlow, eliminate straight up.
-                auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                ins.instructionRemarks = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
-                break;
-            }
+            // if (instruction.GetD() == 1u) {
+            //     // instruction doesn't contribute to CFlow, eliminate straight up.
+            //     auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            //     liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            //     ins.instructionRemarks = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
+            //     break;
+            // }
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::JUMPXEQK);
             instr.operands.resize(4);
             instr.operands[0].type = LiftedOperandType::Register;
@@ -1187,13 +1187,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 
         case LOP_JUMPXEQKN:
         case LOP_JUMPXEQKS: {
-            if (instruction.GetD() == 1u) {
-                // instruction doesn't contribute to CFlow, eliminate straight up.
-                auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                ins.instructionRemarks = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
-                break;
-            }
+            // if (instruction.GetD() == 1u) {
+            //     // instruction doesn't contribute to CFlow, eliminate straight up.
+            //     auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            //     liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            //     ins.instructionRemarks = "WARNING: Op Code simplified, the jump target pointed to pc++ (JUMPXEQXX)";
+            //     break;
+            // }
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::JUMPXEQK);
             instr.operands.resize(4);
             instr.operands[0].type = LiftedOperandType::Register; // src
