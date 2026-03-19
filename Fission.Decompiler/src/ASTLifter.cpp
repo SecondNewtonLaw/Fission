@@ -301,30 +301,34 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 int baseReg = block.lpTail->operands[0].value.reg;
                 {
                     LiftedOperand op;
-                    op.type = LiftedOperandType::Register;
                     {
                         PinnedRegisterScope pin(this, baseReg + 2);
 
                         this->m_currentFunction->SetVariableName(baseReg + 2, startVer, std::format("i_{}", baseReg + 2));
-                        forNode->lpLoopBody = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+                        forNode->lpLoopBody = CreateBlock(LiftControlFlow(
+                            bodyIdx, *block.loopLatch,
+                            loopVisited /* this likely we have to replace with visited, as we will else be accidentally traversing again */
+                        ));
 
                         op.value.reg = baseReg + 2;
                         op.ssaVersion = startVer;
                         forNode->loopVariable = LiftExpression(op);
+                        this->m_currentFunction->ClearVersionName(
+                            baseReg, block.lpTail->operands[0].ssaVersion
+                        ); // clear v name or else it will not do anything good.
                     }
-
+                    op.type = LiftedOperandType::Register;
                     op.value.reg = baseReg + 2;
                     op.ssaVersion = startVer;
-                    forNode->startVariable = LiftExpression(op);
+                    forNode->startVariable = LiftExpression(op, true);
 
                     op.value.reg = baseReg;
                     op.ssaVersion = limitVer;
-                    forNode->maxIncreased = LiftExpression(op);
+                    forNode->maxIncreased = LiftExpression(op, true);
 
                     op.value.reg = baseReg + 1;
                     op.ssaVersion = stepVer;
-                    forNode->increaseBy = LiftExpression(op);
-                    this->m_currentFunction->ClearVersionName(baseReg, block.lpTail->operands[0].ssaVersion);
+                    forNode->increaseBy = LiftExpression(op, true);
                 }
                 nodes.push_back(forNode);
             } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
@@ -1132,6 +1136,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     if (isNameCall) {
         auto kIdx = inst.operands[2].value.imm.k;
         std::string method = std::get<std::string>(m_currentFunction->lpLiftedFunction->lpDeserialized->constants.at(kIdx).constantData);
+
         return std::make_shared<NameCallExpressionNode>(
             callee, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(method)), args, rets, isVararg, isNested
         );
@@ -1231,8 +1236,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     if (bFoundSetList)
         return std::make_shared<TableLiteralNode>(elements);
     else
-        return std::make_shared<TableLiteralNode>(
-        ); // the list is likely instanciated and then added to. This can cause some malformations in some cases, reject inlining.
+        return std::make_shared<TableLiteralNode>(); // the list is likely instanciated and then added to. This can cause some malformations in some cases,
+                                                     // reject inlining.
 }
 
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
