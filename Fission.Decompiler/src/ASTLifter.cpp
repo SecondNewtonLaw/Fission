@@ -474,6 +474,23 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             for (const auto &ref : defs) {
                 if (m_currentFunction->useCounts[ref] > 0) {
+                    if (auto nameCallNode = std::dynamic_pointer_cast<NameCallExpressionNode>(callExpr); nameCallNode) {
+                        const auto &methodName = std::dynamic_pointer_cast<IdentifierExpressionNode>(nameCallNode->callWhat)->identifier->name;
+                        if (methodName == "FindFirstChild" || methodName == "GetService") {
+                            const auto &argVersions = m_currentFunction->implicitUses.at(&inst);
+                            if (argVersions.size() == 2) {
+                                // we can name the register appropiately.
+                                LiftedOperand op;
+                                op.type = LiftedOperandType::Register;
+                                op.value.reg = inst.operands[0].value.reg + 1 + 1 /* arg1 */;
+                                op.ssaVersion = argVersions[1];
+                                auto expr = LiftExpression(op, true);
+                                if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr); str)
+                                    this->m_currentFunction->SetVariableName(ref.regIndex, ref.version, str->value);
+                            }
+                        }
+                    }
+
                     lhs.push_back(
                         std::make_shared<IdentifierExpressionNode>(
                             std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
