@@ -164,6 +164,14 @@ class BinaryExpressionNode : public Expression {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class TableBinaryExpressionNode : public BinaryExpressionNode {
+  public:
+    TableBinaryExpressionNode(const std::string &op, const std::shared_ptr<Expression> &left, const std::shared_ptr<Expression> &right)
+        : BinaryExpressionNode(op, left, right) {}
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class UnaryExpressionNode : public Expression {
   public:
     std::string op;

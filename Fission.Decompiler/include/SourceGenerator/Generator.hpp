@@ -461,8 +461,19 @@ class SourceGenerator : public Visitor {
         buffer << ")";
         this->NextLine();
     }
+
     void Visit(VarArgExpression *lpNode) override {
         (void)lpNode;
         buffer << "..."; /* legitimately. */
+    }
+
+    void Visit(TableBinaryExpressionNode *lpNode) override {
+        // in binary expressions present in tables, the key may require to be wrapped in [], or else it will not be real compilable code.
+        (void)lpNode;
+        buffer << "[";
+        lpNode->left->Accept(this);
+        buffer << "] " << lpNode->op << " (";
+        lpNode->right->Accept(this);
+        buffer << ")";
     }
 };

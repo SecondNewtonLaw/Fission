@@ -35,6 +35,7 @@ class CompoundBinaryExpressionNode;
 class RepeatStatementNode;
 class VarArgExpression;
 class FunctionArgumentExpression;
+class TableBinaryExpressionNode;
 
 class Visitor {
   public:
@@ -54,6 +55,7 @@ class Visitor {
     virtual void Visit(WhileStatementNode *lpNode) = 0;
     virtual void Visit(IfStatementNode *lpNode) = 0;
     virtual void Visit(AssignmentStatementNode *lpNode) = 0;
+    virtual void Visit(TableBinaryExpressionNode *lpNode) = 0;
     virtual void Visit(BinaryExpressionNode *lpNode) = 0;
     virtual void Visit(StringLiteralNode *lpNode) = 0;
     virtual void Visit(NumberLiteralNode *lpNode) = 0;

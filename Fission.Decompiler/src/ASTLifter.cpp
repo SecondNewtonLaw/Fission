@@ -1236,10 +1236,10 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             }
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
             if (candidate.operands[1].value.reg == tableReg) {
-                auto keyExpr = LiftExpression(candidate.operands[2]);
+                auto keyExpr = LiftExpression(candidate.operands[2], true);
                 auto valExpr = LiftExpression(candidate.operands[0]);
 
-                elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+                elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         }
