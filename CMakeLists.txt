@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 3.31)
 project(Fission)
 
+include(CTest)
+
+
 set(CMAKE_CXX_STANDARD 23)
 set(USE_CCACHE ON)
 
@@ -189,7 +192,7 @@ add_library(Fission.Common STATIC
         Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
-target_precompile_headers(Fission.Common PUBLIC Fission.Common/include/pch.hpp)
+# target_precompile_headers(Fission.Common PUBLIC Fission.Common/include/pch.hpp)
 target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 
@@ -226,3 +229,30 @@ add_executable(Fission.CLI
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
+
+if (BUILD_TESTING)
+    CPMAddPackage(
+            NAME Catch2
+            GITHUB_REPOSITORY catchorg/Catch2
+            GIT_TAG v3.14.0
+    )
+
+    add_executable(Fission.Tests
+            Fission.Tests/Decoding/BytecodeV6Decoding.cpp
+    )
+
+    target_link_libraries(Fission.Tests PRIVATE
+            Fission.Common
+            Fission.Decompiler
+            Catch2::Catch2WithMain
+            Catch2
+    )
+
+    target_compile_options(Fission.Tests PRIVATE ${CXX_COMPILE_OPTIONS})
+    target_link_options(Fission.Tests PRIVATE ${CXX_LINK_OPTIONS})
+
+    list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
+
+    include(Catch)
+    catch_discover_tests(Fission.Tests)
+endif()
