@@ -85,6 +85,15 @@ struct LuauConstant {
     LuauConstant() : kType(LUA_TNIL) {}
 
     LuauConstant(const lua_Type kType) { this->kType = kType; }
+
+    template <typename T> T GetValue() const {
+        static_assert(
+            typeid(T) == typeid(LuauTable) || typeid(T) == typeid(LuauString) || typeid(T) == typeid(LuauVector) || typeid(T) == typeid(LuauNumber) ||
+                typeid(T) == typeid(LuauBoolean) || typeid(T) == typeid(LuauProto),
+            "invalid templated typename T!"
+        );
+        return std::get<T>(constantData);
+    }
 };
 
 struct DeserializedFunction {
