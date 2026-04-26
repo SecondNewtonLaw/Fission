@@ -258,6 +258,13 @@ class NumberLiteralNode : public LiteralNode {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class IntegerLiteralNode : public LiteralNode {
+public:
+    int64_t value;
+    IntegerLiteralNode(int64_t v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class StringLiteralNode : public LiteralNode {
   public:
     std::string value;

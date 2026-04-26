@@ -146,6 +146,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
             case LUA_TNUMBER:
                 rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
                 break;
+            case LUA_TINTEGER:
+                rhs = std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
+                break;
             case LUA_TSTRING:
                 rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
                 break;
@@ -888,6 +891,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
                 return std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
             case LUA_TNUMBER:
                 return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+            case LUA_TINTEGER:
+                return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
             case LUA_TSTRING:
                 return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
             default:

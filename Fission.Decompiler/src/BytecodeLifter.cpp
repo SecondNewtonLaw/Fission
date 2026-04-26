@@ -363,6 +363,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             case LUA_TNUMBER:
                 finalComment << "INFO: Loading Constant '" << std::get<LuauNumber>(k0.constantData) << "'.";
                 break;
+            case LUA_TINTEGER:
+                finalComment << "INFO: Loading Constant '" << std::get<LuauInteger>(k0.constantData) << "i'.";
+                break;
             case LUA_TVECTOR: {
                 auto vec = std::get<LuauVector>(k0.constantData);
                 finalComment << "INFO: Loads Vector3 with components; x = " << vec.x << " y = " << vec.y << " z = " << vec.z << " w = " << vec.w;

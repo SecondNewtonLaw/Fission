@@ -36,9 +36,11 @@ class RepeatStatementNode;
 class VarArgExpression;
 class FunctionArgumentExpression;
 class TableBinaryExpressionNode;
+class IntegerLiteralNode;
 
 class Visitor {
   public:
+    virtual void Visit(IntegerLiteralNode *lpNode) = 0;
     virtual void Visit(RootNode *lpNode) = 0;
     virtual void Visit(Identifier *lpNode) = 0;
     virtual void Visit(FunctionDeclarationNode *lpNode) = 0;

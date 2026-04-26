@@ -476,4 +476,22 @@ class SourceGenerator : public Visitor {
         lpNode->right->Accept(this);
         buffer << ")";
     }
+    void Visit(IntegerLiteralNode *lpNode) override {
+        (void)lpNode;
+        auto num = std::format(
+            "{}", std::stod(std::format("{}", lpNode->value, std::numeric_limits<int64_t>::max_digits10)), std::numeric_limits<int64_t>::max_digits10
+        );
+        const auto dot = num.find('.');
+        auto resultLength = num.length();
+        if (dot != std::string::npos)
+            if (const auto lastThatIsNotZero = num.find_last_not_of('0'); lastThatIsNotZero != std::string::npos && lastThatIsNotZero >= dot)
+                resultLength = lastThatIsNotZero + (lastThatIsNotZero != dot);
+        num.resize(resultLength);
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
+        buffer << num;
+        buffer << 'i';
+        if (lpNode->bUseParenthesis)
+            buffer << ")";
+    }
 };
