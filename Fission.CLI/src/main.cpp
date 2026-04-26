@@ -4,6 +4,8 @@
 
 #include "Decompiler.hpp"
 #include "libassert/assert.hpp"
+#include "luacode.h"
+
 #include <Windows.h>
 #include <filesystem>
 #include <fstream>
@@ -55,11 +57,29 @@ std::string DecodeBase64FileToBinary(const std::wstring &filepath) {
 
 int main() {
     Decompiler decompiler{};
+
+    std::string s = "____";
+    uintptr_t size = 0;
+    auto sz = luau_compile(
+        "print(\"hi\", 0, vector.create(1,1,1), { a = 2 }, nil, 0.2)", sizeof("print(\"hi\", 0, vector.create(1,1,1), { a = 2 }, nil, 0.2)"), nullptr, &size
+    );
+    s.resize(size);
+    memcpy(s.data(), sz, size);
+    for (unsigned char c : s) {
+        std::cout << std::format("0x{:02x}, ", c);
+    }
+
+    for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+        if (strncmp(flag->name, "Luau", 4) == 0)
+            flag->value = true; // enable all fflags, because integer is experimental.
+
     ASSERT(
-        decompiler.DecompileTestCodeFromFile(
-            "test.txt",
-            DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::GenerateIRGraph
-        ).resultCode == DecompileResult::Success,
+        decompiler
+                .DecompileTestCodeFromFile(
+                    "test.txt", DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph |
+                                    DecompilerFlags::GenerateIRGraph
+                )
+                .resultCode == DecompileResult::Success,
         "Decompilation failed."
     );
 
