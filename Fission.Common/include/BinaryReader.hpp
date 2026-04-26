@@ -25,7 +25,22 @@ class BinaryReader {
         this->m_lpCurrentBufferPointer = this->m_lpBufferStart;
     }
 
-    unsigned int ReadVariableInteger() {
+    uint64_t ReadVariableInteger64() {
+        uint64_t result = 0;
+        unsigned int shift = 0;
+
+        uint8_t byte;
+
+        do {
+            byte = this->Read<uint8_t>();
+            result |= ((uint64_t)(byte & 127)) << shift;
+            shift += 7;
+        } while (byte & 128);
+
+        return result;
+    }
+
+    unsigned int ReadVariableInteger32() {
         unsigned int result = 0;
         unsigned int shift = 0;
 

@@ -69,6 +69,7 @@ typedef double LuauNumber;
 typedef std::string LuauString;
 typedef bool LuauBoolean;
 typedef DeserializedFunction *LuauProto; // bytecode id?
+typedef int64_t LuauInteger;
 
 struct LuauVector {
     float x, y, z, w;
@@ -80,7 +81,7 @@ struct LuauTable {
 
 struct LuauConstant {
     lua_Type kType{};
-    std::variant<LuauTable, LuauString, LuauVector, LuauNumber, LuauBoolean, LuauProto> constantData{};
+    std::variant<LuauTable, LuauString, LuauVector, LuauNumber, LuauBoolean, LuauProto, LuauInteger> constantData{};
 
     LuauConstant() : kType(LUA_TNIL) {}
 
@@ -147,9 +148,9 @@ class Deserializer {
 
         BinaryReader reader{lpFunc->typeinfo.data(), lpFunc->typeinfo.size()};
 
-        auto typeSize = reader.ReadVariableInteger();
-        reader.ReadVariableInteger();
-        reader.ReadVariableInteger();
+        auto typeSize = reader.ReadVariableInteger32();
+        reader.ReadVariableInteger32();
+        reader.ReadVariableInteger32();
 
         if (typeSize == 0)
             return "any";

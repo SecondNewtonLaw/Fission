@@ -25,10 +25,10 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             return std::nullopt;
     }
 
-    auto stringCount = reader.ReadVariableInteger();
+    auto stringCount = reader.ReadVariableInteger32();
 
     for (unsigned int i = 0; i < stringCount; i++) {
-        auto stringLength = reader.ReadVariableInteger();
+        auto stringLength = reader.ReadVariableInteger32();
 
         auto rS = reader.ReadString(stringLength);
         bool bNeedsRebuilding = false;
@@ -58,7 +58,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         // This is runtime information, we do not need this when decompiling (very likely)
         std::uint8_t index = reader.Read<uint8_t>();
         while (index != 0) {
-            auto str = result.ReadFromStringTable(reader.ReadVariableInteger());
+            auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
             // ASSERT(str.has_value(), "malformed bytecode");
 
             if (index - 1 < USERDATA_TYPE_LIMIT) {
@@ -69,7 +69,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         }
     }
 
-    auto protoCount = reader.ReadVariableInteger();
+    auto protoCount = reader.ReadVariableInteger32();
     result.functions.resize(protoCount);
 
     for (auto i = 0llu; i < protoCount; i++) {
@@ -87,7 +87,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             function.flags = reader.Read<uint8_t>();
 
             if (result.typesVersion == 1) {
-                auto typeSize = reader.ReadVariableInteger();
+                auto typeSize = reader.ReadVariableInteger32();
 
                 if (typeSize) {
                     const uint8_t *types = reader.GetCurrentReaderPosition();
@@ -118,7 +118,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                     reader.AdvanceBy(typeSize);
                 }
             } else if (result.typesVersion == 2 || result.typesVersion == 3) {
-                uint32_t typesize = reader.ReadVariableInteger();
+                uint32_t typesize = reader.ReadVariableInteger32();
 
                 if (typesize) {
                     const uint8_t *types = reader.GetCurrentReaderPosition();
@@ -134,9 +134,9 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
                         auto count = function.typeinfo.size();
 
-                        auto typeSize = _reader.ReadVariableInteger();
-                        auto upvalCount = _reader.ReadVariableInteger();
-                        auto localCount = _reader.ReadVariableInteger();
+                        auto typeSize = _reader.ReadVariableInteger32();
+                        auto upvalCount = _reader.ReadVariableInteger32();
+                        auto localCount = _reader.ReadVariableInteger32();
 
                         if (typeSize != 0) {
                             uint8_t *_types = _reader.GetCurrentReaderPositionMut();
@@ -174,8 +174,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                                 /* we do not have runtime mappings. */ // userdataRemapping[index];
 
                                 _reader.AdvanceBy(2);
-                                _reader.ReadVariableInteger();
-                                _reader.ReadVariableInteger();
+                                _reader.ReadVariableInteger32();
+                                _reader.ReadVariableInteger32();
                             }
                         }
                     }
@@ -183,13 +183,13 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             }
         }
 
-        const auto sizecode = reader.ReadVariableInteger();
+        const auto sizecode = reader.ReadVariableInteger32();
         function.instructions.resize(sizecode);
 
         for (auto j = 0llu; j < sizecode; j++)
             function.instructions[j] = reader.Read<uint32_t>();
 
-        const auto sizek = reader.ReadVariableInteger();
+        const auto sizek = reader.ReadVariableInteger32();
         function.constants.resize(sizek);
 
         for (auto j = 0llu; j < sizek; j++) {
@@ -226,7 +226,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
             case LBC_CONSTANT_STRING: {
                 function.constants[j].kType = LUA_TSTRING;
-                auto str = result.ReadFromStringTable(reader.ReadVariableInteger());
+                auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 // ASSERT(str.has_value(), "malformed bytecode");
                 function.constants[j].constantData = str.value();
 
@@ -241,10 +241,10 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             }
 
             case LBC_CONSTANT_TABLE: {
-                int keyCount = reader.ReadVariableInteger();
+                int keyCount = reader.ReadVariableInteger32();
                 auto vec = std::vector<std::string>(keyCount);
                 for (auto k = 0; k < keyCount; ++k) {
-                    int key = reader.ReadVariableInteger();
+                    int key = reader.ReadVariableInteger32();
                     const auto &constant = function.constants[key];
                     // ASSERT(constant.kType == LUA_TSTRING, "kString isn't correct.");
                     vec.emplace_back(std::get<std::string>(constant.constantData));
@@ -256,9 +256,17 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
             case LBC_CONSTANT_CLOSURE: {
                 function.constants[j].kType = LUA_TFUNCTION;
-                uint32_t fid = reader.ReadVariableInteger();
+                uint32_t fid = reader.ReadVariableInteger32();
                 function.constants[j].constantData = result.functions.data() + fid;
                 break;
+            }
+
+            case LBC_CONSTANT_INTEGER: {
+                bool isNegative = reader.Read<uint8_t>();
+                uint64_t magnitude = reader.ReadVariableInteger64();
+                function.constants[j].kType = LUA_TINTEGER;
+                function.constants[j].constantData = isNegative ? static_cast<int64_t>(~magnitude + 1) : static_cast<int64_t>(magnitude);
+
             }
 
             default:
@@ -267,15 +275,15 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             }
         }
 
-        auto sizep = reader.ReadVariableInteger();
+        auto sizep = reader.ReadVariableInteger32();
         function.subfunctions.resize(sizep);
         for (auto j = 0llu; j < sizep; j++) {
-            auto fid = reader.ReadVariableInteger();
+            auto fid = reader.ReadVariableInteger32();
             function.subfunctions[j] = result.functions.data() + fid;
         }
 
-        function.lineDefined = reader.ReadVariableInteger();
-        function.debugName = result.ReadFromStringTable(reader.ReadVariableInteger());
+        function.lineDefined = reader.ReadVariableInteger32();
+        function.debugName = result.ReadFromStringTable(reader.ReadVariableInteger32());
         auto lineinfo = reader.Read<uint8_t>();
 
         if (lineinfo) {
@@ -306,30 +314,30 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         uint8_t debuginfo = reader.Read<uint8_t>();
 
         if (debuginfo) {
-            const int sizelocvars = reader.ReadVariableInteger();
+            const int sizelocvars = reader.ReadVariableInteger32();
             function.locvars = {};
             function.locvars.resize(sizelocvars);
 
             for (int j = 0; j < sizelocvars; ++j) {
-                auto str = result.ReadFromStringTable(reader.ReadVariableInteger());
+                auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 if (str.has_value())
                     function.locvars[j].varname = str.value();
                 else
                     function.locvars[j].varname = "";
 
-                function.locvars[j].startpc = reader.ReadVariableInteger();
-                function.locvars[j].endpc = reader.ReadVariableInteger();
+                function.locvars[j].startpc = reader.ReadVariableInteger32();
+                function.locvars[j].endpc = reader.ReadVariableInteger32();
                 function.locvars[j].reg = reader.Read<uint8_t>();
             }
 
-            const int sizeupvalues = reader.ReadVariableInteger();
+            const int sizeupvalues = reader.ReadVariableInteger32();
             // ASSERT(sizeupvalues == function.nups, "nups != sizeupvalues");
 
             function.upvalueNames = {};
             function.upvalueNames.resize(sizeupvalues);
 
             for (int j = 0; j < sizeupvalues; ++j) {
-                auto str = result.ReadFromStringTable(reader.ReadVariableInteger());
+                auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 function.upvalueNames[j] = str.has_value() ? str.value() : "";
             }
         }
@@ -337,7 +345,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         result.functions[i] = function;
     }
 
-    auto mainfid = reader.ReadVariableInteger();
+    auto mainfid = reader.ReadVariableInteger32();
 
     result.lpMainFunction = result.functions.data() + mainfid;
     result.lpMainFunction->bIsMain = true;
