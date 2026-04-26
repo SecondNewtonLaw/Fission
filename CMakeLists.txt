@@ -91,7 +91,7 @@ CPMAddPackage(
 CPMAddPackage(
         NAME Luau
         GITHUB_REPOSITORY luau-lang/luau
-        GIT_TAG 0.701
+        GIT_TAG 0.718
 )
 
 CPMAddPackage(
