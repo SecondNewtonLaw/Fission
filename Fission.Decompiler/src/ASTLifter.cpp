@@ -95,7 +95,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         );
 
         if (analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain) {
-            s = "\n    Decompiled with the Fission decompiler for RbxCli\n";
+            s = std::format("\n    Decompiled with the Fission decompiler for RbxCli\n    Bytecode Version: '{}'\n    Type Version: {}", analyzedFunction.lpLiftedFunction->lpDeserialized->uBytecodeVersion,analyzedFunction.lpLiftedFunction->lpDeserialized->uTypeVersion);
         }
 
         ast.statements.insert(ast.statements.begin(), std::make_shared<CommentNode>(s, true));

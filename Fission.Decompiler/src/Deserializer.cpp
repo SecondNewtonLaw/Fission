@@ -129,7 +129,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                     reader.AdvanceBy(typesize);
 
                     if (result.typesVersion == 3) {
-                        // not much to do here, since we just have to remap types. However UDs are unmapped and they're done at Runtime, which we cannot really do.
+                        // not much to do here, since we just have to remap types. However UDs are unmapped and they're done at Runtime, which we cannot really
+                        // do.
                         BinaryReader _reader{std::string(function.typeinfo.data(), function.typeinfo.data() + function.typeinfo.size())};
 
                         auto count = function.typeinfo.size();
@@ -254,6 +255,28 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 break;
             }
 
+            case LBC_CONSTANT_TABLE_WITH_CONSTANTS: {
+                // bytecode v7 ewww
+                int keyCount = reader.ReadVariableInteger32();
+                auto vec = std::vector<std::string>(keyCount);
+
+                // this would load all the constants and whatever bullshit (mainly it would read the keys, read each key to then find the actual constant index
+                // it requires, and then set it at runtime appropriately, that is if we care, however we are NOT running the fucking bytecode, so we actually do
+                // **NOT** FUCKING care.
+
+                for (auto k = 0; k < keyCount; ++k) {
+                    int key = reader.ReadVariableInteger32();
+                    const auto &constant = function.constants[key];
+                    auto kIdx = reader.Read<int32_t>();
+                    (void)kIdx; // responsible no-use ty
+                    // ASSERT(constant.kType == LUA_TSTRING, "kString isn't correct.");
+                    vec.emplace_back(std::get<std::string>(constant.constantData));
+                }
+                function.constants[j].kType = LUA_TTABLE;
+                function.constants[j].constantData = LuauTable{vec};
+                break;
+            }
+
             case LBC_CONSTANT_CLOSURE: {
                 function.constants[j].kType = LUA_TFUNCTION;
                 uint32_t fid = reader.ReadVariableInteger32();
@@ -266,7 +289,6 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 uint64_t magnitude = reader.ReadVariableInteger64();
                 function.constants[j].kType = LUA_TINTEGER;
                 function.constants[j].constantData = isNegative ? static_cast<int64_t>(~magnitude + 1) : static_cast<int64_t>(magnitude);
-
             }
 
             default:
@@ -274,6 +296,9 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 break;
             }
         }
+
+        // here we would precalculate/ preload string atoms. However we are decompiling, not necessarily going to run the loaded result, meaning this is
+        // useless to do.
 
         auto sizep = reader.ReadVariableInteger32();
         function.subfunctions.resize(sizep);
