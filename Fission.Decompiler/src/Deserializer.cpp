@@ -289,6 +289,21 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 uint64_t magnitude = reader.ReadVariableInteger64();
                 function.constants[j].kType = LUA_TINTEGER;
                 function.constants[j].constantData = isNegative ? static_cast<int64_t>(~magnitude + 1) : static_cast<int64_t>(magnitude);
+                break;
+            }
+
+            case LBC_CONSTANT_CLASS_SHAPE: {
+                // V10. Wire: varint className, varint propCount, varint methodCount, varint per propName, varint per methodName.
+                // Decompilation does not require the shape; consume bytes and leave the constant as nil.
+                (void)reader.ReadVariableInteger32();
+                const auto propCount = reader.ReadVariableInteger32();
+                const auto methodCount = reader.ReadVariableInteger32();
+                for (auto p = 0u; p < propCount; ++p)
+                    (void)reader.ReadVariableInteger32();
+                for (auto m = 0u; m < methodCount; ++m)
+                    (void)reader.ReadVariableInteger32();
+                function.constants[j].kType = LUA_TNIL;
+                break;
             }
 
             default:
@@ -364,6 +379,14 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             for (int j = 0; j < sizeupvalues; ++j) {
                 auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 function.upvalueNames[j] = str.has_value() ? str.value() : "";
+            }
+        }
+
+        if (result.bytecodeVersion >= 11) {
+            auto fbSize = reader.ReadVariableInteger32();
+            for (uint32_t j = 0; j < fbSize; ++j) {
+                (void)reader.Read<uint8_t>();
+                (void)reader.ReadVariableInteger32();
             }
         }
 

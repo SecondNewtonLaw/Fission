@@ -289,6 +289,10 @@ class FunctionDeclarationNode : public Expression {
     std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argumentsNames{}; // arg1 -> it's name inside syntax
     bool bIsVarArg = false;
     bool bIsLocalDeclaration = false; // to be defined in lifter. If the only usage of this is inside of a function, and such function holds no debug name.
+    // Anonymous-inline form: emit as `function(args) ... end` directly at the
+    // expression site rather than as a top-level `local function name(...) ... end`.
+    // Used when the closure has a single use that is a call-argument slot.
+    bool bAnonymousInline = false;
     std::shared_ptr<BlockStatementNode> lpFunctionBody = nullptr;
 
     FunctionDeclarationNode(
@@ -396,5 +400,17 @@ class ForNumericNode : public Statement {
     )
         : loopVariable(loopVariable), startVariable(startVariable), increaseBy(increaseBy), maxIncreased(maxIncreased), lpLoopBody(lpLoopBody) {}
     ~ForNumericNode() override = default;
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
+class ForGeneralNode : public Statement {
+  public:
+    std::vector<std::shared_ptr<Expression>> loopVariables;
+    std::shared_ptr<Expression> generator = nullptr;
+    std::shared_ptr<Expression> state = nullptr;
+    std::shared_ptr<Expression> index = nullptr;
+    std::shared_ptr<BlockStatementNode> body = nullptr;
+    ForGeneralNode() {}
+    ~ForGeneralNode() override = default;
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

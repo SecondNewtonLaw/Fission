@@ -86,6 +86,13 @@ enum class LiftedOperation : uint32_t {
     IDIV,
     IDIVK,
 
+    GETUDATAKS,
+    SETUDATAKS,
+    NAMECALLUDATA,
+    NEWCLASSMEMBER,
+    CALLFB,
+    CMPPROTO,
+
     PHI // phi node on SSA.
 };
 

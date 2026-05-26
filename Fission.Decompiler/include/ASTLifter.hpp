@@ -48,6 +48,13 @@ class ASTLifter {
 
     std::set<SSARef> m_phiConsumers;
 
+    // Closures detected as single-use call-argument candidates. The NEWCLOSURE /
+    // DUPCLOSURE handler builds a FunctionDeclarationNode marked
+    // `bAnonymousInline = true`, parks it here keyed by the closure's SSA ref,
+    // and skips pushing it as a top-level statement. LiftExpression substitutes
+    // it in-place when the call argument lookup reaches the same SSA ref.
+    std::unordered_map<SSARef, std::shared_ptr<FunctionDeclarationNode>> m_inlineableClosures;
+
     std::unordered_map<std::string, DeserializedFunction *> m_takenFunctionNames;
     int32_t m_dwLastFunctionIndex = 0;
 

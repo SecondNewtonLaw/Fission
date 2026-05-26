@@ -146,7 +146,7 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
     const auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
     if (!deserializedBytecode || deserializedBytecode->functions.empty())
-        return {"", "", DecompileResult::FailedToDeserialize};
+        return {"", "", "", DecompileResult::FailedToDeserialize};
 
     auto bytecodeLifter = BytecodeLifter{decoder};
     const auto bytecodeLiftStart = std::chrono::steady_clock::now();
@@ -162,12 +162,13 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
     controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
     const auto optimizeGraphEnd = std::chrono::steady_clock::now();
 
+    const auto identifyLoopStructuresStart = std::chrono::steady_clock::now();
+    controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
+    const auto identifyLoopStructuresEnd = std::chrono::steady_clock::now();
+
     const auto unreachablePruningStart = std::chrono::steady_clock::now();
     controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
     const auto unreachablePruningEnd = std::chrono::steady_clock::now();
-
-    const auto identifyLoopStructuresStart = std::chrono::steady_clock::now();
-    controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
     const auto controlFlowAnalyzeEnd = std::chrono::steady_clock::now();
 
     const auto ssaStart = std::chrono::steady_clock::now();
@@ -188,8 +189,8 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
 
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;
+    const auto formattedIR = FormatAnalyzedIR(controlFlowAnalyzedFunction);
     if (printIR || writeIR) {
-        const auto formattedIR = FormatAnalyzedIR(controlFlowAnalyzedFunction);
         if (printIR) {
             std::println("{}", formattedIR);
         }
@@ -231,11 +232,12 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
             std::chrono::duration<float>(controlFlowAnalyzeEnd - controlFlowAnalyzeStart),
             std::chrono::duration<float>(basicBlockIdentificationEnd - basicBlockIdentificationStart),
             std::chrono::duration<float>(optimizeGraphEnd - optimizeGraphStart), std::chrono::duration<float>(unreachablePruningEnd - unreachablePruningStart),
-            std::chrono::duration<float>(controlFlowAnalyzeEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart),
+            std::chrono::duration<float>(identifyLoopStructuresEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart),
             std::chrono::duration<float>(astEnd - astStart), std::chrono::duration<float>(sgenEnd - sgenStart), 0
         );
     }
 
+    res.irOutput = formattedIR;
     res.resultCode = DecompileResult::Success;
     res.decompilationOutput = std::move(generator);
     return res;
@@ -250,7 +252,7 @@ DecompilationResult Decompiler::DecompileTestCode(const std::string &testCode, c
 DecompilationResult Decompiler::DecompileTestCodeFromFile(const std::string &fileName, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
     const auto readFile = readfile(std::filesystem::path(fileName));
     if (!readFile)
-        return {"", "", DecompileResult::FailedToReadFile};
+        return {"", "", "", DecompileResult::FailedToReadFile};
 
     return DecompileTestCode(*readFile, flags, compileOpts);
 }
@@ -263,7 +265,7 @@ DecompilationResult Decompiler::DecompileRobloxBytecode(const std::string &bytec
 DecompilationResult Decompiler::DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags) {
     const auto readFile = readfile(std::filesystem::path(fileName), true);
     if (!readFile)
-        return {"", "", DecompileResult::FailedToReadFile};
+        return {"", "", "", DecompileResult::FailedToReadFile};
 
     return DecompileRobloxBytecode(*readFile, flags);
 }

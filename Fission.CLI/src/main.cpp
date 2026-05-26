@@ -9,6 +9,7 @@
 #include <Windows.h>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 
 #pragma comment(lib, "crypt32.lib")
 

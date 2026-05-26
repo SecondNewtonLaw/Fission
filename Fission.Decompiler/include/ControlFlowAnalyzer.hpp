@@ -16,9 +16,9 @@ enum class BlockType {
     Standard,
 
     // structures
-    IfHeader,     // The start of an 'if' (has conditional branches).
-    LoopHeader,   // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
-    LoopLatch,    // bottom of a loop (negative jump).
+    IfHeader,   // The start of an 'if' (has conditional branches).
+    LoopHeader, // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
+    LoopLatch,  // bottom of a loop (negative jump).
 
     // control flow
     Break,    // jumps out of the current loop context.
@@ -41,7 +41,8 @@ enum class LoopBlockFlags {
     ForNumericLoop = 1 << 2,
     ForGeneralLoop = 1 << 3,
     ForGeneralLoop_Pairs = 1 << 4,
-    ForGeneralLoop_Indexed = 1 << 5
+    ForGeneralLoop_Indexed = 1 << 5,
+    RepeatUntilLoop = 1 << 6
 };
 
 constexpr LoopBlockFlags operator|(LoopBlockFlags lhs, LoopBlockFlags rhs) {
@@ -194,14 +195,18 @@ struct AnalyzedFunction {
 
         switch (def->operation) {
         case LiftedOperation::CALL:
+        case LiftedOperation::CALLFB: // V11. Same call semantics, plus feedback collection.
         case LiftedOperation::NAMECALL:
+        case LiftedOperation::NAMECALLUDATA: // userdata-accelerated namecall.
         case LiftedOperation::SETTABLE:
         case LiftedOperation::SETTABLEKS:
         case LiftedOperation::SETTABLEN:
+        case LiftedOperation::SETUDATAKS: // userdata-accelerated field write.
         case LiftedOperation::SETGLOBAL:
         case LiftedOperation::SETUPVAL:
-        case LiftedOperation::NEWCLOSURE: // captures upvalues (side effect-ish)
-        case LiftedOperation::DUPCLOSURE: // may create and capture.
+        case LiftedOperation::NEWCLOSURE:     // captures upvalues (side effect-ish)
+        case LiftedOperation::DUPCLOSURE:     // may create and capture.
+        case LiftedOperation::NEWCLASSMEMBER: // V10. Mutates the class register.
             return true;
         default:
             return false;
@@ -243,7 +248,11 @@ struct AnalyzedFunction {
     }
 
     void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }
-    std::string GetUpvalueName(int32_t index) { return upvalueNames.at(index); }
+    std::string GetUpvalueName(int32_t index) {
+        if (upvalueNames.contains(index))
+            return upvalueNames.at(index);
+        return std::format("uv_{}", index);
+    }
 
     void ClearVersionName(int32_t reg, int32_t ver) { ssaOverrides.erase({static_cast<uint8_t>(reg), ver}); }
 
@@ -268,10 +277,8 @@ struct AnalyzedFunction {
         for (const auto &name : lpDeserialized->upvalueNames)
             this->upvalueNames[uIdx++] = name;
 
-        if (lpDeserialized->upvalueNames.size() != lpDeserialized->nups) {
-            auto missing = lpDeserialized->nups - lpDeserialized->upvalueNames.size();
-
-            for (uint64_t i = lpDeserialized->upvalueNames.size(); i < missing; i++) {
+        if (uIdx != lpDeserialized->nups) {
+            for (uint64_t i = uIdx; i < lpDeserialized->nups; i++) {
                 this->upvalueNames[i] = std::format("uv_{}", i);
             }
         }

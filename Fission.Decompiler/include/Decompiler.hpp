@@ -49,6 +49,7 @@ inline DecompilerFlags &operator&=(DecompilerFlags &lhs, DecompilerFlags rhs) {
 
 struct DecompilationResult {
     std::string decompilationOutput;
+    std::string irOutput;
     std::string timingStatistics;
     DecompileResult resultCode;
 };

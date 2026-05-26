@@ -1325,6 +1325,148 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             break;
         }
 
+        case LOP_GETUDATAKS: {
+            // Mirror of GETTABLEKS for atom-based userdata field access. AUX low 16 bits = constant string index.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETUDATAKS);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Userdata-accelerated GET of field '" << std::get<std::string>(k0.constantData) << "' from R"
+                             << static_cast<int32_t>(instr.operands[1].value.reg) << " into R" << static_cast<int32_t>(instr.operands[0].value.reg);
+            } else {
+                finalComment << "WARNING: Userdata-accelerated GET with non-string key constant.";
+            }
+            instr.instructionRemarks = finalComment.str();
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_SETUDATAKS: {
+            // Mirror of SETTABLEKS for atom-based userdata field write. AUX low 16 bits = constant string index.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETUDATAKS);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Userdata-accelerated SET of field '" << std::get<std::string>(k0.constantData) << "' on R"
+                             << static_cast<int32_t>(instr.operands[1].value.reg) << " to R" << static_cast<int32_t>(instr.operands[0].value.reg);
+            } else {
+                finalComment << "WARNING: Userdata-accelerated SET with non-string key constant.";
+            }
+            instr.instructionRemarks = finalComment.str();
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_NAMECALLUDATA: {
+            // Mirror of NAMECALL for atom-based userdata method dispatch.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NAMECALLUDATA);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Userdata-accelerated namecall: '" << std::get<std::string>(k0.constantData) << "'";
+            } else {
+                finalComment << "WARNING: Userdata-accelerated namecall with non-string method key.";
+            }
+            instr.instructionRemarks = finalComment.str();
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_NEWCLASSMEMBER: {
+            // V10. A = class register, C = initial value register (currently always a function), AUX = constant string member name.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWCLASSMEMBER);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::Register;
+            instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.operands[2].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            std::stringstream finalComment;
+            auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
+            if (k0.kType == LUA_TSTRING) {
+                finalComment << "INFO: Register class member '" << std::get<std::string>(k0.constantData) << "' on class at R"
+                             << static_cast<int32_t>(instr.operands[0].value.reg) << " using value at R" << static_cast<int32_t>(instr.operands[1].value.reg);
+            } else {
+                finalComment << "WARNING: NEWCLASSMEMBER with non-string member name.";
+            }
+            instr.instructionRemarks = finalComment.str();
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_CALLFB: {
+            // V11. Same shape as CALL but trailing AUX = feedback slot id (0xFFFFFFFF == sealed).
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CALLFB);
+            instr.operands.resize(4);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.operands[3].type = LiftedOperandType::ImmediateAux;
+            instr.operands[3].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
+
+            auto slotText = instr.operands[3].value.imm.u == 0xFFFFFFFFu ? std::string{"sealed"} : std::format("{}", instr.operands[3].value.imm.u);
+            instr.instructionRemarks = std::format(
+                "INFO: Call (feedback slot {}) function at R{} (argc+1={}, retc+1={}).", slotText, instr.operands[0].value.reg, instr.operands[1].value.imm.n,
+                instr.operands[2].value.imm.n
+            );
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_CMPPROTO: {
+            // V11. A = closure reg, D = jump offset taken when proto does NOT match, AUX = proto id.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CMPPROTO);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetD() + 1; // +1 to match the convention used by other conditional jumps.
+            instr.operands[2].type = LiftedOperandType::ImmediateAux;
+            instr.operands[2].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
+
+            instr.instructionRemarks = std::format(
+                "INFO: Jump PC to {} if the closure at R{} does not match proto id {}.", static_cast<int32_t>(currentIndex) + instr.operands[1].value.imm.n,
+                instr.operands[0].value.reg, instr.operands[2].value.imm.u
+            );
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_NATIVECALL: {
+            auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
+            ins.instructionRemarks = "WARNING: Op Code simplified (NATIVECALL). Pseudo-instruction, never emitted by the bytecode compiler.";
+            break;
+        }
+
         default:
             if (opCode < LOP_NOP || opCode > LOP__COUNT)
                 ASSERT(false, "malformed instruction, potentially mis-sized?", (LuauOpcode)opCode);
@@ -1497,6 +1639,20 @@ std::string_view OperationToString(LiftedOperation operation) {
         return "LENGTH";
     case LiftedOperation::JUMPXEQK:
         return "JMPXIFKEQ";
+    case LiftedOperation::GETUDATAKS:
+        return "GETUDATAKS";
+    case LiftedOperation::SETUDATAKS:
+        return "SETUDATAKS";
+    case LiftedOperation::NAMECALLUDATA:
+        return "NAMECALLUDATA";
+    case LiftedOperation::NEWCLASSMEMBER:
+        return "NEWCLASSMEMBER";
+    case LiftedOperation::CALLFB:
+        return "CALLFB";
+    case LiftedOperation::CMPPROTO:
+        return "CMPPROTO";
+    case LiftedOperation::PHI:
+        return "PHI";
     default:
         ASSERT(false, "unhandled operation. No string representation available, so we panic.");
         return "UNKNOWN";

@@ -15,29 +15,32 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
 
     auto set = [&](LiftedOperation op, AccessType type) { table[static_cast<size_t>(op)] = type; };
 
-    for (auto op :
-         {LiftedOperation::SETGLOBAL,  LiftedOperation::SETUPVAL, LiftedOperation::SETTABLE,      LiftedOperation::SETTABLEKS,  LiftedOperation::SETTABLEN,
-          LiftedOperation::SETLIST,    LiftedOperation::RETURN,   LiftedOperation::JUMPIF,        LiftedOperation::JUMPIFNOT,   LiftedOperation::JUMPIFEQ,
-          LiftedOperation::JUMPIFLE,   LiftedOperation::JUMPIFLT, LiftedOperation::JUMPIFNOTEQ,   LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,
-          LiftedOperation::JUMPXEQK,   LiftedOperation::CAPTURE,  LiftedOperation::FASTCALL,      LiftedOperation::FASTCALL1,   LiftedOperation::FASTCALL2,
-          LiftedOperation::FASTCALL2K, LiftedOperation::FORGLOOP, LiftedOperation::FORGPREP_NEXT, LiftedOperation::FORGPREP,    LiftedOperation::FORGPREP_INEXT,
-          LiftedOperation::FORNPREP,   LiftedOperation::FASTCALL3}) {
+    for (auto op : {LiftedOperation::SETGLOBAL,      LiftedOperation::SETUPVAL,    LiftedOperation::SETTABLE,      LiftedOperation::SETTABLEKS,
+                    LiftedOperation::SETTABLEN,      LiftedOperation::SETLIST,     LiftedOperation::RETURN,        LiftedOperation::JUMPIF,
+                    LiftedOperation::JUMPIFNOT,      LiftedOperation::JUMPIFEQ,    LiftedOperation::JUMPIFLE,      LiftedOperation::JUMPIFLT,
+                    LiftedOperation::JUMPIFNOTEQ,    LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,   LiftedOperation::JUMPXEQK,
+                    LiftedOperation::CAPTURE,        LiftedOperation::FASTCALL,    LiftedOperation::FASTCALL1,     LiftedOperation::FASTCALL2,
+                    LiftedOperation::FASTCALL2K,     LiftedOperation::FORGLOOP,    LiftedOperation::FORGPREP_NEXT, LiftedOperation::FORGPREP,
+                    LiftedOperation::FORGPREP_INEXT, LiftedOperation::FORNPREP,    LiftedOperation::FASTCALL3,     LiftedOperation::SETUDATAKS,
+                    LiftedOperation::NEWCLASSMEMBER, LiftedOperation::CMPPROTO}) {
         set(op, AccessType::Read);
     }
 
     for (auto op :
-         {LiftedOperation::LOAD,      LiftedOperation::LOADNJUMP, LiftedOperation::MOVE,       LiftedOperation::GETGLOBAL,  LiftedOperation::GETUPVAL,
-          LiftedOperation::GETIMPORT, LiftedOperation::GETTABLE,  LiftedOperation::GETTABLEKS, LiftedOperation::GETTABLEN,  LiftedOperation::NEWCLOSURE,
-          LiftedOperation::NAMECALL,  LiftedOperation::ADD,       LiftedOperation::SUB,        LiftedOperation::MUL,        LiftedOperation::DIV,
-          LiftedOperation::MOD,       LiftedOperation::POW,       LiftedOperation::ADDK,       LiftedOperation::SUBK,       LiftedOperation::MULK,
-          LiftedOperation::DIVK,      LiftedOperation::MODK,      LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
-          LiftedOperation::ANDK,      LiftedOperation::ORK,       LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
-          LiftedOperation::NEWTABLE,  LiftedOperation::DUPTABLE,  LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
-          LiftedOperation::CONCAT,    LiftedOperation::DIVRK,     LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP}) {
+         {LiftedOperation::LOAD,       LiftedOperation::LOADNJUMP,    LiftedOperation::MOVE,       LiftedOperation::GETGLOBAL,  LiftedOperation::GETUPVAL,
+          LiftedOperation::GETIMPORT,  LiftedOperation::GETTABLE,     LiftedOperation::GETTABLEKS, LiftedOperation::GETTABLEN,  LiftedOperation::NEWCLOSURE,
+          LiftedOperation::NAMECALL,   LiftedOperation::ADD,          LiftedOperation::SUB,        LiftedOperation::MUL,        LiftedOperation::DIV,
+          LiftedOperation::MOD,        LiftedOperation::POW,          LiftedOperation::ADDK,       LiftedOperation::SUBK,       LiftedOperation::MULK,
+          LiftedOperation::DIVK,       LiftedOperation::MODK,         LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
+          LiftedOperation::ANDK,       LiftedOperation::ORK,          LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
+          LiftedOperation::NEWTABLE,   LiftedOperation::DUPTABLE,     LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
+          LiftedOperation::CONCAT,     LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP,
+          LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA}) {
         set(op, AccessType::Write);
     }
 
     set(LiftedOperation::CALL, AccessType::Read);
+    set(LiftedOperation::CALLFB, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Deferred);
 
     return table;
@@ -58,7 +61,7 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
 }
 
 int CalculateLuaStackForInstruction(AnalyzedFunction &func, LiftedInstruction &inst) {
-    if (LiftedOperation::CALL != inst.operation)
+    if (LiftedOperation::CALL != inst.operation && LiftedOperation::CALLFB != inst.operation)
         return 0; // why bro.
 
     if (inst.operands[1].value.imm.n != 0 /* not actually var arg, why the fuck was this called? */)
@@ -81,7 +84,8 @@ int CalculateLuaStackForInstruction(AnalyzedFunction &func, LiftedInstruction &i
 std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &inst) {
     std::vector<int> defs;
     switch (inst.operation) {
-    case LiftedOperation::CALL: {
+    case LiftedOperation::CALL:
+    case LiftedOperation::CALLFB: {
         int regStart = inst.operands[0].value.reg;
         int retCount = inst.operands[2].value.imm.n;
         int effectiveRetCount = (retCount == 0) ? 1 : (retCount - 1);
@@ -98,7 +102,8 @@ std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &ins
     case LiftedOperation::GETVARARGS: {
         int baseReg = inst.operands[0].value.reg;
         int count = inst.operands[1].value.imm.n;
-        for (int k = 1; k < count; ++k) {
+        int effectiveCount = (count == 0) ? 1 : (count - 1);
+        for (int k = 0; k < effectiveCount; ++k) {
             defs.push_back(baseReg + k);
         }
         break;
@@ -173,7 +178,7 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 int end = inst->operands[2].value.reg;
                 for (int r = start; r <= end; ++r)
                     markRead(r);
-            } else if (inst->operation == LiftedOperation::CALL) {
+            } else if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) {
                 int32_t regFunc = inst->operands[0].value.reg;
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
@@ -326,6 +331,19 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 }
             }
 
+            // FORNLOOP writes to operand[2] (R(A+2)) via explicit NewVersion in
+            // Rename, but GetRegisterAccess only sees a Read.  Sync defBlocks so
+            // CreatePhiNodes inserts a phi for the loop-variable register at the
+            // header, letting the pre-header constant LOAD be single-use → inlined.
+            if (inst->operation == LiftedOperation::FORNLOOP) {
+                int reg = inst->operands[2].value.reg;
+                if (reg <= maxRegs) {
+                    if (defBlocks[reg].empty() || static_cast<uint32_t>(defBlocks[reg].back()) != block.dwBlockId) {
+                        defBlocks[reg].push_back(block.dwBlockId);
+                    }
+                }
+            }
+
             if (inst == block.lpTail)
                 break;
         }
@@ -471,7 +489,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
             }
 
-            if (inst->operation == LiftedOperation::CALL) {
+            if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) {
                 int32_t regFunc = inst->operands[0].value.reg;
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
@@ -573,16 +591,18 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 func.implicitUses[inst] = std::move(itemVersions);
             } else if (inst->operation == LiftedOperation::GETVARARGS) {
                 int32_t count = inst->operands[1].value.imm.n;
-                if (count > 1) {
-                    uint8_t baseReg = inst->operands[0].value.reg;
-                    for (uint8_t k = 1; k < count; ++k) {
-                        int32_t newVer = NewVersion(baseReg + k);
-                        varsDefinedHere.push_back(baseReg + k);
+                int32_t effectiveCount = (count == 0) ? 1 : (count - 1);
+                uint8_t baseReg = inst->operands[0].value.reg;
+                for (int32_t k = 0; k < effectiveCount; ++k) {
+                    int32_t newVer = NewVersion(baseReg + k);
+                    varsDefinedHere.push_back(baseReg + k);
 
-                        func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
-                    }
+                    func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
                 }
-            } else if (inst->operation == LiftedOperation::FORNPREP) {
+            } else if (
+                inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
+                inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT
+            ) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 std::vector<int32_t> loopInputs;
                 loopInputs.reserve(3);
@@ -599,6 +619,12 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 func.implicitUses[inst] = std::move(loopInputs);
             } else if (inst->operation == LiftedOperation::FORNLOOP) {
                 NewVersion(inst->operands[2].value.reg);
+            } else if (inst->operation == LiftedOperation::FORGLOOP) {
+                int32_t baseReg = inst->operands[0].value.reg;
+                int numVars = (inst->operands[2].value.imm.n & 0xFF);
+                NewVersion(baseReg + 2);
+                for (int i = 0; i < numVars; ++i)
+                    NewVersion(baseReg + 3 + i);
             }
             if (inst == block.lpTail)
                 break;
