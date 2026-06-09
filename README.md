@@ -1,15 +1,28 @@
 # Fission
 
-Fission is a Luau decompiler built for my closed source project, **RbxCli**, however it originally was meant to be an Open Source decompiler fully written in C++ to experiment and built upon already existing decompilers available as Open Source.
+### Background Knowledge
 
-The decompiler takes no code from any other decompiler, however it has references to existing Luau source code where applicable, as there's many seemingly 'magical' things only achievable looking at the C++ source.
+Fission is a Luau decompiler built from scratch for my closed source project, **RbxCli**. This project originally began as a gag to try and build a decompiler. It originally was meant to be the worst quickest fix possible in an argument of who can make the best decompiler in a short time frame.
 
-This project has been finally open sourced after around 2 months of work in and out of the project.
+However, given that there were already decompilers such as Medal, I thought that it would not really be that meaningful to make my own decompiler, but I was promptly proving wrong, as Konstant has not received any updates in quite the time, Medal is clearly not being developed and the only decent decompiler that remained in the landscape was nothing but Oracle, paid.
 
-While it is able to decompile plenty of samples, it has a high number of problems when dealing with control flow and loops, which are being worked on, however due to the nature of decompilation, the fix for one thing can be terrible for another.
+So, after some months of work, here we are.
 
-### Planned changes
-- Adding unit tests
-  - We have to make sure the code we are writing actually decompiles a sample back to an expected state after each change, else we will have terrible support.
+### State of Development
 
-Credits to all contributors!
+As of right now, Fission is being actively developed. When I find a sample that breaks I try to fix it, somewhat. Currently, it supports `integer` and other Luau specifics. I have taken the time to ensure the quality of it post rework, however no real thing can be guaranteed when dealing with stuff like this.
+
+Fission can (as of right now) decompile *most* loop and conditional structures without falling apart, and also has type inferrance and name inferrance, they're not perfect, however they make the trick!
+
+### Disclaimer
+
+Fission takes no code from other decompilers, however may reference Luau source code where applicable and/or ask the AI overlords for help.
+
+### Credits
+
+While Fission is provided without much churn, we at least request basic credits when using the software, pointing **specifically** to this repository.
+
+
+#### Usage of AI
+
+Fission has used AI in its development to improve and increase the quality of tests and other components. We have taken sufficient time to ensure the code generated has met the standards of quality we were after.
