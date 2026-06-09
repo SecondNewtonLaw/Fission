@@ -77,6 +77,7 @@ struct LuauVector {
 
 struct LuauTable {
     std::vector<std::string> keys{};
+    std::vector<int32_t> valueConstantIndices{};
 };
 
 struct LuauConstant {
@@ -141,24 +142,7 @@ struct DeserializedBytecode {
 class Deserializer {
 
   public:
-    static std::string GetTypeName(DeserializedFunction *lpFunc, uint8_t arg) {
-        if (lpFunc->uTypeVersion == 1) {
-            return "any"; // idk cannot replicate so i cannot add it :sob:
-        }
-
-        BinaryReader reader{lpFunc->typeinfo.data(), lpFunc->typeinfo.size()};
-
-        auto typeSize = reader.ReadVariableInteger32();
-        reader.ReadVariableInteger32();
-        reader.ReadVariableInteger32();
-
-        if (typeSize == 0)
-            return "any";
-
-        auto types = reader.GetCurrentReaderPosition();
-        auto typeByte = types[2 /* skip func type + argc */ + arg];
-        // skip introductory bytes.
-
+    static std::string GetBytecodeTypeName(uint8_t typeByte) {
         uint8_t baseType = typeByte & ~LBC_TYPE_OPTIONAL_BIT;
         bool isOptional = (typeByte & LBC_TYPE_OPTIONAL_BIT) != 0;
 
@@ -214,6 +198,28 @@ class Deserializer {
 
         return typeName;
     }
+
+    static std::optional<std::string> TryGetTypeName(DeserializedFunction *lpFunc, uint8_t arg) {
+        if (lpFunc == nullptr || lpFunc->typeinfo.empty() || lpFunc->uTypeVersion == 1)
+            return std::nullopt;
+
+        BinaryReader reader{lpFunc->typeinfo.data(), lpFunc->typeinfo.size()};
+
+        auto typeSize = reader.ReadVariableInteger32();
+        reader.ReadVariableInteger32();
+        reader.ReadVariableInteger32();
+
+        if (typeSize == 0 || typeSize < 2 + static_cast<uint32_t>(arg) + 1)
+            return std::nullopt;
+
+        if (static_cast<size_t>(reader.GetEndPosition() - reader.GetCurrentReaderPosition()) < typeSize)
+            return std::nullopt;
+
+        auto types = reader.GetCurrentReaderPosition();
+        return GetBytecodeTypeName(types[2 + arg]);
+    }
+
+    static std::string GetTypeName(DeserializedFunction *lpFunc, uint8_t arg) { return TryGetTypeName(lpFunc, arg).value_or("any"); }
 
     std::optional<DeserializedBytecode> Deserialize(const std::string &bytecode);
 };

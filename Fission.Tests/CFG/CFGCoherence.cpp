@@ -28,190 +28,190 @@
 
 namespace {
 
-// Holds owning storage for every stage of the pipeline so the
-// non-owning pointers inside AnalyzedFunction / BasicBlock stay valid for the
-// lifetime of the test case.
-struct AnalyzedSnippet {
-    std::optional<DeserializedBytecode> deserialized;
-    std::unique_ptr<LiftedFunction> lifted;
-    AnalyzedFunction analyzed;
-};
+    // Holds owning storage for every stage of the pipeline so the
+    // non-owning pointers inside AnalyzedFunction / BasicBlock stay valid for the
+    // lifetime of the test case.
+    struct AnalyzedSnippet {
+        std::optional<DeserializedBytecode> deserialized;
+        std::unique_ptr<LiftedFunction> lifted;
+        AnalyzedFunction analyzed;
+    };
 
-void EnableLuauFFlagsOnce() {
-    static bool enabled = false;
-    if (enabled)
-        return;
-    enabled = true;
-    for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
-        if (std::strncmp(flag->name, "Luau", 4) == 0)
-            flag->value = true;
-}
-
-std::unique_ptr<AnalyzedSnippet> CompileAndAnalyze(const std::string &source) {
-    EnableLuauFFlagsOnce();
-
-    auto snippet = std::make_unique<AnalyzedSnippet>();
-
-    Luau::CompileOptions opts{};
-    opts.optimizationLevel = 1;
-    opts.debugLevel = 2;
-    const auto compiled = Luau::compile(source, opts);
-
-    Deserializer deserializer{};
-    snippet->deserialized = deserializer.Deserialize(compiled);
-    REQUIRE(snippet->deserialized.has_value());
-    REQUIRE_FALSE(snippet->deserialized->functions.empty());
-
-    Fission::InstructionDecoder decoder{};
-    BytecodeLifter lifter{&decoder};
-    snippet->lifted = std::make_unique<LiftedFunction>(lifter.LiftDeserializedBytecode(*snippet->deserialized));
-
-    ControlFlowAnalyzer cfa{};
-    snippet->analyzed = cfa.DetermineBasicBlocks(snippet->lifted.get());
-    cfa.OptimizeGraph(snippet->analyzed);
-    cfa.PruneUnreachable(snippet->analyzed);
-    cfa.IdentifyStructures(snippet->analyzed);
-
-    return snippet;
-}
-
-bool IsAlive(const BasicBlock &b) { return b.bType != BlockType::Dead && b.bType != BlockType::Error; }
-
-// Every alive block must hold valid instruction range.
-void CheckHeadTailValid(const AnalyzedFunction &f) {
-    for (const auto &blk : f.basicBlocks) {
-        if (!IsAlive(blk))
-            continue;
-        INFO("Block " << blk.dwBlockId << " type=" << BlockTypeToString(blk.bType) << " should have valid lpHead/lpTail");
-        CHECK(blk.lpHead != nullptr);
-        CHECK(blk.lpTail != nullptr);
-        if (blk.lpHead && blk.lpTail)
-            CHECK(blk.lpHead <= blk.lpTail);
+    void EnableLuauFFlagsOnce() {
+        static bool enabled = false;
+        if (enabled)
+            return;
+        enabled = true;
+        for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+            if (std::strncmp(flag->name, "Luau", 4) == 0)
+                flag->value = true;
     }
-}
 
-// Edge symmetry: every successor edge has a matching predecessor edge and vice versa.
-void CheckEdgeSymmetry(const AnalyzedFunction &f) {
-    for (const auto &blk : f.basicBlocks) {
-        if (!IsAlive(blk))
-            continue;
-        for (auto sid : blk.successors) {
-            REQUIRE(sid < f.basicBlocks.size());
-            const auto &s = f.basicBlocks[sid];
-            INFO("Block " << blk.dwBlockId << " -> succ " << sid << " is missing the reverse edge in succ.predecessors");
-            CHECK(std::find(s.predecessors.begin(), s.predecessors.end(), blk.dwBlockId) != s.predecessors.end());
-        }
-        for (auto pid : blk.predecessors) {
-            REQUIRE(pid < f.basicBlocks.size());
-            const auto &p = f.basicBlocks[pid];
-            INFO("Block " << blk.dwBlockId << " <- pred " << pid << " is missing the reverse edge in pred.successors");
-            CHECK(std::find(p.successors.begin(), p.successors.end(), blk.dwBlockId) != p.successors.end());
+    std::unique_ptr<AnalyzedSnippet> CompileAndAnalyze(const std::string &source) {
+        EnableLuauFFlagsOnce();
+
+        auto snippet = std::make_unique<AnalyzedSnippet>();
+
+        Luau::CompileOptions opts{};
+        opts.optimizationLevel = 1;
+        opts.debugLevel = 2;
+        const auto compiled = Luau::compile(source, opts);
+
+        Deserializer deserializer{};
+        snippet->deserialized = deserializer.Deserialize(compiled);
+        REQUIRE(snippet->deserialized.has_value());
+        REQUIRE_FALSE(snippet->deserialized->functions.empty());
+
+        Fission::InstructionDecoder decoder{};
+        BytecodeLifter lifter{&decoder};
+        snippet->lifted = std::make_unique<LiftedFunction>(lifter.LiftDeserializedBytecode(*snippet->deserialized));
+
+        ControlFlowAnalyzer cfa{};
+        snippet->analyzed = cfa.DetermineBasicBlocks(snippet->lifted.get());
+        cfa.OptimizeGraph(snippet->analyzed);
+        cfa.PruneUnreachable(snippet->analyzed);
+        cfa.IdentifyStructures(snippet->analyzed);
+
+        return snippet;
+    }
+
+    bool IsAlive(const BasicBlock &b) { return b.bType != BlockType::Dead && b.bType != BlockType::Error; }
+
+    // Every alive block must hold valid instruction range.
+    void CheckHeadTailValid(const AnalyzedFunction &f) {
+        for (const auto &blk : f.basicBlocks) {
+            if (!IsAlive(blk))
+                continue;
+            INFO("Block " << blk.dwBlockId << " type=" << BlockTypeToString(blk.bType) << " should have valid lpHead/lpTail");
+            CHECK(blk.lpHead != nullptr);
+            CHECK(blk.lpTail != nullptr);
+            if (blk.lpHead && blk.lpTail)
+                CHECK(blk.lpHead <= blk.lpTail);
         }
     }
-}
 
-// Every alive block must be reachable from the entry block (id 0).
-void CheckReachability(const AnalyzedFunction &f) {
-    if (f.basicBlocks.empty())
-        return;
-    std::set<uint32_t> seen;
-    std::queue<uint32_t> q;
-    seen.insert(0);
-    q.push(0);
-    while (!q.empty()) {
-        const auto id = q.front();
-        q.pop();
-        for (auto sid : f.basicBlocks[id].successors) {
-            if (seen.insert(sid).second)
-                q.push(sid);
+    // Edge symmetry: every successor edge has a matching predecessor edge and vice versa.
+    void CheckEdgeSymmetry(const AnalyzedFunction &f) {
+        for (const auto &blk : f.basicBlocks) {
+            if (!IsAlive(blk))
+                continue;
+            for (auto sid : blk.successors) {
+                REQUIRE(sid < f.basicBlocks.size());
+                const auto &s = f.basicBlocks[sid];
+                INFO("Block " << blk.dwBlockId << " -> succ " << sid << " is missing the reverse edge in succ.predecessors");
+                CHECK(std::find(s.predecessors.begin(), s.predecessors.end(), blk.dwBlockId) != s.predecessors.end());
+            }
+            for (auto pid : blk.predecessors) {
+                REQUIRE(pid < f.basicBlocks.size());
+                const auto &p = f.basicBlocks[pid];
+                INFO("Block " << blk.dwBlockId << " <- pred " << pid << " is missing the reverse edge in pred.successors");
+                CHECK(std::find(p.successors.begin(), p.successors.end(), blk.dwBlockId) != p.successors.end());
+            }
         }
     }
-    for (const auto &blk : f.basicBlocks) {
-        if (!IsAlive(blk))
-            continue;
-        INFO("Block " << blk.dwBlockId << " type=" << BlockTypeToString(blk.bType) << " is alive but unreachable from entry");
-        CHECK(seen.count(blk.dwBlockId) == 1u);
-    }
-}
 
-// IfHeader blocks must always have both branch targets recorded.
-void CheckIfHeaderHasBranches(const AnalyzedFunction &f) {
-    for (const auto &blk : f.basicBlocks) {
-        if (blk.bType != BlockType::IfHeader)
-            continue;
-        INFO("IfHeader block " << blk.dwBlockId << " missing ifStatementTrue/ifStatementFalse");
-        CHECK(blk.ifStatementTrue.has_value());
-        CHECK(blk.ifStatementFalse.has_value());
-        // Both branch targets must reference existing blocks and appear as successors.
-        if (blk.ifStatementTrue.has_value()) {
-            CHECK(*blk.ifStatementTrue < f.basicBlocks.size());
-            CHECK(std::find(blk.successors.begin(), blk.successors.end(), *blk.ifStatementTrue) != blk.successors.end());
+    // Every alive block must be reachable from the entry block (id 0).
+    void CheckReachability(const AnalyzedFunction &f) {
+        if (f.basicBlocks.empty())
+            return;
+        std::set<uint32_t> seen;
+        std::queue<uint32_t> q;
+        seen.insert(0);
+        q.push(0);
+        while (!q.empty()) {
+            const auto id = q.front();
+            q.pop();
+            for (auto sid : f.basicBlocks[id].successors) {
+                if (seen.insert(sid).second)
+                    q.push(sid);
+            }
         }
-        if (blk.ifStatementFalse.has_value()) {
-            CHECK(*blk.ifStatementFalse < f.basicBlocks.size());
-            CHECK(std::find(blk.successors.begin(), blk.successors.end(), *blk.ifStatementFalse) != blk.successors.end());
+        for (const auto &blk : f.basicBlocks) {
+            if (!IsAlive(blk))
+                continue;
+            INFO("Block " << blk.dwBlockId << " type=" << BlockTypeToString(blk.bType) << " is alive but unreachable from entry");
+            CHECK(seen.count(blk.dwBlockId) == 1u);
         }
     }
-}
 
-// LoopHeader/LoopLatch pairs must be mutually linked.
-void CheckLoopHeaderLatchPair(const AnalyzedFunction &f) {
-    for (const auto &blk : f.basicBlocks) {
-        if (blk.bType != BlockType::LoopHeader)
-            continue;
-        INFO("LoopHeader block " << blk.dwBlockId << " missing loopLatch");
-        CHECK(blk.loopLatch.has_value());
-        if (blk.loopLatch.has_value()) {
-            REQUIRE(*blk.loopLatch < f.basicBlocks.size());
-            const auto &latch = f.basicBlocks[*blk.loopLatch];
-            INFO("LoopLatch " << *blk.loopLatch << " should point back to header " << blk.dwBlockId);
-            CHECK(latch.loopHeader.has_value());
-            if (latch.loopHeader.has_value())
-                CHECK(*latch.loopHeader == blk.dwBlockId);
+    // IfHeader blocks must always have both branch targets recorded.
+    void CheckIfHeaderHasBranches(const AnalyzedFunction &f) {
+        for (const auto &blk : f.basicBlocks) {
+            if (blk.bType != BlockType::IfHeader)
+                continue;
+            INFO("IfHeader block " << blk.dwBlockId << " missing ifStatementTrue/ifStatementFalse");
+            CHECK(blk.ifStatementTrue.has_value());
+            CHECK(blk.ifStatementFalse.has_value());
+            // Both branch targets must reference existing blocks and appear as successors.
+            if (blk.ifStatementTrue.has_value()) {
+                CHECK(*blk.ifStatementTrue < f.basicBlocks.size());
+                CHECK(std::find(blk.successors.begin(), blk.successors.end(), *blk.ifStatementTrue) != blk.successors.end());
+            }
+            if (blk.ifStatementFalse.has_value()) {
+                CHECK(*blk.ifStatementFalse < f.basicBlocks.size());
+                CHECK(std::find(blk.successors.begin(), blk.successors.end(), *blk.ifStatementFalse) != blk.successors.end());
+            }
         }
     }
-}
 
-// Return blocks terminate the function and must have no successors.
-void CheckReturnHasNoSuccessors(const AnalyzedFunction &f) {
-    for (const auto &blk : f.basicBlocks) {
-        if (blk.bType != BlockType::Return)
-            continue;
-        INFO("Return block " << blk.dwBlockId << " unexpectedly has successors");
-        CHECK(blk.successors.empty());
-        CHECK(blk.bTerminator == BlockTerminator::Return);
+    // LoopHeader/LoopLatch pairs must be mutually linked.
+    void CheckLoopHeaderLatchPair(const AnalyzedFunction &f) {
+        for (const auto &blk : f.basicBlocks) {
+            if (blk.bType != BlockType::LoopHeader)
+                continue;
+            INFO("LoopHeader block " << blk.dwBlockId << " missing loopLatch");
+            CHECK(blk.loopLatch.has_value());
+            if (blk.loopLatch.has_value()) {
+                REQUIRE(*blk.loopLatch < f.basicBlocks.size());
+                const auto &latch = f.basicBlocks[*blk.loopLatch];
+                INFO("LoopLatch " << *blk.loopLatch << " should point back to header " << blk.dwBlockId);
+                CHECK(latch.loopHeader.has_value());
+                if (latch.loopHeader.has_value())
+                    CHECK(*latch.loopHeader == blk.dwBlockId);
+            }
+        }
     }
-}
 
-// Block IDs must equal their index in the basicBlocks vector (LinkBasicBlocks relies on this).
-void CheckBlockIdsMatchIndices(const AnalyzedFunction &f) {
-    for (size_t i = 0; i < f.basicBlocks.size(); ++i) {
-        INFO("Block at vector index " << i << " has dwBlockId=" << f.basicBlocks[i].dwBlockId);
-        CHECK(f.basicBlocks[i].dwBlockId == i);
+    // Return blocks terminate the function and must have no successors.
+    void CheckReturnHasNoSuccessors(const AnalyzedFunction &f) {
+        for (const auto &blk : f.basicBlocks) {
+            if (blk.bType != BlockType::Return)
+                continue;
+            INFO("Return block " << blk.dwBlockId << " unexpectedly has successors");
+            CHECK(blk.successors.empty());
+            CHECK(blk.bTerminator == BlockTerminator::Return);
+        }
     }
-}
 
-void RunStandardCoherenceChecks(const AnalyzedFunction &f) {
-    CheckBlockIdsMatchIndices(f);
-    CheckHeadTailValid(f);
-    CheckEdgeSymmetry(f);
-    CheckReachability(f);
-    CheckReturnHasNoSuccessors(f);
-    CheckIfHeaderHasBranches(f);
-    CheckLoopHeaderLatchPair(f);
-}
+    // Block IDs must equal their index in the basicBlocks vector (LinkBasicBlocks relies on this).
+    void CheckBlockIdsMatchIndices(const AnalyzedFunction &f) {
+        for (size_t i = 0; i < f.basicBlocks.size(); ++i) {
+            INFO("Block at vector index " << i << " has dwBlockId=" << f.basicBlocks[i].dwBlockId);
+            CHECK(f.basicBlocks[i].dwBlockId == i);
+        }
+    }
 
-size_t CountBlocksByType(const AnalyzedFunction &f, BlockType t) {
-    size_t n = 0;
-    for (const auto &b : f.basicBlocks)
-        if (b.bType == t)
-            ++n;
-    return n;
-}
+    void RunStandardCoherenceChecks(const AnalyzedFunction &f) {
+        CheckBlockIdsMatchIndices(f);
+        CheckHeadTailValid(f);
+        CheckEdgeSymmetry(f);
+        CheckReachability(f);
+        CheckReturnHasNoSuccessors(f);
+        CheckIfHeaderHasBranches(f);
+        CheckLoopHeaderLatchPair(f);
+    }
+
+    size_t CountBlocksByType(const AnalyzedFunction &f, BlockType t) {
+        size_t n = 0;
+        for (const auto &b : f.basicBlocks)
+            if (b.bType == t)
+                ++n;
+        return n;
+    }
 
 } // namespace
 
-TEST_CASE("CFG: empty function — entry is also the return", "[CFG]") {
+TEST_CASE("CFG: empty function itself has entry as the return", "[CFG]") {
     auto snip = CompileAndAnalyze("return");
     const auto &f = snip->analyzed;
 

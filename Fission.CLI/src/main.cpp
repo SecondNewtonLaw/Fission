@@ -7,9 +7,24 @@
 #include "luacode.h"
 
 #include <Windows.h>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+
+static void CliFailureHandler(const libassert::assertion_info &info) {
+    libassert::enable_virtual_terminal_processing_if_needed();
+    auto msg = info.to_string(0, libassert::color_scheme::blank);
+    std::fprintf(stderr, "\n*** LIBASSERT ASSERTION FAILED ***\n%s\n", msg.c_str());
+    std::fflush(stderr);
+    std::_Exit(1);
+}
+
+struct InitCliHandler {
+    InitCliHandler() { libassert::set_failure_handler(CliFailureHandler); }
+};
+static InitCliHandler g_cliHandlerInit;
 
 #pragma comment(lib, "crypt32.lib")
 
@@ -74,15 +89,19 @@ int main() {
         if (strncmp(flag->name, "Luau", 4) == 0)
             flag->value = true; // enable all fflags, because integer is experimental.
 
-    ASSERT(
-        decompiler
-                .DecompileTestCodeFromFile(
-                    "test.txt", DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph |
-                                    DecompilerFlags::GenerateIRGraph
-                )
-                .resultCode == DecompileResult::Success,
-        "Decompilation failed."
+    Luau::CompileOptions tmpOpts{};
+    tmpOpts.optimizationLevel = 2;
+    tmpOpts.debugLevel = 0;
+    auto decompileResult = decompiler.DecompileTestCodeFromFile(
+        "test.txt", DecompilerFlags::PrintTimingBreakdown | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateSSAIRGraph |
+                        DecompilerFlags::GenerateIRGraph | DecompilerFlags::InferRobloxTypes | DecompilerFlags::InferTypes |
+                        DecompilerFlags::AutoNameVariables,
+        tmpOpts
     );
+    ASSERT(decompileResult.resultCode == DecompileResult::Success, "Decompilation failed.");
+
+    if (!decompileResult.timingStatistics.empty())
+        std::cout << decompileResult.timingStatistics << std::endl;
 
     system("graph_generator.bat");
 }

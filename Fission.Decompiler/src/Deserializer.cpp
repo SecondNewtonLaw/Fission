@@ -43,7 +43,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             std::stringstream ss;
             for (const auto &c : rS) { // escape strings into luau format on deserialization.
                 if (!isascii(c)) {     // must be rebuilt
-                    ss << "\\" << static_cast<int>(c);
+                    ss << "\\" << static_cast<int>(static_cast<unsigned char>(c));
                 } else {
                     ss << c;
                 }
@@ -243,7 +243,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
             case LBC_CONSTANT_TABLE: {
                 int keyCount = reader.ReadVariableInteger32();
-                auto vec = std::vector<std::string>(keyCount);
+                std::vector<std::string> vec;
+                vec.reserve(keyCount);
                 for (auto k = 0; k < keyCount; ++k) {
                     int key = reader.ReadVariableInteger32();
                     const auto &constant = function.constants[key];
@@ -258,22 +259,20 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             case LBC_CONSTANT_TABLE_WITH_CONSTANTS: {
                 // bytecode v7 ewww
                 int keyCount = reader.ReadVariableInteger32();
-                auto vec = std::vector<std::string>(keyCount);
-
-                // this would load all the constants and whatever bullshit (mainly it would read the keys, read each key to then find the actual constant index
-                // it requires, and then set it at runtime appropriately, that is if we care, however we are NOT running the fucking bytecode, so we actually do
-                // **NOT** FUCKING care.
-
+                std::vector<std::string> vec;
+                vec.reserve(keyCount);
+                std::vector<int32_t> tableValues;
+                tableValues.reserve(keyCount);
                 for (auto k = 0; k < keyCount; ++k) {
                     int key = reader.ReadVariableInteger32();
                     const auto &constant = function.constants[key];
-                    auto kIdx = reader.Read<int32_t>();
-                    (void)kIdx; // responsible no-use ty
+                    auto valIdx = reader.Read<int32_t>();
                     // ASSERT(constant.kType == LUA_TSTRING, "kString isn't correct.");
                     vec.emplace_back(std::get<std::string>(constant.constantData));
+                    tableValues.emplace_back(valIdx);
                 }
                 function.constants[j].kType = LUA_TTABLE;
-                function.constants[j].constantData = LuauTable{vec};
+                function.constants[j].constantData = LuauTable{vec, tableValues};
                 break;
             }
 
@@ -292,6 +291,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 break;
             }
 
+#ifdef LBC_CONSTANT_CLASS_SHAPE
             case LBC_CONSTANT_CLASS_SHAPE: {
                 // V10. Wire: varint className, varint propCount, varint methodCount, varint per propName, varint per methodName.
                 // Decompilation does not require the shape; consume bytes and leave the constant as nil.
@@ -305,6 +305,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 function.constants[j].kType = LUA_TNIL;
                 break;
             }
+#endif
 
             default:
                 // ASSERT(false, "WARNING! Unknown constant!", lbcConstant);

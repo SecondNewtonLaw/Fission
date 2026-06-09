@@ -283,6 +283,7 @@ std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
 }
 
 LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
+    DEBUG_ASSERT(function != nullptr);
     LiftedFunction liftedFunction{};
     liftedFunction.numparams = function->numparams;
     liftedFunction.lpDeserialized = const_cast<DeserializedFunction *>(function);
@@ -1396,6 +1397,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
+#ifdef LOP_NEWCLASSMEMBER
         case LOP_NEWCLASSMEMBER: {
             // V10. A = class register, C = initial value register (currently always a function), AUX = constant string member name.
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWCLASSMEMBER);
@@ -1420,47 +1422,11 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
-        case LOP_CALLFB: {
-            // V11. Same shape as CALL but trailing AUX = feedback slot id (0xFFFFFFFF == sealed).
-            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CALLFB);
-            instr.operands.resize(4);
-            instr.operands[0].type = LiftedOperandType::Register;
-            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
-            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
-            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
-            instr.operands[3].type = LiftedOperandType::ImmediateAux;
-            instr.operands[3].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
-
-            auto slotText = instr.operands[3].value.imm.u == 0xFFFFFFFFu ? std::string{"sealed"} : std::format("{}", instr.operands[3].value.imm.u);
-            instr.instructionRemarks = std::format(
-                "INFO: Call (feedback slot {}) function at R{} (argc+1={}, retc+1={}).", slotText, instr.operands[0].value.reg, instr.operands[1].value.imm.n,
-                instr.operands[2].value.imm.n
-            );
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
-                "INFO: padding due to the original instruction requiring an auxiliary.";
-            break;
-        }
-        case LOP_CMPPROTO: {
-            // V11. A = closure reg, D = jump offset taken when proto does NOT match, AUX = proto id.
-            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CMPPROTO);
-            instr.operands.resize(3);
-            instr.operands[0].type = LiftedOperandType::Register;
-            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
-            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[1].value.imm.n = instruction.GetD() + 1; // +1 to match the convention used by other conditional jumps.
-            instr.operands[2].type = LiftedOperandType::ImmediateAux;
-            instr.operands[2].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
-
-            instr.instructionRemarks = std::format(
-                "INFO: Jump PC to {} if the closure at R{} does not match proto id {}.", static_cast<int32_t>(currentIndex) + instr.operands[1].value.imm.n,
-                instr.operands[0].value.reg, instr.operands[2].value.imm.u
-            );
-            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
-                "INFO: padding due to the original instruction requiring an auxiliary.";
-            break;
-        }
+#endif
+        // LOP_CALLFB, LOP_CMPPROTO, LOP_NEWCLASSMEMBER are V10/V11 opcodes absent from the bundled
+        // Luau 0.718 Bytecode.h; enum entries and handlers kept commented for reference.
+        // case LOP_CALLFB: break;
+        // case LOP_CMPPROTO: break;
         case LOP_NATIVECALL: {
             auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
             ins.instructionRemarks = "WARNING: Op Code simplified (NATIVECALL). Pseudo-instruction, never emitted by the bytecode compiler.";

@@ -17,25 +17,32 @@ enum class DecompileResult : uint8_t {
     Success,
     FailedToReadFile,
     FailedToDeserialize,
+    FailedToDecompile, // internal failure (malformed/hostile bytecode) caught by the safety boundary
 };
 
-enum class DecompilerFlags : uint8_t {
+enum class DecompilerFlags : uint16_t {
     PrintIR = 1 << 0,
     WriteIRToFile = 1 << 1,
     GenerateIRGraph = 1 << 2,
     GenerateSSAIRGraph = 1 << 3,
-    PrintTimingBreakdown = 1 << 4
+    PrintTimingBreakdown = 1 << 4,
+    InferTypes = 1 << 5,
+    OptimizeIR = 1 << 6,
+    InferRobloxTypes = 1 << 7,
+    AutoNameVariables = 1 << 8,
+    // drop Fission's info comments (function info, capture/name notes). warnings + banner still emitted.
+    OmitFissionComments = 1 << 9
 };
 
 constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {
-    return static_cast<DecompilerFlags>(static_cast<uint8_t>(lhs) | static_cast<uint8_t>(rhs));
+    return static_cast<DecompilerFlags>(static_cast<uint16_t>(lhs) | static_cast<uint16_t>(rhs));
 }
 
 constexpr DecompilerFlags operator&(DecompilerFlags lhs, DecompilerFlags rhs) {
-    return static_cast<DecompilerFlags>(static_cast<uint8_t>(lhs) & static_cast<uint8_t>(rhs));
+    return static_cast<DecompilerFlags>(static_cast<uint16_t>(lhs) & static_cast<uint16_t>(rhs));
 }
 
-constexpr DecompilerFlags operator~(DecompilerFlags flag) { return static_cast<DecompilerFlags>(~static_cast<uint8_t>(flag)); }
+constexpr DecompilerFlags operator~(DecompilerFlags flag) { return static_cast<DecompilerFlags>(~static_cast<uint16_t>(flag)); }
 
 inline DecompilerFlags &operator|=(DecompilerFlags &lhs, DecompilerFlags rhs) {
     lhs = lhs | rhs;
@@ -62,6 +69,8 @@ class Decompiler {
     GraphVisualizer visualizer{};
 
     DecompilationResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
+    // the actual pipeline; CommonDecompilerEntry wraps it in the safety boundary so throws become FailedToDecompile.
+    DecompilationResult CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
 
   public:
     DecompilationResult

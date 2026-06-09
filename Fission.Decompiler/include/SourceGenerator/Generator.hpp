@@ -18,14 +18,10 @@ class SourceGenerator : public Visitor {
     size_t dwIndentationLevel = 0;
     static constexpr size_t kIndentationSpaceCount = 4;
 
-    // Minimum binary-operator precedence the surrounding context expects from
-    // the next expression. A child whose own precedence is *lower* than this
-    // value must wrap itself in parentheses to preserve grouping. 0 means
-    // "statement context" - no parens needed for any expression.
+    // min precedence ctx wants; child lower than this wraps in parens. 0 = stmt ctx.
     int m_minPrecedence = 0;
 
-    // Luau operator precedence table (low number = low precedence). Matches the
-    // grammar in lparser.cpp. Unary operators (`not`, `-`, `#`) sit at level 7.
+    // luau precedence table (low num = low prec), matches lparser.cpp. unary at 7.
     static int OperatorPrecedence(const std::string &op) {
         if (op == "or")
             return 1;
@@ -44,17 +40,12 @@ class SourceGenerator : public Visitor {
         return 0;
     }
 
-    // `..` and `^` are right-associative; everything else is left-associative.
     static bool IsRightAssociative(const std::string &op) { return op == ".." || op == "^"; }
 
-    // Mathematically associative operators where `a op (b op c)` and
-    // `(a op b) op c` agree. We treat `..` as associative so flat-chained
-    // string concatenations don't gain redundant parens.
+    // `..` treated as associative so flat concat chains don't gain redundant parens.
     static bool IsAssociative(const std::string &op) { return op == "or" || op == "and" || op == "+" || op == "*" || op == ".."; }
 
-    // Helper that emits the child expression with the requested minimum
-    // precedence pushed onto the context, restoring the previous value when
-    // done. Use this for every recursive Accept on an expression child.
+    // emit child with pushed min precedence, restore after. use for every expr child Accept.
     template <typename Node> void EmitWithPrecedence(int minPrec, Node *child) {
         const int saved = m_minPrecedence;
         m_minPrecedence = minPrec;
@@ -127,9 +118,7 @@ class SourceGenerator : public Visitor {
     void Visit(FunctionDeclarationNode *lpNode) override {
         (void)lpNode;
 
-        // Anonymous inline form: `function(args) ... end` rendered in-place at
-        // an expression site (typically a call argument). No leading indent,
-        // no `local`, no name. Caller controls surrounding punctuation.
+        // anon inline `function(args) ... end` at expr site. no indent/local/name, caller does punctuation.
         if (lpNode->bAnonymousInline) {
             buffer << "function(";
             EmitFunctionArguments(lpNode);
@@ -160,7 +149,13 @@ class SourceGenerator : public Visitor {
         this->NextLine();
     }
 
+    // drops informational comments only; warnings still emitted.
+    bool bOmitInformationalComments = false;
+
     void Visit(CommentNode *lpNode) override {
+
+        if (bOmitInformationalComments && lpNode->bIsInformational)
+            return;
 
         if (lpNode->comment.find('\n') == std::string::npos) {
             buffer << this->GetIndentation() << "-- " << lpNode->comment;
@@ -203,9 +198,14 @@ class SourceGenerator : public Visitor {
         if (!lpNode->inlineCall) {
             buffer << this->GetIndentation();
             if (!lpNode->rets.empty()) {
-                buffer << "local ";
+                if (lpNode->bIsLocalDeclaration)
+                    buffer << "local ";
                 for (size_t i = 0; i < lpNode->rets.size(); i++) {
                     lpNode->rets.at(i)->Accept(this);
+                    if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr) {
+                        buffer << ": ";
+                        lpNode->retTypes[i]->Accept(this);
+                    }
                     if (i < lpNode->rets.size() - 1)
                         buffer << ", ";
                 }
@@ -240,8 +240,7 @@ class SourceGenerator : public Visitor {
         if (wrap)
             buffer << "(";
         buffer << lpNode->op;
-        // A unary operator binds tighter than every binary except `^`; require
-        // the operand to wrap if it is a lower-precedence binary.
+        // unary binds tighter than everything but `^`, so wrap lower-prec operand.
         EmitWithPrecedence(kUnaryPrec, lpNode->operand.get());
         if (wrap)
             buffer << ")";
@@ -257,17 +256,40 @@ class SourceGenerator : public Visitor {
 
     void Visit(MemberExpressionNode *lpNode) override {
         (void)lpNode;
-        if (lpNode->table != nullptr) {
-            lpNode->table->Accept(this);
-            if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->key)) {
-                if (this->IsLegalLuauIndex(lpStringLiteral->value))
-                    buffer << "." << lpStringLiteral->value;
-                return;
-            }
+        // Walk left chain `a.b.c.d.e.f` iteratively. Recursive lpNode->table->Accept
+        // stacks one frame per hop and blows the stack on long Roblox lookup chains
+        // (e.g. game.Workspace.PlayerScripts.X.Y.Z.W...).
+        std::vector<MemberExpressionNode *> chain;
+        MemberExpressionNode *cur = lpNode;
+        while (cur != nullptr) {
+            chain.push_back(cur);
+            auto inner = std::dynamic_pointer_cast<MemberExpressionNode>(cur->table);
+            if (!inner)
+                break;
+            cur = inner.get();
         }
-        buffer << "[";
-        lpNode->key->Accept(this);
-        buffer << "]";
+
+        // emit innermost base once (non-MemberExpression subtree), then unwind suffixes.
+        MemberExpressionNode *innermost = chain.back();
+        if (innermost->table != nullptr)
+            innermost->table->Accept(this);
+
+        // Each MemberExpressionNode emits its own suffix: `.name` (legal ident with table),
+        // empty (StringLiteral-but-not-legal-ident with table → preserves original `return`-without-emit
+        // semantics), or `[key]` otherwise.
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            MemberExpressionNode *node = *it;
+            if (node->table != nullptr) {
+                if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(node->key)) {
+                    if (IsLegalLuauIndex(lpStringLiteral->value))
+                        buffer << "." << lpStringLiteral->value;
+                    continue;
+                }
+            }
+            buffer << "[";
+            node->key->Accept(this);
+            buffer << "]";
+        }
     }
 
     void Visit(ReturnStatementNode *lpNode) override {
@@ -332,25 +354,8 @@ class SourceGenerator : public Visitor {
             this->NextLine();
             return;
         }
-        if (lpNode->thenBranch != nullptr) {
-            buffer << this->GetIndentation() << "if ";
-            lpNode->condition->Accept(this);
-            buffer << " then";
-            this->NextLine();
-            this->IncreaseIndentation();
-            lpNode->thenBranch->Accept(this);
-            if (lpNode->elseBranch != nullptr && !lpNode->elseBranch->body.empty()) {
-                this->DecreaseIndentation();
-                buffer << this->GetIndentation() << "else";
-                this->NextLine();
-                this->IncreaseIndentation();
-                lpNode->elseBranch->Accept(this);
-            }
-
-            this->DecreaseIndentation();
-            buffer << this->GetIndentation() << "end";
-            this->NextLine();
-        } else {
+        // Only-else form (no then branch): render as-is.
+        if (lpNode->thenBranch == nullptr) {
             buffer << this->GetIndentation() << "if ";
             lpNode->condition->Accept(this);
             buffer << " then";
@@ -360,15 +365,51 @@ class SourceGenerator : public Visitor {
             this->DecreaseIndentation();
             buffer << this->GetIndentation() << "end";
             this->NextLine();
+            return;
         }
+
+        // walk if/elseif/else iteratively: else == single if -> render `elseif`, not nested.
+        IfStatementNode *cur = lpNode;
+        bool first = true;
+        while (true) {
+            buffer << this->GetIndentation() << (first ? "if " : "elseif ");
+            first = false;
+            cur->condition->Accept(this);
+            buffer << " then";
+            this->NextLine();
+            this->IncreaseIndentation();
+            if (cur->thenBranch != nullptr)
+                cur->thenBranch->Accept(this);
+            this->DecreaseIndentation();
+
+            IfStatementNode *nextIf = nullptr;
+            if (cur->elseBranch != nullptr && cur->elseBranch->body.size() == 1)
+                if (auto n = std::dynamic_pointer_cast<IfStatementNode>(cur->elseBranch->body[0]); n && n->thenBranch != nullptr)
+                    nextIf = n.get();
+
+            if (nextIf != nullptr) {
+                cur = nextIf;
+                continue;
+            }
+
+            if (cur->elseBranch != nullptr && !cur->elseBranch->body.empty()) {
+                buffer << this->GetIndentation() << "else";
+                this->NextLine();
+                this->IncreaseIndentation();
+                cur->elseBranch->Accept(this);
+                this->DecreaseIndentation();
+            }
+            break;
+        }
+
+        buffer << this->GetIndentation() << "end";
+        this->NextLine();
     }
 
     void Visit(AssignmentStatementNode *lpNode) override {
         (void)lpNode;
         buffer << this->GetIndentation();
-        // LHS is a write target (Identifier / IndexExpression / MemberExpression);
-        // never needs precedence wrapping. RHS is at statement context, so reset
-        // the minimum precedence — any binary expression there is unambiguous.
+        // LHS is a write target, never wraps. RHS at stmt ctx so reset min prec.
         EmitWithPrecedence(0, lpNode->left.get());
         buffer << " = ";
         EmitWithPrecedence(0, lpNode->right.get());
@@ -377,36 +418,54 @@ class SourceGenerator : public Visitor {
 
     void Visit(BinaryExpressionNode *lpNode) override {
         (void)lpNode;
-        const int prec = OperatorPrecedence(lpNode->op);
-        const bool rightAssoc = IsRightAssociative(lpNode->op);
-        // Wrap when our precedence is lower than the surrounding context
-        // requires. Equal precedence is fine when associativity matches.
-        const bool wrap = prec < m_minPrecedence;
-        if (wrap)
-            buffer << "(";
-        // Left child of a left-associative op may keep equal precedence; for a
-        // right-associative op it must be strictly higher (so `a^b^c` keeps the
-        // parenthesisation that mirrors the parse tree).
-        int leftMin = rightAssoc ? prec + 1 : prec;
-        // Right child mirrors: left-assoc requires strictly higher precedence
-        // on the right, right-assoc allows equal.
-        int rightMin = rightAssoc ? prec : prec + 1;
-
-        // For associative operators (`or`, `and`, `+`, `*`, `..`) a flat chain
-        // like `a or b or c` does not change meaning regardless of grouping, so
-        // skip parens around an identically-keyed child on the "tight" side.
-        if (IsAssociative(lpNode->op)) {
-            if (auto rb = std::dynamic_pointer_cast<BinaryExpressionNode>(lpNode->right); rb && rb->op == lpNode->op)
-                rightMin = prec;
-            if (auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(lpNode->left); lb && lb->op == lpNode->op)
-                leftMin = prec;
+        // Walk the left spine iteratively: chained binops `a+b+c+d+...` Visit-recurse one frame
+        // per link via left->Accept and blow the stack on deeply-nested expressions emitted by
+        // optimised/obfuscated bytecode. Collect spine entries top-down, then emit bottom-up.
+        const int savedMin = m_minPrecedence;
+        struct SpineEntry {
+            BinaryExpressionNode *node;
+            int leftMin;
+            int rightMin;
+            bool wrap;
+        };
+        std::vector<SpineEntry> spine;
+        BinaryExpressionNode *cur = lpNode;
+        while (true) {
+            const int prec = OperatorPrecedence(cur->op);
+            const bool rightAssoc = IsRightAssociative(cur->op);
+            const bool wrap = prec < m_minPrecedence;
+            int leftMin = rightAssoc ? prec + 1 : prec;
+            int rightMin = rightAssoc ? prec : prec + 1;
+            if (IsAssociative(cur->op)) {
+                if (auto rb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->right); rb && rb->op == cur->op)
+                    rightMin = prec;
+                if (auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->left); lb && lb->op == cur->op)
+                    leftMin = prec;
+            }
+            spine.push_back({cur, leftMin, rightMin, wrap});
+            auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->left);
+            if (!lb)
+                break;
+            // mirror the recursive Accept's m_minPrecedence push so inner wrap decisions match.
+            m_minPrecedence = leftMin;
+            cur = lb.get();
         }
 
-        EmitWithPrecedence(leftMin, lpNode->left.get());
-        buffer << " " << lpNode->op << " ";
-        EmitWithPrecedence(rightMin, lpNode->right.get());
-        if (wrap)
-            buffer << ")";
+        for (auto it = spine.begin(); it != spine.end(); ++it)
+            if (it->wrap)
+                buffer << "(";
+
+        const auto &innermost = spine.back();
+        m_minPrecedence = innermost.leftMin;
+        innermost.node->left->Accept(this);
+        for (auto it = spine.rbegin(); it != spine.rend(); ++it) {
+            buffer << " " << it->node->op << " ";
+            EmitWithPrecedence(it->rightMin, it->node->right.get());
+            if (it->wrap)
+                buffer << ")";
+        }
+
+        m_minPrecedence = savedMin;
     }
 
     void Visit(StringLiteralNode *lpNode) override {
@@ -428,19 +487,9 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(NumberLiteralNode *lpNode) override {
-        (void)lpNode;
-        auto num = std::format(
-            "{:.{}f}", std::stod(std::format("{:.{}f}", lpNode->value, std::numeric_limits<double>::max_digits10)), std::numeric_limits<double>::max_digits10
-        );
-        const auto dot = num.find('.');
-        auto resultLength = num.length();
-        if (dot != std::string::npos)
-            if (const auto lastThatIsNotZero = num.find_last_not_of('0'); lastThatIsNotZero != std::string::npos && lastThatIsNotZero >= dot)
-                resultLength = lastThatIsNotZero + (lastThatIsNotZero != dot);
-        num.resize(resultLength);
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        buffer << num;
+        buffer << std::format("{}", lpNode->value);
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }
@@ -469,6 +518,10 @@ class SourceGenerator : public Visitor {
         buffer << this->GetIndentation();
         buffer << "local ";
         lpNode->identifier->Accept(this);
+        if (lpNode->type) {
+            buffer << ": ";
+            lpNode->type.value()->Accept(this);
+        }
         if (lpNode->value != nullptr) {
             buffer << " = ";
             lpNode->value->Accept(this);
@@ -489,7 +542,20 @@ class SourceGenerator : public Visitor {
             buffer << "(";
         buffer << "{ ";
         for (size_t i = 0; i < lpNode->expressions.size(); i++) {
-            lpNode->expressions.at(i)->Accept(this);
+            if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(lpNode->expressions.at(i)); lpBinExpr) {
+                if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpBinExpr->left)) {
+                    buffer << "[";
+                    lpBinExpr->left->Accept(this);
+                    buffer << "] ";
+                    buffer << lpBinExpr->op;
+                    buffer << " ";
+                    lpBinExpr->right->Accept(this);
+                } else {
+                    lpNode->expressions.at(i)->Accept(this);
+                }
+            } else {
+                lpNode->expressions.at(i)->Accept(this);
+            }
             if (i < lpNode->expressions.size() - 1)
                 buffer << ", ";
         }
@@ -497,6 +563,7 @@ class SourceGenerator : public Visitor {
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }
+
 
     void Visit(NameCallExpressionNode *lpNode) override {
         if (lpNode->rets.empty()) {
@@ -519,9 +586,14 @@ class SourceGenerator : public Visitor {
             return;
         }
         buffer << this->GetIndentation();
-        buffer << "local ";
+        if (lpNode->bIsLocalDeclaration)
+            buffer << "local ";
         for (size_t i = 0; i < lpNode->rets.size(); i++) {
             lpNode->rets.at(i)->Accept(this);
+            if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr) {
+                buffer << ": ";
+                lpNode->retTypes[i]->Accept(this);
+            }
             if (i < lpNode->rets.size() - 1)
                 buffer << ", ";
         }
@@ -628,21 +700,41 @@ class SourceGenerator : public Visitor {
         buffer << ")";
     }
     void Visit(IntegerLiteralNode *lpNode) override {
-        (void)lpNode;
-        auto num = std::format(
-            "{}", std::stod(std::format("{}", lpNode->value, std::numeric_limits<int64_t>::max_digits10)), std::numeric_limits<int64_t>::max_digits10
-        );
-        const auto dot = num.find('.');
-        auto resultLength = num.length();
-        if (dot != std::string::npos)
-            if (const auto lastThatIsNotZero = num.find_last_not_of('0'); lastThatIsNotZero != std::string::npos && lastThatIsNotZero >= dot)
-                resultLength = lastThatIsNotZero + (lastThatIsNotZero != dot);
-        num.resize(resultLength);
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        buffer << num;
-        buffer << 'i';
+        buffer << std::format("{}i", lpNode->value);
         if (lpNode->bUseParenthesis)
             buffer << ")";
+    }
+
+    void Visit(VectorNode *lpNode) override {
+        const float x = lpNode->x;
+        const float y = lpNode->y;
+        const float z = lpNode->z;
+
+        if (x == 0 && y == 0 && z == 0) {
+            buffer << "Vector3.zero";
+        }
+        else if (x == 1 && y == 0 && z == 0) {
+            buffer << "Vector3.xAxis";
+        }
+        else if (x == -1 && y == 0 && z == 0) {
+            buffer << "-Vector3.xAxis";
+        }
+        else if (x == 0 && y == 1 && z == 0) {
+            buffer << "Vector3.yAxis";
+        }
+        else if (x == 0 && y == -1 && z == 0) {
+            buffer << "-Vector3.yAxis";
+        }
+        else if (x == 0 && y == 0 && z == 1) {
+            buffer << "Vector3.zAxis";
+        }
+        else if (x == 0 && y == 0 && z == -1) {
+            buffer << "-Vector3.zAxis";
+        }
+        else {
+            buffer << "Vector3.new(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
+        }
     }
 };

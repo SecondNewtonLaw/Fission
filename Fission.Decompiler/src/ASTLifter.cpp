@@ -12,11 +12,18 @@
 
 // Forward declaration for the chain-fold pass used by CreateBlock below.
 static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts);
+static bool IsSelfAssign(const std::shared_ptr<Statement> &stmt);
 
 static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::shared_ptr<Statement>> &stmts) {
     auto block = std::make_shared<BlockStatementNode>();
     block->body = stmts;
     FoldShortCircuitChain(block->body);
+    for (auto it = block->body.begin(); it != block->body.end();) {
+        if (IsSelfAssign(*it))
+            it = block->body.erase(it);
+        else
+            ++it;
+    }
     return block;
 }
 
@@ -31,8 +38,18 @@ static std::optional<std::string> ExtractIdentifierName(const std::shared_ptr<Ex
     return std::nullopt;
 }
 
-// Pull the (op, lhsName, rhs) from a statement shaped like `X = X or Y` /
-// `X = X and Y`. Returns nullopt if it isn't that pattern.
+static bool IsSelfAssign(const std::shared_ptr<Statement> &stmt) {
+    auto assign = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt);
+    if (!assign)
+        return false;
+    auto lhsName = ExtractIdentifierName(assign->left);
+    if (!lhsName)
+        return false;
+    auto rhsName = ExtractIdentifierName(assign->right);
+    return rhsName.has_value() && *rhsName == *lhsName;
+}
+
+// `X = X or Y` / `X = X and Y` shape. nullopt if not that.
 struct ShortCircuitForm {
     std::string op;      // "or" or "and"
     std::string lhsName; // target identifier name on the LHS
@@ -95,9 +112,7 @@ static std::optional<ShortCircuitForm> AsShortCircuitAssign(const std::shared_pt
     return ShortCircuitForm{binary->op, *leftName, binary->right, assign->left};
 }
 
-// Drop `if cond then end` / `if cond then end else end` statements whose
-// branches are both empty and whose condition is a pure identifier read (no
-// side effects). These appear as residue after short-circuit folding.
+// drop empty `if cond then end` whose cond is a side-effect-free read. short-circuit fold residue.
 static bool IsTriviallyDeadIf(const std::shared_ptr<Statement> &stmt) {
     auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt);
     if (!ifStmt)
@@ -107,8 +122,7 @@ static bool IsTriviallyDeadIf(const std::shared_ptr<Statement> &stmt) {
     if (!thenEmpty || !elseEmpty)
         return false;
 
-    // Only drop conditions that are clearly side-effect-free: a bare identifier,
-    // or `not <identifier>`.
+    // only bare identifier or `not <identifier>`.
     auto cond = ifStmt->condition;
     if (!cond)
         return true;
@@ -296,6 +310,106 @@ static std::shared_ptr<Statement> BuildTerminalReplacement(TerminalUse terminal,
     return std::make_shared<ExpressionStatementNode>(terminal.nameCall);
 }
 
+// fold the if/else-return shape Luau emits for `return COND and PRIMARY or FALLBACK`.
+static bool FoldTerminalMixedAndOr(std::vector<std::shared_ptr<Statement>> &stmts) {
+    if (stmts.size() < 2)
+        return false;
+
+    // a phi-hoisted bare `local V` may precede the pair; skip it, erase on success.
+    size_t base = 0;
+    std::optional<std::string> hoistedLocalName;
+    if (auto leadDecl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[0]); leadDecl && leadDecl->value == nullptr) {
+        if (auto leadName = ExtractIdentifierName(leadDecl->identifier)) {
+            hoistedLocalName = *leadName;
+            base = 1;
+        }
+    }
+    if (stmts.size() < base + 2)
+        return false;
+
+    auto outerIf = std::dynamic_pointer_cast<IfStatementNode>(stmts[base]);
+    if (!outerIf || !outerIf->thenBranch || !outerIf->elseBranch)
+        return false;
+
+    auto retStmt = std::dynamic_pointer_cast<ReturnStatementNode>(stmts[base + 1]);
+    if (!retStmt || retStmt->returnValues.size() != 1)
+        return false;
+    auto retName = ExtractIdentifierName(retStmt->returnValues.front());
+    if (!retName)
+        return false;
+    const auto &V = *retName;
+
+    // skipped local must be the same var we're collapsing.
+    if (hoistedLocalName && *hoistedLocalName != V)
+        return false;
+
+    auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(outerIf->condition);
+    if (!unary || unary->op != "not ")
+        return false;
+    auto COND = unary->operand;
+
+    auto &thenBody = outerIf->thenBranch->body;
+    std::shared_ptr<Expression> fallbackValue;
+
+    if (thenBody.size() == 1) {
+        auto thenRet = std::dynamic_pointer_cast<ReturnStatementNode>(thenBody[0]);
+        if (!thenRet || thenRet->returnValues.size() != 1)
+            return false;
+        auto thenRetName = ExtractIdentifierName(thenRet->returnValues.front());
+        if (!thenRetName || *thenRetName != V)
+            return false;
+        fallbackValue = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(V));
+    } else if (thenBody.size() == 2) {
+        auto thenAsgn = AsAssignmentForm(thenBody[0]);
+        if (!thenAsgn || thenAsgn->lhsName != V)
+            return false;
+        fallbackValue = thenAsgn->rhs;
+        auto thenRet = std::dynamic_pointer_cast<ReturnStatementNode>(thenBody[1]);
+        if (!thenRet || thenRet->returnValues.size() != 1)
+            return false;
+        auto thenRetName = ExtractIdentifierName(thenRet->returnValues.front());
+        if (!thenRetName || *thenRetName != V)
+            return false;
+    } else {
+        return false;
+    }
+    if (!fallbackValue)
+        return false;
+
+    auto &elseBody = outerIf->elseBranch->body;
+    if (elseBody.size() < 2)
+        return false;
+
+    auto elseAsgn = AsAssignmentForm(elseBody[0]);
+    if (!elseAsgn || elseAsgn->lhsName != V)
+        return false;
+    auto primaryValue = elseAsgn->rhs;
+
+    auto elseIf = std::dynamic_pointer_cast<IfStatementNode>(elseBody[1]);
+    if (!elseIf || elseIf->elseBranch || !elseIf->thenBranch)
+        return false;
+    auto elseIfCondName = ExtractIdentifierName(elseIf->condition);
+    if (!elseIfCondName || *elseIfCondName != V)
+        return false;
+    auto elseIfRet = std::dynamic_pointer_cast<ReturnStatementNode>(elseIf->thenBranch->body[0]);
+    if (!elseIfRet || elseIfRet->returnValues.size() != 1)
+        return false;
+    auto elseIfRetName = ExtractIdentifierName(elseIfRet->returnValues.front());
+    if (!elseIfRetName || *elseIfRetName != V)
+        return false;
+    if (elseIf->thenBranch->body.size() != 1)
+        return false;
+
+    auto andExpr = std::make_shared<BinaryExpressionNode>("and", COND, primaryValue);
+    auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallbackValue);
+    stmts[base] = std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{orExpr});
+    stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(base) + 1);
+    // drop the redundant hoisted `local V`.
+    if (base == 1)
+        stmts.erase(stmts.begin());
+    return true;
+}
+
 static bool FoldTerminalOrChain(std::vector<std::shared_ptr<Statement>> &stmts) {
     for (size_t i = 0; i + 3 < stmts.size(); ++i) {
         auto first = AsAssignmentForm(stmts[i]);
@@ -349,15 +463,10 @@ static bool FoldTerminalOrChain(std::vector<std::shared_ptr<Statement>> &stmts) 
     return false;
 }
 
-// Walk a list of statements and fold consecutive pairs of the form
-//   X = <expr>
-//   X = X <op> <expr2>
-// into
-//   X = <expr> <op> <expr2>
-// Also drop trivially-dead `if cond then end` residues from earlier passes.
-// Runs until no more rewrites apply. Operates in place.
+// fold `X = expr; X = X <op> expr2` into `X = expr <op> expr2`, in place until fixpoint.
+// also drops trivially-dead empty `if` residue from earlier passes.
 static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts) {
-    // Pre-pass: erase trivially-dead empty `if` statements.
+    // pre-pass: erase dead empty `if`.
     for (auto it = stmts.begin(); it != stmts.end();) {
         if (IsTriviallyDeadIf(*it))
             it = stmts.erase(it);
@@ -367,13 +476,14 @@ static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts
 
     bool changed = true;
     while (changed) {
+        changed = FoldTerminalMixedAndOr(stmts);
+        if (changed)
+            continue;
         changed = FoldTerminalOrChain(stmts);
         if (changed)
             continue;
         for (size_t i = 0; i + 1 < stmts.size(); ++i) {
-            // The "first" half can be a plain assignment OR a `local x = expr`
-            // declaration; both publish a value to `x` that the next short-
-            // circuit assignment then reads back.
+            // first half: plain assign or `local x = expr` — both publish x for the next read-back.
             auto first = AsAssignmentForm(stmts[i]);
             if (!first)
                 continue;
@@ -386,33 +496,25 @@ static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts
             if (!first->isDeclaration) {
                 stmts[i] = std::make_shared<AssignmentStatementNode>(first->lhs, folded);
             } else {
-                // Preserve `local` declaration shape so naming stays correct.
+                // keep `local` shape so naming stays correct.
                 stmts[i] = std::make_shared<VariableDeclarationNode>(first->lhs, folded);
             }
             stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1);
             changed = true;
-            break; // restart so the freshly-folded statement can fold again with the next neighbor.
+            break; // restart so the folded stmt can fold with its next neighbor.
         }
     }
 }
 
-// Detect the bytecode pattern that Luau emits for short-circuit `or` / `and`
-// on the same target register and rewrite it back into a single
-// `target = target or expr` (or `... and ...`) assignment.
-//
-// Pattern (after lifting):
+// rewrite Luau's short-circuit lowering back into one assignment:
 //   if not target then target = expr end   ==>   target = target or expr
 //   if target     then target = expr end   ==>   target = target and expr
-//
-// Only the innermost level collapses in a single pass; nested chains turn into
-// multiple sibling assignments which a later pass could further fold.
+// only innermost level per pass; nested chains fold later.
 static std::shared_ptr<Statement> TryRewriteShortCircuitAssignment(const std::shared_ptr<IfStatementNode> &ifStmt) {
     if (!ifStmt || !ifStmt->thenBranch || ifStmt->elseBranch)
         return nullptr;
 
-    // The MOVE handler injects "data control flow failure" CommentNode siblings
-    // around the assignment when SSA can't see the source def. Strip comments
-    // so the fold still recognises the canonical single-assignment body shape.
+    // strip the CommentNode siblings the MOVE handler injects so the body matches.
     std::shared_ptr<AssignmentStatementNode> assign;
     for (const auto &stmt : ifStmt->thenBranch->body) {
         if (std::dynamic_pointer_cast<CommentNode>(stmt))
@@ -446,16 +548,14 @@ static std::shared_ptr<Statement> TryRewriteShortCircuitAssignment(const std::sh
     if (!condName || *condName != *leftName)
         return nullptr;
 
-    // RHS = current target read `or`/`and` the original assigned expression.
+    // rhs = target read `or`/`and` the original assigned expr.
     auto lhsRead = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*leftName));
     auto combined = std::make_shared<BinaryExpressionNode>(op, lhsRead, assign->right);
     return std::make_shared<AssignmentStatementNode>(assign->left, combined);
 }
 
-// Returns true when the SSA value at (reg, ssaVersion) has exactly one user
-// instruction and that user is a call-family op consuming the value as a
-// non-callee argument. This is the condition for inlining an anonymous
-// closure directly into the call site (`foo(function() ... end)`).
+// single-use value whose one user is a call-family op consuming it as a non-callee arg.
+// gates inlining a closure into the call site (`foo(function() ... end)`).
 static bool IsSingleUseCallArgument(AnalyzedFunction *func, int32_t reg, int32_t ssaVersion) {
     SSARef ref{static_cast<uint8_t>(reg), ssaVersion};
     auto it = func->users.find(ref);
@@ -473,15 +573,45 @@ static bool IsSingleUseCallArgument(AnalyzedFunction *func, int32_t reg, int32_t
         return false;
     }
     const int32_t calleeReg = user->operands[0].value.reg;
-    // Closure register that is the callee itself is an IIFE call, not the
-    // "passed as parameter" case the user asked about.
+    // closure being the callee itself is an IIFE, not a passed-arg.
     if (reg == calleeReg)
         return false;
-    // NAMECALL writes the auto-bound `self` to calleeReg + 1; that slot is
-    // also not a user-visible argument.
+    // NAMECALL's auto-bound `self` at calleeReg+1 isn't a user-visible arg.
     if (user->operation == LiftedOperation::NAMECALL && reg == calleeReg + 1)
         return false;
     return true;
+}
+
+// valid Luau ident (alnum + _, no leading digit). Roblox instance names may have spaces — reject those.
+static bool IsValidLuauIdent(const std::string &s) {
+    if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0])))
+        return false;
+    for (char c : s)
+        if (!std::isalnum(static_cast<unsigned char>(c)) && c != '_')
+            return false;
+    return true;
+}
+
+// single-use closure whose use is a table-field store value (`t.field = <closure>`).
+// inline into the store instead of leaking a global like `anon_43_0 = function()...`.
+static bool IsSingleUseTableFieldValue(AnalyzedFunction *func, int32_t reg, int32_t ssaVersion) {
+    SSARef ref{static_cast<uint8_t>(reg), ssaVersion};
+    auto it = func->users.find(ref);
+    if (it == func->users.end() || it->second.size() != 1)
+        return false;
+    auto *user = it->second.front();
+    if (!user || user->operands.size() < 2)
+        return false;
+    switch (user->operation) {
+    case LiftedOperation::SETTABLEKS:
+    case LiftedOperation::SETTABLE:
+    case LiftedOperation::SETTABLEN:
+        break;
+    default:
+        return false;
+    }
+    // must be the stored value (operand[0]), not the table (operand[1]).
+    return user->operands[0].value.reg == reg && user->operands[1].value.reg != reg;
 }
 
 std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Expression> &cond) {
@@ -538,9 +668,11 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     ast.backingFunction = &analyzedFunction;
     analyzedFunction.PopulateNames();
 
+    for (int32_t arg = 0; arg < analyzedFunction.lpLiftedFunction->lpDeserialized->numparams; ++arg)
+        m_definedRegisters.insert(arg);
+
     if (!analyzedFunction.basicBlocks.empty()) {
-        // Pre-scan: mark CALL instructions consumed by generic FOR loops as processed
-        // so they don't appear as redundant standalone statements.
+        // pre-scan: mark CALLs consumed by generic FOR loops processed so they don't double-emit.
         for (auto &b : analyzedFunction.basicBlocks) {
             if (b.bType != BlockType::LoopHeader)
                 continue;
@@ -549,9 +681,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 continue;
             LiftedOperation forOp = tail->operation;
 
-            // Numeric for (FORNPREP): trace start/limit/step through phis to
-            // pre-header LOADs and suppress them; their values are inlined into
-            // the for-loop header and ShouldInline refuses phi-consumed defs.
+            // FORNPREP: trace start/limit/step phis to pre-header LOADs and suppress them
+            // (inlined into the for header; ShouldInline otherwise refuses phi-consumed defs).
             if (forOp == LiftedOperation::FORNPREP) {
                 int32_t baseReg = tail->operands[0].value.reg;
                 int32_t limitVer = -1, stepVer = -1, startVer = -1;
@@ -659,7 +790,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             );
         }
 
-        ast.statements.insert(ast.statements.begin(), std::make_shared<CommentNode>(s, true));
+        // note every own-register name suffixed to dodge an upvalue collision.
+        for (const auto &renamed : analyzedFunction.disambiguatedNames)
+            ast.statements.insert(
+                ast.statements.begin(),
+                std::make_shared<CommentNode>(
+                    std::format("Fission: INFO: local '{}' has been suffixed to avoid shadowing an existing, upper scope variable.", renamed.first), true, true
+                )
+            );
+
+        // The main banner stays; the per-function info block is informational.
+        ast.statements.insert(
+            ast.statements.begin(), std::make_shared<CommentNode>(s, true, !analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain)
+        );
     }
 
     for (auto &subFunc : analyzedFunction.innerFunctions) {
@@ -747,37 +890,87 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     }
 }
 
+std::optional<uint32_t> ASTLifter::DetectInfiniteWhileLatch(uint32_t headerId, uint32_t innerLatchId) {
+    if (headerId >= m_currentFunction->basicBlocks.size())
+        return std::nullopt;
+    const auto &header = m_currentFunction->basicBlocks[headerId];
+    for (uint32_t predId : header.predecessors) {
+        if (predId == headerId || predId == innerLatchId || predId >= m_currentFunction->basicBlocks.size())
+            continue;
+        const auto &pred = m_currentFunction->basicBlocks[predId];
+        // a predecessor edge already proves pred jumps to the header; an unconditional
+        // LoopLatch with a plain JUMP is the testless back-edge of an outer `while true`.
+        if (pred.bType != BlockType::LoopLatch || pred.bTerminator != BlockTerminator::Unconditional)
+            continue;
+        if (!pred.lpTail || pred.lpTail->operation != LiftedOperation::JUMP)
+            continue;
+        return predId;
+    }
+    return std::nullopt;
+}
+
 std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited) {
     std::vector<std::shared_ptr<Statement>> nodes;
 
-    if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= m_currentFunction->basicBlocks.size())
-        return nodes;
+    // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
+    // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
+    while (true) {
+        if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= m_currentFunction->basicBlocks.size())
+            break;
 
-    // return blocks are allowed to be duplicated, as they have no successors.
-    // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
-    // fuck you luauc.
-    if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
-        if (currentBlockId == stopBlockId || visited.contains(currentBlockId))
-            return nodes;
-    }
+        // body code reaching the innermost loop exit directly == `break` (normal exit goes via latch).
+        // don't mark visited — exit is still lifted once after the loop.
+        if (!m_loopExitStack.empty() && currentBlockId == m_loopExitStack.back()) {
+            nodes.push_back(std::make_shared<BreakStatementNode>());
+            break;
+        }
 
-    if (!visited.contains(currentBlockId))
-        visited.insert(currentBlockId); // prevent double insertion product of block above.
+        // return blocks are allowed to be duplicated, as they have no successors.
+        // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
+        // fuck you luauc.
+        if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
+            if (currentBlockId == stopBlockId || visited.contains(currentBlockId))
+                break;
+        }
 
-    const auto &block = m_currentFunction->basicBlocks[currentBlockId];
+        if (!visited.contains(currentBlockId))
+            visited.insert(currentBlockId); // prevent double insertion product of block above.
 
-    auto stmts = LiftBlockInstructions(block);
+        const auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
-    switch (block.bType) {
+        auto stmts = LiftBlockInstructions(block);
+
+        // Linear continuation for the next iteration; -1 terminates the loop.
+        uint32_t nextBlockId = static_cast<uint32_t>(-1);
+
+        switch (block.bType) {
     case BlockType::IfHeader: {
         nodes.insert(nodes.end(), stmts.begin(), stmts.end()); // Body before conditional statement.
+
+        // `x = a ~= b` materialised as a LOADB diamond is not an `if`; collapse to one assign.
+        if (auto mat = DetectBooleanMaterialization(currentBlockId)) {
+            nodes.push_back(mat->assignment);
+            nextBlockId = mat->continueBlock;
+            break;
+        }
 
         if (block.ifStatementTrue.has_value() && block.ifStatementFalse.has_value()) {
             uint32_t trueIdx = block.ifStatementTrue.value();
             uint32_t falseIdx = block.ifStatementFalse.value();
+            std::shared_ptr<Expression> trueCond;
 
-            auto jumpCond = LiftCondition(block.lpTail);
-            std::shared_ptr<Expression> trueCond = jumpCond;
+            // coalesce `if a or b or c then BODY else ELSE` before merge analysis: as nested ifs,
+            // FindMergeBlock mistakes the shared BODY for the merge and clobbers sibling branches.
+            if (auto orChain = DetectOrChain(currentBlockId)) {
+                trueCond = orChain->condition;
+                trueIdx = orChain->bodyIdx;
+                falseIdx = orChain->elseIdx;
+                for (uint32_t cb : orChain->chainBlocks)
+                    visited.insert(cb);
+            } else {
+                trueCond = LiftCondition(block.lpTail);
+            }
+
             uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
 
             if (mergeIdx == (uint32_t)-1) {
@@ -796,12 +989,103 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             if (mergeIdx != (uint32_t)-1)
                 visitedCopy.insert(mergeIdx);
 
+            // snapshot regs declared BEFORE branches: HoistPhiLocals tests "already in outer scope?"
+            // against this, not the post-branch set (branch assigns would wrongly suppress the hoist).
+            const auto definedBeforeBranches = m_definedRegisters;
+
             if (mergeIdx == falseIdx) {
                 ifStmt->condition = (trueCond);
                 ifStmt->thenBranch = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
             } else if (mergeIdx == trueIdx) {
                 ifStmt->condition = InvertCondition(trueCond);
-                ifStmt->thenBranch = CreateBlock(LiftControlFlow(falseIdx, mergeIdx, visitedCopy));
+
+                // iterative build for deep `if-elseif-...-else` where every link shares one merge target
+                // (compiler dispatch trees). probe the chain depth without mutating state; only take the
+                // iterative path past the recursion-safe threshold, keeping short cases on the recursive path.
+                constexpr uint32_t kChainProbeThreshold = 64;
+                auto probeChainDepth = [&](uint32_t startId, uint32_t stopId) -> uint32_t {
+                    uint32_t depth = 0;
+                    uint32_t cur = startId;
+                    std::set<uint32_t> seen;
+                    while (cur != static_cast<uint32_t>(-1) && cur < m_currentFunction->basicBlocks.size() && !seen.contains(cur)) {
+                        seen.insert(cur);
+                        const auto &b = m_currentFunction->basicBlocks[cur];
+                        if (b.bType != BlockType::IfHeader)
+                            break;
+                        if (!b.ifStatementTrue.has_value() || !b.ifStatementFalse.has_value())
+                            break;
+                        uint32_t bt = b.ifStatementTrue.value();
+                        uint32_t bf = b.ifStatementFalse.value();
+                        uint32_t bm = FindMergeBlock(bt, bf);
+                        if (bm == static_cast<uint32_t>(-1)) {
+                            bool tR = (m_currentFunction->basicBlocks[bt].bType == BlockType::Return);
+                            bool fR = (m_currentFunction->basicBlocks[bf].bType == BlockType::Return);
+                            if (tR && !fR)
+                                bm = bf;
+                            else if (!tR && fR)
+                                bm = bt;
+                        }
+                        // Require same merge target as outer mergeIdx — this is the deep dispatch
+                        // pattern, not a generic if-then-elseif tree.
+                        if (bm != stopId || bm != bt)
+                            break;
+                        ++depth;
+                        cur = bf;
+                    }
+                    return depth;
+                };
+
+                if (probeChainDepth(falseIdx, mergeIdx) >= kChainProbeThreshold) {
+                    IfStatementNode *parentIfRaw = ifStmt.get();
+                    uint32_t chainBlockId = falseIdx;
+                    uint32_t chainStopId = mergeIdx;
+                    std::set<uint32_t> chainVisited = visitedCopy;
+                    while (true) {
+                        if (chainBlockId == static_cast<uint32_t>(-1) || chainBlockId >= m_currentFunction->basicBlocks.size())
+                            break;
+                        if (!m_loopExitStack.empty() && chainBlockId == m_loopExitStack.back())
+                            break;
+                        const auto &chainBlock = m_currentFunction->basicBlocks[chainBlockId];
+                        if (chainBlock.bType != BlockType::Return) {
+                            if (chainBlockId == chainStopId || chainVisited.contains(chainBlockId))
+                                break;
+                        }
+                        if (chainBlock.bType != BlockType::IfHeader)
+                            break;
+                        if (!chainBlock.ifStatementTrue.has_value() || !chainBlock.ifStatementFalse.has_value())
+                            break;
+                        if (DetectBooleanMaterialization(chainBlockId).has_value())
+                            break;
+                        if (DetectOrChain(chainBlockId).has_value())
+                            break;
+                        uint32_t cTrueIdx = chainBlock.ifStatementTrue.value();
+                        uint32_t cFalseIdx = chainBlock.ifStatementFalse.value();
+                        uint32_t cMergeIdx = FindMergeBlock(cTrueIdx, cFalseIdx);
+                        if (cMergeIdx == (uint32_t)-1) {
+                            bool t = (m_currentFunction->basicBlocks[cTrueIdx].bType == BlockType::Return);
+                            bool f = (m_currentFunction->basicBlocks[cFalseIdx].bType == BlockType::Return);
+                            if (t && !f)
+                                cMergeIdx = cFalseIdx;
+                            else if (!t && f)
+                                cMergeIdx = cTrueIdx;
+                        }
+                        if (cMergeIdx != chainStopId || cMergeIdx != cTrueIdx)
+                            break;
+                        chainVisited.insert(chainBlockId);
+                        auto chainStmts = LiftBlockInstructions(chainBlock);
+                        auto newIf = std::make_shared<IfStatementNode>();
+                        newIf->condition = InvertCondition(LiftCondition(chainBlock.lpTail));
+                        std::vector<std::shared_ptr<Statement>> blockBody;
+                        blockBody.insert(blockBody.end(), chainStmts.begin(), chainStmts.end());
+                        blockBody.push_back(newIf);
+                        parentIfRaw->thenBranch = CreateBlock(blockBody);
+                        parentIfRaw = newIf.get();
+                        chainBlockId = cFalseIdx;
+                    }
+                    parentIfRaw->thenBranch = CreateBlock(LiftControlFlow(chainBlockId, chainStopId, chainVisited));
+                } else {
+                    ifStmt->thenBranch = CreateBlock(LiftControlFlow(falseIdx, mergeIdx, visitedCopy));
+                }
             } else {
                 ifStmt->condition = (trueCond);
                 ifStmt->thenBranch = CreateBlock(LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
@@ -811,8 +1095,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     ifStmt->elseBranch = CreateBlock(elseStmts);
                 }
 
-                if (ifStmt->thenBranch->body.empty()) { // simplify cflow.
-                    // swap and invert.
+                // only swap when there's an else to swap in; else-less empty-then would
+                // leave thenBranch null and feed a malformed node to the fold passes.
+                if (ifStmt->thenBranch->body.empty() && ifStmt->elseBranch) {
                     std::swap(ifStmt->thenBranch, ifStmt->elseBranch);
                     ifStmt->condition = InvertCondition(trueCond);
                 }
@@ -820,13 +1105,16 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
             if (auto rewritten = TryRewriteShortCircuitAssignment(ifStmt))
                 nodes.push_back(rewritten);
-            else
+            else {
+                HoistPhiLocals(static_cast<int32_t>(mergeIdx), ifStmt, nodes, definedBeforeBranches);
                 nodes.push_back(ifStmt);
-
-            if (mergeIdx != (uint32_t)-1) {
-                auto after = LiftControlFlow(mergeIdx, stopBlockId, visited);
-                nodes.insert(nodes.end(), after.begin(), after.end());
             }
+
+            // don't fall through into the loop exit here (would inline post-loop code / emit a stray
+            // break); it's the break target and is lifted once after the loop.
+            const bool mergeIsLoopExit = !m_loopExitStack.empty() && mergeIdx == m_loopExitStack.back();
+            if (mergeIdx != (uint32_t)-1 && !mergeIsLoopExit)
+                nextBlockId = mergeIdx;
 
         } else {
             nodes.push_back(std::make_shared<CommentNode>("Fission: Warning - Malformed IfHeader", true));
@@ -834,6 +1122,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         break;
     }
     case BlockType::LoopHeader: {
+        // `while <const> do <inner loop> end`: the testless outer shares this header with the inner
+        // loop (only a back-edge). detect it so the inner loop wraps in `while true`, else it's dropped.
+        std::optional<uint32_t> infiniteWhileLatch;
+        if (block.loopLatch.has_value())
+            infiniteWhileLatch = DetectInfiniteWhileLatch(currentBlockId, *block.loopLatch);
+        const size_t loopNodesStart = nodes.size();
+
         if (block.loopLatch.has_value()) {
             uint32_t latchIdx = block.loopLatch.value();
             uint32_t exitIdx = block.loopLatch.value();
@@ -842,20 +1137,23 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
             bool isRepeatUntil = (block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop;
 
-            if (!isRepeatUntil) {
-                if (nodes.size() >= stmts.size())
-                    nodes.resize(nodes.size() - stmts.size());
-            }
-
             if (isRepeatUntil) {
-                if (block.loopExit.has_value())
+                // use recorded exit only if real; analyzer sometimes records the latch as exit.
+                // else fall back to the non-latch header successor, or post-loop stmts leak into the body.
+                if (block.loopExit.has_value() && block.loopExit.value() != latchIdx)
                     exitIdx = block.loopExit.value();
+                else {
+                    for (auto s : block.successors)
+                        if (s != latchIdx) {
+                            exitIdx = s;
+                            break;
+                        }
+                }
 
                 auto repeatNode = std::make_shared<RepeatStatementNode>();
                 auto &latch = m_currentFunction->basicBlocks[latchIdx];
 
-                // Two repeat-until patterns: condition in latch (JUMPIF) vs condition in
-                // header (latch is unconditional JUMP, header IS the body).
+                // two repeat-until shapes: cond in latch (JUMPIF) vs cond in header (latch is plain JUMP).
                 bool condInLatch = latch.lpTail && latch.lpTail->operation != LiftedOperation::JUMP;
 
                 if (condInLatch) {
@@ -866,13 +1164,63 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         stmts.insert(stmts.end(), latchStmts.begin(), latchStmts.end());
                     }
                 } else {
-                    // Pattern 2: condition at end of header block (latch is just JUMP back).
-                    // LiftCondition returns the condition that triggers the jump.
-                    // The jump target is always the loop exit (non-latch successor),
-                    // so LiftCondition IS the until-condition directly.
-                    repeatNode->condition = LiftCondition(block.lpTail);
+                    // Pattern 2: latch is plain JUMP back to header. exit cond is in the header
+                    // or decomposed into trailing if-return blocks (`until a or b`); lift body then scan.
+                    uint32_t bodyStart = static_cast<uint32_t>(-1);
+                    for (auto s : block.successors) {
+                        if (s != exitIdx) {
+                            bodyStart = s;
+                            break;
+                        }
+                    }
+
+                    std::set<uint32_t> bodyVisited = loopVisited;
+                    bodyVisited.insert(latchIdx);
+                    bodyVisited.insert(exitIdx);
+
+                    std::vector<std::shared_ptr<Statement>> bodyStmts;
+                    if (bodyStart != static_cast<uint32_t>(-1)) {
+                        bodyStmts = LiftControlFlow(bodyStart, latchIdx, bodyVisited);
+                    }
+
+                    // prepend header: in repeat-until it's also the first body block, so its
+                    // mutating defs must survive even when used by the trailing cond/return.
+                    auto headerStmts = LiftBlockInstructions(block, true);
+                    bodyStmts.insert(bodyStmts.begin(), headerStmts.begin(), headerStmts.end());
+
+                    // Append latch instructions if latch is not the current block.
+                    if (latchIdx != currentBlockId) {
+                        auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
+                        bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
+                    }
+
+                    // scan trailing if-return blocks: Luau decomposes `until a or b` into separate exit checks.
+                    std::vector<std::shared_ptr<Expression>> exitConds;
+                    while (!bodyStmts.empty()) {
+                        auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(bodyStmts.back());
+                        if (!ifStmt || ifStmt->elseBranch || !ifStmt->thenBranch)
+                            break;
+                        if (ifStmt->thenBranch->body.size() != 1)
+                            break;
+                        auto retStmt = std::dynamic_pointer_cast<ReturnStatementNode>(ifStmt->thenBranch->body[0]);
+                        if (!retStmt || retStmt->returnValues.empty())
+                            break;
+                        exitConds.push_back(ifStmt->condition);
+                        bodyStmts.pop_back();
+                    }
+
+                    if (!exitConds.empty()) {
+                        auto combined = exitConds[0];
+                        for (size_t i = 1; i < exitConds.size(); ++i) {
+                            combined = std::make_shared<BinaryExpressionNode>("or", combined, exitConds[i]);
+                        }
+                        repeatNode->condition = combined;
+                    } else {
+                        repeatNode->condition = LiftCondition(block.lpTail);
+                    }
+
+                    repeatNode->body = CreateBlock(bodyStmts);
                 }
-                repeatNode->body = CreateBlock(stmts);
                 nodes.push_back(repeatNode);
             } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
                 uint32_t bodyIdx = -1;
@@ -907,11 +1255,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 }
 
                 int baseReg = block.lpTail->operands[0].value.reg;
-                // Construct the loop variable name once, up-front, so the body lift,
-                // the header rendering and the SSA name map all agree. Using
-                // LiftExpression on the loop var register would otherwise resolve to
-                // the inlined LOADN constant (the initial value), giving the broken
-                // output `for 1 = 1, ..., 1 do` seen on InfiniteYield.
+                // name the loop var once up-front so body/header/SSA map agree. LiftExpression would
+                // resolve it to the inlined LOADN constant → broken `for 1 = 1, ..., 1 do` (InfiniteYield).
                 const std::string loopVarName = std::format("i_{}", baseReg + 2);
                 {
                     LiftedOperand op;
@@ -919,15 +1264,20 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         PinnedRegisterScope pin(this, baseReg + 2);
 
                         this->m_currentFunction->SetVariableName(baseReg + 2, startVer, loopVarName);
+                        // expose this loop's exit so body branches to it become `break` (real exit only).
+                        const bool hasBreakTarget =
+                            (exitIdx != static_cast<uint32_t>(-1) && exitIdx != latchIdx && exitIdx != bodyIdx);
+                        if (hasBreakTarget)
+                            m_loopExitStack.push_back(exitIdx);
                         forNode->lpLoopBody = CreateBlock(LiftControlFlow(
                             bodyIdx, *block.loopLatch,
                             loopVisited /* this likely we have to replace with visited, as we will else be accidentally traversing again */
                         ));
+                        if (hasBreakTarget)
+                            m_loopExitStack.pop_back();
 
-                        // Use the same string the body sees rather than going through
-                        // LiftExpression (which may inline a LOAD constant for this
-                        // register's SSA version). Route through ResolveVariableName
-                        // so its m_definedRegisters bookkeeping side-effect still runs.
+                        // use the body's string, not LiftExpression (may inline a LOAD const). route via
+                        // ResolveVariableName so its m_definedRegisters bookkeeping still runs.
                         {
                             LiftedOperand idOp{};
                             idOp.type = LiftedOperandType::Register;
@@ -942,12 +1292,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                             baseReg, block.lpTail->operands[0].ssaVersion
                         ); // clear v name or else it will not do anything good.
                     }
-                    // For-loop start/limit/step SSA versions may be phi outputs
-                    // (numeric FORNLOOP writes R(A+2) in the latch, creating a phi
-                    // at the header).  Trace through the phi to the pre-header LOAD
-                    // so the constant gets inlined, even though ShouldInline would
-                    // normally refuse because the pre-header SSA version is consumed
-                    // by the phi.
+                    // start/limit/step may be phi outputs (FORNLOOP writes R(A+2) in the latch). trace
+                    // the phi to the pre-header LOAD to inline the const (ShouldInline refuses phi-consumed).
                     auto liftLoopValue = [&](int reg, int32_t ver) -> std::shared_ptr<Expression> {
                         auto makeKey = [](int r, int32_t v) {
                             LiftedOperand k{};
@@ -989,6 +1335,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                                     return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
                                 case LUA_TSTRING:
                                     return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                                case LUA_TVECTOR: {
+                                    const auto &[x, y, z, w] = std::get<LuauVector>(k.constantData);
+                                    return std::make_shared<VectorNode>(x, y, z, w);
+                                }
                                 default:
                                     return std::make_shared<NilLiteralNode>();
                                 }
@@ -997,7 +1347,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         LiftedOperand lop;
                         lop.type = LiftedOperandType::Register;
                         lop.value.reg = reg;
-                        lop.ssaVersion = ver;
+                        lop.ssaVersion = effectiveVer;
                         return LiftExpression(lop, true);
                     };
 
@@ -1009,8 +1359,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
                 auto whileNode = std::make_shared<WhileStatementNode>();
 
-                whileNode->condition = InvertCondition(LiftCondition(block.lpTail));
-
                 if (block.loopExit.has_value())
                     exitIdx = block.loopExit.value();
 
@@ -1019,20 +1367,41 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     if (s != exitIdx)
                         bodyStart = s;
 
+                // header with stmts before its exit test: folding the test into the cond would reorder
+                // it ahead of them. keep `while true` and emit the test as a `break` at its real spot.
+                const bool headerHasBody = !stmts.empty();
+                // a header with no conditional exit (unconditional back-edge, or fallthrough into
+                // the body) has no test == infinite `while true`; LiftCondition on its
+                // non-comparison tail would yield `false`, rendering `while not false`.
+                const bool infiniteWhile = block.bTerminator != BlockTerminator::Conditional;
+                if (headerHasBody || infiniteWhile)
+                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                else
+                    whileNode->condition = InvertCondition(LiftCondition(block.lpTail));
+
                 if (bodyStart != static_cast<uint32_t>(-1)) {
                     std::set<uint32_t> cloopVisited = visited;
                     cloopVisited.insert(latchIdx);
                     cloopVisited.insert(exitIdx);
+                    const bool hasBreakTarget = (exitIdx != static_cast<uint32_t>(-1) && exitIdx != latchIdx && exitIdx != bodyStart);
+                    if (hasBreakTarget)
+                        m_loopExitStack.push_back(exitIdx);
                     auto bodyStmts = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
+                    if (hasBreakTarget)
+                        m_loopExitStack.pop_back();
 
                     if (latchIdx != currentBlockId) {
                         auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
                         bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
                     }
 
-                    // The header block may contain body instructions before
-                    // the conditional terminator (e.g., `while true do` with
-                    // `x += 1` before the break-condition). Prepend them.
+                    if (headerHasBody) {
+                        // header body → `if <exit cond> then break end` → rest of body.
+                        auto breakIf = std::make_shared<IfStatementNode>();
+                        breakIf->condition = LiftCondition(block.lpTail);
+                        breakIf->thenBranch = CreateBlock({std::make_shared<BreakStatementNode>()});
+                        bodyStmts.insert(bodyStmts.begin(), breakIf);
+                    }
                     bodyStmts.insert(bodyStmts.begin(), stmts.begin(), stmts.end());
                     whileNode->body = CreateBlock(bodyStmts);
                 } else {
@@ -1080,7 +1449,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         }
                     }
 
+                    const bool hasBreakTarget =
+                        (exitIdx != static_cast<uint32_t>(-1) && exitIdx != block.loopLatch.value_or(-1) && exitIdx != bodyIdx);
+                    if (hasBreakTarget)
+                        m_loopExitStack.push_back(exitIdx);
                     forNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+                    if (hasBreakTarget)
+                        m_loopExitStack.pop_back();
 
                     for (int i = 0; i < numVars; ++i) {
                         LiftedOperand varOp;
@@ -1126,13 +1501,30 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         op.value.reg = baseReg + 2;
                         op.ssaVersion = indexVer;
                         forNode->index = LiftExpression(op, false);
+
+                        // `for k,v in t do` lowers to [t, nil, nil] (Luau pads to 3). the nil state/control
+                        // aren't idiomatic/portable, so collapse to the single-generator form.
+                        if (std::dynamic_pointer_cast<NilLiteralNode>(forNode->state) &&
+                            std::dynamic_pointer_cast<NilLiteralNode>(forNode->index)) {
+                            forNode->state = nullptr;
+                            forNode->index = nullptr;
+                        }
                     }
                 }
                 nodes.push_back(forNode);
             }
 
-            auto after = LiftControlFlow(exitIdx, stopBlockId, visited);
-            nodes.insert(nodes.end(), after.begin(), after.end());
+            nextBlockId = exitIdx;
+        }
+
+        if (infiniteWhileLatch.has_value() && nodes.size() > loopNodesStart) {
+            std::vector<std::shared_ptr<Statement>> loopBody(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
+            nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
+            auto whileNode = std::make_shared<WhileStatementNode>();
+            whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+            whileNode->body = CreateBlock(loopBody);
+            nodes.push_back(whileNode);
+            nextBlockId = static_cast<uint32_t>(-1); // infinite loop: nothing after the back-edge is reachable.
         }
         break;
     }
@@ -1150,20 +1542,22 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             repeatNode->condition = InvertCondition(LiftCondition(block.lpTail));
             repeatNode->body = CreateBlock(stmts);
             nodes.push_back(repeatNode);
-            auto after = LiftControlFlow(block.loopExit.value(), stopBlockId, visited);
-            nodes.insert(nodes.end(), after.begin(), after.end());
+            nextBlockId = block.loopExit.value();
         } else {
             nodes.insert(nodes.end(), stmts.begin(), stmts.end());
         }
         break;
     default: {
         nodes.insert(nodes.end(), stmts.begin(), stmts.end());
-        if (!block.successors.empty()) {
-            auto next = LiftControlFlow(block.successors[0], stopBlockId, visited);
-            nodes.insert(nodes.end(), next.begin(), next.end());
-        }
+        if (!block.successors.empty())
+            nextBlockId = block.successors[0];
         break;
     }
+    }
+
+        if (nextBlockId == static_cast<uint32_t>(-1))
+            break;
+        currentBlockId = nextBlockId;
     }
 
     // Fold consecutive `X = expr; X = X or expr2` pairs at this level so chains
@@ -1173,7 +1567,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     return nodes;
 }
 
-std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const BasicBlock &block) {
+std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const BasicBlock &block, bool forceDefinitions) {
     std::vector<std::shared_ptr<Statement>> statements;
     if (!block.lpHead)
         return statements;
@@ -1184,7 +1578,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
         const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
 
-        if (ShouldInline(&inst))
+        if (!forceDefinitions && ShouldInline(&inst))
             continue;
 
         switch (inst.operation) {
@@ -1264,7 +1658,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                         if (!identExpr)
                             continue;
                         const auto &methodName = identExpr->identifier->name;
-                        if (methodName == "FindFirstChild" || methodName == "GetService") {
+                        // `:FindFirstChild`/`:GetService`/`:WaitForChild` name their result after the child.
+                        if (methodName == "FindFirstChild" || methodName == "GetService" || methodName == "WaitForChild") {
                             if (!m_currentFunction->implicitUses.contains(&inst))
                                 continue;
                             const auto &argVersions = m_currentFunction->implicitUses.at(&inst);
@@ -1275,8 +1670,21 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                                 op.value.reg = inst.operands[0].value.reg + 1 + 1 /* arg1 */;
                                 op.ssaVersion = argVersions[1];
                                 auto expr = LiftExpression(op, true);
-                                if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr); str)
+                                if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr); str && IsValidLuauIdent(str->value))
                                     this->m_currentFunction->SetVariableName(ref.regIndex, ref.version, str->value);
+                            }
+                        }
+                    } else if (auto callNode = std::dynamic_pointer_cast<CallExpressionNode>(callExpr)) {
+                        // `require(path:WaitForChild("Module"))` names the result after the child.
+                        auto callee = std::dynamic_pointer_cast<IdentifierExpressionNode>(callNode->callee);
+                        if (callee && callee->identifier && callee->identifier->name == "require" && callNode->arguments.size() == 1) {
+                            if (auto argCall = std::dynamic_pointer_cast<NameCallExpressionNode>(callNode->arguments[0])) {
+                                auto m = std::dynamic_pointer_cast<IdentifierExpressionNode>(argCall->callWhat);
+                                const bool childLookup =
+                                    m && m->identifier && (m->identifier->name == "WaitForChild" || m->identifier->name == "FindFirstChild");
+                                if (childLookup && argCall->arguments.size() == 1)
+                                    if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(argCall->arguments[0]); str && IsValidLuauIdent(str->value))
+                                        this->m_currentFunction->SetVariableName(ref.regIndex, ref.version, str->value);
                             }
                         }
                     }
@@ -1315,24 +1723,20 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId) {
                     targetFunc = &inner;
                     targetFunc->PopulateNames(); // populate to prevent bad usages.
+                    // disambiguate this nested fn's own vN/argN from the upvalues it captures.
+                    targetFunc->nameSuffix = std::format("_{}", duplicatedFunction->bytecodeId);
                     break;
                 }
             }
 
-            // Walk the CAPTURE instructions trailing this closure and decide,
-            // for each, whether the upvalue can be "propagated" — i.e. whether
-            // we can simply rename the outer register's value to the upvalue's
-            // debug name instead of emitting a redundant `local up = source`
-            // declaration. Propagation requires:
-            //   * a debug name is known for the upvalue
-            //   * the capture is VAL (0) or REF (1) — i.e. captures a local
-            //     register in this scope rather than chaining an upvalue
-            //   * the source operand is a register (not a constant or chain).
+            // walk trailing CAPTUREs; "propagate" = rename the source reg to the upvalue's debug name
+            // instead of emitting `local up = source`. needs: debug name + VAL/REF capture + register source.
             struct CaptureAction {
                 LiftedInstruction *capInst;
                 std::string upName;
                 bool hasDebugName;
                 bool willPropagate;
+                bool shouldEmit;
             };
             std::vector<CaptureAction> captureActions;
 
@@ -1349,33 +1753,43 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                 const int captureMode = cap.operands[0].value.imm.n;
                 const bool srcIsRegister = cap.operands.size() >= 2 && cap.operands[1].type == LiftedOperandType::Register;
+                // VAL/REF capture's upvalue IS its source local (VAL = stable snapshot, REF = shared cell).
+                // alias to the source's name, never emit `local uv_N = source`: those collide across
+                // sibling closures (all number from 0) and, for REF, desync later writes.
+                if ((captureMode == 0 || captureMode == 1) && !action.hasDebugName && srcIsRegister)
+                    action.upName = m_currentFunction->GetVarName(cap.operands[1].value.reg, cap.operands[1].ssaVersion);
+
+                // with a debug name, rename the source reg too so both read the meaningful name.
                 action.willPropagate = action.hasDebugName && (captureMode == 0 || captureMode == 1) && srcIsRegister;
+                action.shouldEmit = false; // captures are aliased, never copied
+
+                // resolve the closure's GETUPVAL: VAL/REF (0/1) → alias above; LCT_UPVAL (2) → parent's
+                // upvalue at that index. override survives the sub-lift's PopulateNames().
+                if ((captureMode == 0 || captureMode == 1) && srcIsRegister && targetFunc)
+                    targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), action.upName);
+                else if (captureMode == 2 && targetFunc)
+                    targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), m_currentFunction->GetUpvalueName(cap.operands[1].value.reg));
 
                 captureActions.push_back(action);
                 m_processedInstructions.insert(i + 1 + capIdx);
                 ++capIdx;
             }
 
-            // Apply renames before lifting any sub-expressions so neighbour
-            // captures (and the inner function lift below) see the same names.
-            // Write directly into ssaOverrides because it takes priority over
-            // globalRegNames (which holds the default `argN` parameter name);
-            // SetVariableName goes into the lowest-priority variableNames map
-            // and would be silently shadowed for argument registers.
+            // apply renames before lifting sub-exprs so neighbours/inner-lift agree. write ssaOverrides
+            // directly (beats globalRegNames' default `argN`); SetVariableName is lowest-priority and
+            // would be shadowed for arg registers.
             for (const auto &act : captureActions) {
                 if (!act.willPropagate)
                     continue;
                 const auto &srcOp = act.capInst->operands[1];
                 m_currentFunction->ssaOverrides[SSARef{static_cast<uint8_t>(srcOp.value.reg), srcOp.ssaVersion}] = act.upName;
-                statements.push_back(std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true));
+                statements.push_back(std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true));
             }
 
-            // Emit explicit `local up = expr` only for captures that could not
-            // be propagated. Skip the marker comments entirely when nothing
-            // would print between them.
+            // emit `local up = expr` only for non-propagated captures; skip marker comments if none.
             bool anyEmit = false;
             for (const auto &act : captureActions)
-                if (!act.willPropagate) {
+                if (act.shouldEmit) {
                     anyEmit = true;
                     break;
                 }
@@ -1383,14 +1797,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (anyEmit) {
                 statements.push_back(
                     std::make_shared<CommentNode>(
-                        std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true
+                        std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true, true
                     )
                 );
                 for (const auto &act : captureActions) {
-                    if (act.willPropagate)
+                    if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true)
+                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true)
                     );
                     statements.push_back(
                         std::make_shared<VariableDeclarationNode>(
@@ -1400,7 +1814,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 }
                 statements.push_back(
                     std::make_shared<CommentNode>(
-                        std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true
+                        std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true, true
                     )
                 );
             }
@@ -1422,10 +1836,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     argName = std::format("a{}", j);
 
                 auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
-                if (duplicatedFunction->typeinfo.size() > static_cast<uint32_t>(j)) {
-                    auto n = Deserializer::GetTypeName(duplicatedFunction, j);
+                if (auto n = Deserializer::TryGetTypeName(duplicatedFunction, j)) {
                     argNames[j] =
-                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(n)));
+                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n)));
                 } else {
                     argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
@@ -1448,7 +1861,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // If the closure has a single use that is a call argument, park
             // it in the inline-substitution map and skip emitting a top-level
             // `local function name(...) ... end` declaration entirely.
-            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
+            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion) ||
+                IsSingleUseTableFieldValue(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
@@ -1498,6 +1912,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == proto->bytecodeId) {
                     targetFunc = &inner;
                     targetFunc->PopulateNames(); // populate to prevent bad usages.
+                    // Disambiguate this nested function's own vN/argN names from the
+                    // upvalues it captures (which read as the enclosing scope's names).
+                    targetFunc->nameSuffix = std::format("_{}", proto->bytecodeId);
                     break;
                 }
             }
@@ -1508,6 +1925,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 std::string upName;
                 bool hasDebugName;
                 bool willPropagate;
+                bool shouldEmit;
             };
             std::vector<CaptureAction> captureActions;
 
@@ -1524,7 +1942,22 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                 const int captureMode = cap.operands[0].value.imm.n;
                 const bool srcIsRegister = cap.operands.size() >= 2 && cap.operands[1].type == LiftedOperandType::Register;
+                // VAL/REF capture's upvalue IS its source local (VAL = stable snapshot, REF = shared cell).
+                // alias to the source's name, never emit `local uv_N = source`: those collide across
+                // sibling closures (all number from 0) and, for REF, desync later writes.
+                if ((captureMode == 0 || captureMode == 1) && !action.hasDebugName && srcIsRegister)
+                    action.upName = m_currentFunction->GetVarName(cap.operands[1].value.reg, cap.operands[1].ssaVersion);
+
+                // with a debug name, rename the source reg too so both read the meaningful name.
                 action.willPropagate = action.hasDebugName && (captureMode == 0 || captureMode == 1) && srcIsRegister;
+                action.shouldEmit = false; // captures are aliased, never copied
+
+                // resolve the closure's GETUPVAL: VAL/REF (0/1) → alias above; LCT_UPVAL (2) → parent's
+                // upvalue at that index. override survives the sub-lift's PopulateNames().
+                if ((captureMode == 0 || captureMode == 1) && srcIsRegister && targetFunc)
+                    targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), action.upName);
+                else if (captureMode == 2 && targetFunc)
+                    targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), m_currentFunction->GetUpvalueName(cap.operands[1].value.reg));
 
                 captureActions.push_back(action);
                 m_processedInstructions.insert(i + 1 + capIdx);
@@ -1537,25 +1970,25 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     continue;
                 const auto &srcOp = act.capInst->operands[1];
                 m_currentFunction->ssaOverrides[SSARef{static_cast<uint8_t>(srcOp.value.reg), srcOp.ssaVersion}] = act.upName;
-                statements.push_back(std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true));
+                statements.push_back(std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true));
             }
 
             bool anyEmit = false;
             for (const auto &act : captureActions)
-                if (!act.willPropagate) {
+                if (act.shouldEmit) {
                     anyEmit = true;
                     break;
                 }
 
             if (anyEmit) {
                 statements.push_back(
-                    std::make_shared<CommentNode>(std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(proto)), true)
+                    std::make_shared<CommentNode>(std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(proto)), true, true)
                 );
                 for (const auto &act : captureActions) {
-                    if (act.willPropagate)
+                    if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true)
+                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true)
                     );
                     statements.push_back(
                         std::make_shared<VariableDeclarationNode>(
@@ -1564,7 +1997,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     );
                 }
                 statements.push_back(
-                    std::make_shared<CommentNode>(std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true)
+                    std::make_shared<CommentNode>(std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true, true)
                 );
             }
 
@@ -1580,10 +2013,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     argName = std::format("a{}", j);
 
                 auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
-                if (proto->typeinfo.size() > static_cast<uint32_t>(j)) {
-                    auto n = Deserializer::GetTypeName(proto, j);
+                if (auto n = Deserializer::TryGetTypeName(proto, j)) {
                     argNames[j] =
-                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(n)));
+                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n)));
                 } else {
                     argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
@@ -1601,9 +2033,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             auto &saveWhere = inst.operands[0];
 
-            // See DUPCLOSURE: single-use call-arg closures collapse to inline
-            // `function(...) ... end` substituted at the call site.
-            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
+            // See DUPCLOSURE: single-use call-arg / table-field closures collapse
+            // to an inline `function(...) ... end` substituted at the use site.
+            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion) ||
+                IsSingleUseTableFieldValue(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
@@ -1654,6 +2087,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
             auto val = LiftExpression(inst.operands[1], false);
 
+            if (auto valId = std::dynamic_pointer_cast<IdentifierExpressionNode>(val); valId && valId->identifier) {
+                if (target->identifier->name == valId->identifier->name)
+                    break;
+            }
+
             if (isNewDef)
                 statements.push_back(std::make_shared<VariableDeclarationNode>(target, val));
             else
@@ -1661,6 +2099,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             break;
         }
 
+        case LiftedOperation::SETUPVAL: {
+            auto upname = m_currentFunction->GetUpvalueName(inst.operands[1].value.imm.n);
+            auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(upname));
+            statements.push_back(std::make_shared<AssignmentStatementNode>(left, LiftExpression(inst.operands[0])));
+            break;
+        }
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             break;
@@ -1671,13 +2115,30 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (inst.operands[0].type != LiftedOperandType::Register)
                 break;
 
+            if (forceDefinitions && block.lpTail && inst.operation == LiftedOperation::LOAD) {
+                SSARef defRef{inst.operands[0].value.reg, inst.operands[0].ssaVersion};
+                if (m_currentFunction->users.contains(defRef)) {
+                    const auto &users = m_currentFunction->users.at(defRef);
+                    bool onlyFeedsTerminator = !users.empty();
+                    for (const auto *user : users) {
+                        if (user != block.lpTail) {
+                            onlyFeedsTerminator = false;
+                            break;
+                        }
+                    }
+                    if (onlyFeedsTerminator)
+                        break;
+                }
+            }
+
             const auto *def = m_currentFunction->GetDefinition(inst.operands[0]);
             if (def == &inst) {
                 auto isDefined = m_definedRegisters.contains(inst.operands[0].value.reg);
                 auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
                 auto val = LiftExpression(inst.operands[0], true);
 
-                if (inst.operands[0].ssaVersion <= 1 || !isDefined)
+                const bool isParameterWrite = inst.operands[0].value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
+                if ((inst.operands[0].ssaVersion <= 1 && !isParameterWrite) || !isDefined)
                     statements.push_back(std::make_shared<VariableDeclarationNode>(target, val));
                 else {
                     if (val->nodeKind == ASTNodeKind::BinaryExpression) {
@@ -1694,6 +2155,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                     statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
                 }
+                if (forceDefinitions)
+                    m_processedInstructions.insert(inst.instructionIndex);
             }
             break;
         }
@@ -1742,7 +2205,28 @@ bool ASTLifter::CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, co
     return false;
 }
 
-std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &operand, bool forceExpression) {
+std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__operand, bool forceExpression) {
+    // Walk MOVE chains iteratively. Chains like `MOVE r1<-r0; MOVE r2<-r1; ...` would
+    // otherwise tail-recurse one frame per hop, blowing the stack on deep copy fans.
+    LiftedOperand operand = __operand;
+    while (true) {
+        if (operand.type != LiftedOperandType::Register)
+            break;
+        if (m_pinnedRegisters.contains(operand.value.reg))
+            return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
+        SSARef closureRef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion};
+        if (m_inlineableClosures.contains(closureRef))
+            break;
+        const auto *moveDef = m_currentFunction->GetDefinition(operand);
+        if (!moveDef || moveDef->operation != LiftedOperation::MOVE)
+            break;
+        if (m_processedInstructions.contains(moveDef->instructionIndex))
+            break;
+        if (!forceExpression && !ShouldInline(moveDef))
+            break;
+        operand = moveDef->operands[1];
+    }
+
     if (operand.type == LiftedOperandType::Register && m_pinnedRegisters.contains(operand.value.reg)) {
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
     }
@@ -1776,8 +2260,14 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
             return std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
         case LUA_TNUMBER:
             return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+        case LUA_TINTEGER:
+            return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
         case LUA_TSTRING:
             return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+        case LUA_TVECTOR: {
+            const auto &[x, y, z, w] = std::get<LuauVector>(k.constantData);
+            return std::make_shared<VectorNode>(x, y, z, w);
+        }
         default:
             return std::make_shared<NilLiteralNode>();
         }
@@ -1787,6 +2277,9 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
 
     if (def && def->operation == LiftedOperation::GETVARARGS)
         return std::make_shared<VarArgExpression>();
+
+    if (def && m_processedInstructions.contains(def->instructionIndex))
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
 
     if (!def || (!forceExpression && !ShouldInline(def))) {
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand)));
@@ -1812,77 +2305,100 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
                 return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
             case LUA_TSTRING:
                 return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+            case LUA_TVECTOR: {
+                const auto &[x, y, z, w] = std::get<LuauVector>(k.constantData);
+                return std::make_shared<VectorNode>(x, y, z, w);
+            }
             default:
                 return std::make_shared<NilLiteralNode>();
             }
         }
     }
 
-    switch (def->operation) {
-    case LiftedOperation::ADD:
-        return std::make_shared<BinaryExpressionNode>("+", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::SUB:
-        return std::make_shared<BinaryExpressionNode>("-", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::MUL:
-        return std::make_shared<BinaryExpressionNode>("*", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::DIV:
-        return std::make_shared<BinaryExpressionNode>("/", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::MOD:
-        return std::make_shared<BinaryExpressionNode>("%", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::POW:
-        return std::make_shared<BinaryExpressionNode>("^", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::AND:
-        return std::make_shared<BinaryExpressionNode>("and", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-    case LiftedOperation::OR:
-        return std::make_shared<BinaryExpressionNode>("or", LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-
-    case LiftedOperation::ADDK:
-    case LiftedOperation::SUBK:
-    case LiftedOperation::MULK:
-    case LiftedOperation::DIVK:
-    case LiftedOperation::MODK:
-    case LiftedOperation::ANDK:
-    case LiftedOperation::ORK:
-    case LiftedOperation::POWK: {
-        std::string op = "+";
-        if (def->operation == LiftedOperation::SUBK)
-            op = "-";
-        else if (def->operation == LiftedOperation::MULK)
-            op = "*";
-        else if (def->operation == LiftedOperation::DIVK)
-            op = "/";
-        else if (def->operation == LiftedOperation::MODK)
-            op = "%";
-        else if (def->operation == LiftedOperation::POWK)
-            op = "^";
-        else if (def->operation == LiftedOperation::ANDK)
-            op = "and";
-        else if (def->operation == LiftedOperation::ORK)
-            op = "or";
-
-        auto left = LiftExpression(def->operands[1]);
-        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[2].value.imm.k];
-        std::shared_ptr<Expression> right;
-        switch (k.kType) {
-        case LUA_TNIL:
-            right = std::make_shared<NilLiteralNode>();
-            break;
-        case LUA_TBOOLEAN:
-            right = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
-            break;
-        case LUA_TNUMBER:
-            right = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
-            break;
-        case LUA_TSTRING:
-            right = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
-            break;
-        default:
-            right = std::make_shared<NilLiteralNode>();
-            break;
+    // Chained binops `a+b+c+d+...` are left-leaning ADD(ADD(ADD(...),c),d). Recursing left
+    // gave one stack frame per link → blew the stack on obfuscated arithmetic. Walk the spine
+    // iteratively, collecting (op, rightExpr) pairs, then fold up.
+    auto opSymbol = [](LiftedOperation o) -> const char * {
+        switch (o) {
+        case LiftedOperation::ADD: case LiftedOperation::ADDK: return "+";
+        case LiftedOperation::SUB: case LiftedOperation::SUBK: return "-";
+        case LiftedOperation::MUL: case LiftedOperation::MULK: return "*";
+        case LiftedOperation::DIV: case LiftedOperation::DIVK: return "/";
+        case LiftedOperation::MOD: case LiftedOperation::MODK: return "%";
+        case LiftedOperation::POW: case LiftedOperation::POWK: return "^";
+        case LiftedOperation::AND: case LiftedOperation::ANDK: return "and";
+        case LiftedOperation::OR:  case LiftedOperation::ORK:  return "or";
+        default: return nullptr;
         }
+    };
+    auto isBinaryK = [](LiftedOperation o) {
+        return o == LiftedOperation::ADDK || o == LiftedOperation::SUBK || o == LiftedOperation::MULK ||
+               o == LiftedOperation::DIVK || o == LiftedOperation::MODK || o == LiftedOperation::POWK ||
+               o == LiftedOperation::ANDK || o == LiftedOperation::ORK;
+    };
+    auto resolveKConstant = [&](int32_t kIdx) -> std::shared_ptr<Expression> {
+        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
+        switch (k.kType) {
+        case LUA_TNIL: return std::make_shared<NilLiteralNode>();
+        case LUA_TBOOLEAN: return std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+        case LUA_TNUMBER: return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+        case LUA_TINTEGER: return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
+        case LUA_TSTRING: return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+        case LUA_TVECTOR: {
+            const auto &[x, y, z, w] = std::get<LuauVector>(k.constantData);
+            return std::make_shared<VectorNode>(x, y, z, w);
+        }
+        default: return std::make_shared<NilLiteralNode>();
+        }
+    };
 
-        return std::make_shared<BinaryExpressionNode>(op, left, right);
+    if (opSymbol(def->operation) != nullptr) {
+        std::vector<std::pair<const char *, std::shared_ptr<Expression>>> rights;
+        const LiftedInstruction *curDef = def;
+        LiftedOperand leftLeafOperand{};
+        bool leftLeafSet = false;
+        while (true) {
+            const char *sym = opSymbol(curDef->operation);
+            std::shared_ptr<Expression> rightExpr;
+            if (isBinaryK(curDef->operation))
+                rightExpr = resolveKConstant(curDef->operands[2].value.imm.k);
+            else
+                rightExpr = LiftExpression(curDef->operands[2]);
+            rights.emplace_back(sym, rightExpr);
+
+            const auto &leftOp = curDef->operands[1];
+            if (leftOp.type != LiftedOperandType::Register) {
+                leftLeafOperand = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            if (m_pinnedRegisters.contains(leftOp.value.reg)) {
+                leftLeafOperand = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            SSARef leftRef{static_cast<uint8_t>(leftOp.value.reg), leftOp.ssaVersion};
+            if (m_inlineableClosures.contains(leftRef)) {
+                leftLeafOperand = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            const auto *leftDef = m_currentFunction->GetDefinition(leftOp);
+            if (!leftDef || m_processedInstructions.contains(leftDef->instructionIndex) || !ShouldInline(leftDef) ||
+                opSymbol(leftDef->operation) == nullptr) {
+                leftLeafOperand = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            curDef = leftDef;
+        }
+        std::shared_ptr<Expression> expr = leftLeafSet ? LiftExpression(leftLeafOperand) : std::make_shared<NilLiteralNode>();
+        for (auto it = rights.rbegin(); it != rights.rend(); ++it)
+            expr = std::make_shared<BinaryExpressionNode>(it->first, expr, it->second);
+        return expr;
     }
+
+    switch (def->operation) {
 
     case LiftedOperation::NOT:
         return std::make_shared<UnaryExpressionNode>("not " /* not is extra space. */, LiftExpression(def->operands[1]));
@@ -1992,11 +2508,64 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
         return curr;
     }
     case LiftedOperation::GETTABLE:
-        return std::make_shared<IndexExpressionNode>(LiftExpression(def->operands[1]), LiftExpression(def->operands[2]));
-
     case LiftedOperation::GETTABLEKS: {
-        const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[def->operands[2].value.imm.k];
-        return std::make_shared<MemberExpressionNode>(LiftExpression(def->operands[1]), std::get<std::string>(k.constantData));
+        // Walk member chains `a.b.c.d.e.f` iteratively. Each GETTABLE(KS) takes operands[1]
+        // as the base; recursing left stacks one frame per dotted hop.
+        struct Hop {
+            bool isKeyed;
+            std::shared_ptr<Expression> indexExpr;
+            std::string memberName;
+        };
+        std::vector<Hop> hops;
+        const LiftedInstruction *curDef = def;
+        LiftedOperand leftLeafOp{};
+        bool leftLeafSet = false;
+        while (true) {
+            Hop hop{};
+            if (curDef->operation == LiftedOperation::GETTABLEKS) {
+                hop.isKeyed = false;
+                const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[curDef->operands[2].value.imm.k];
+                hop.memberName = std::get<std::string>(k.constantData);
+            } else {
+                hop.isKeyed = true;
+                hop.indexExpr = LiftExpression(curDef->operands[2]);
+            }
+            hops.push_back(std::move(hop));
+
+            const auto &leftOp = curDef->operands[1];
+            if (leftOp.type != LiftedOperandType::Register) {
+                leftLeafOp = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            if (m_pinnedRegisters.contains(leftOp.value.reg)) {
+                leftLeafOp = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            SSARef lr{static_cast<uint8_t>(leftOp.value.reg), leftOp.ssaVersion};
+            if (m_inlineableClosures.contains(lr)) {
+                leftLeafOp = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            const auto *leftDef = m_currentFunction->GetDefinition(leftOp);
+            if (!leftDef || m_processedInstructions.contains(leftDef->instructionIndex) || !ShouldInline(leftDef) ||
+                (leftDef->operation != LiftedOperation::GETTABLE && leftDef->operation != LiftedOperation::GETTABLEKS)) {
+                leftLeafOp = leftOp;
+                leftLeafSet = true;
+                break;
+            }
+            curDef = leftDef;
+        }
+        std::shared_ptr<Expression> expr = leftLeafSet ? LiftExpression(leftLeafOp) : std::make_shared<NilLiteralNode>();
+        for (auto it = hops.rbegin(); it != hops.rend(); ++it) {
+            if (it->isKeyed)
+                expr = std::make_shared<IndexExpressionNode>(expr, it->indexExpr);
+            else
+                expr = std::make_shared<MemberExpressionNode>(expr, it->memberName);
+        }
+        return expr;
     }
 
     default:
@@ -2005,15 +2574,22 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &opera
 }
 
 std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested) {
-    if ((inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) && instructionIndex >= 2) {
-        const auto &prev = m_currentFunction->lpLiftedFunction->instructions[instructionIndex - 2];
-        if (prev.operation == LiftedOperation::NAMECALL && prev.operands[0].value.reg == inst.operands[0].value.reg) {
-            return LiftCall(prev, instructionIndex - 2, isNested);
-        }
+    // Iterative tail-fold: a NAMECALL emitted right before a CALL on the same base reg
+    // is the real call site. Walk back through any stacked pairs without recursing.
+    const LiftedInstruction *curInst = &inst;
+    int32_t curIdx = instructionIndex;
+    while ((curInst->operation == LiftedOperation::CALL || curInst->operation == LiftedOperation::CALLFB) && curIdx >= 2) {
+        const auto &prev = m_currentFunction->lpLiftedFunction->instructions[curIdx - 2];
+        if (prev.operation != LiftedOperation::NAMECALL || prev.operands[0].value.reg != curInst->operands[0].value.reg)
+            break;
+        curInst = &prev;
+        curIdx -= 2;
     }
+    const LiftedInstruction &resolvedInst = *curInst;
+    const int32_t resolvedIdx = curIdx;
 
-    bool isNameCall = (inst.operation == LiftedOperation::NAMECALL);
-    int32_t callInfoIndex = isNameCall ? instructionIndex + 2 : instructionIndex;
+    bool isNameCall = (resolvedInst.operation == LiftedOperation::NAMECALL);
+    int32_t callInfoIndex = isNameCall ? resolvedIdx + 2 : resolvedIdx;
 
     if (static_cast<size_t>(callInfoIndex) >= m_currentFunction->lpLiftedFunction->instructions.size())
         return std::make_shared<NilLiteralNode>();
@@ -2026,9 +2602,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     bool isVararg = false;
 
     if (isNameCall)
-        callee = LiftExpression(inst.operands[1], false);
+        callee = LiftExpression(resolvedInst.operands[1], false);
     else
-        callee = LiftExpression(inst.operands[0], false);
+        callee = LiftExpression(resolvedInst.operands[0], false);
 
     if (callee->nodeKind == ASTNodeKind::LiteralValue) {
         auto literal = std::dynamic_pointer_cast<LiteralNode>(callee);
@@ -2068,7 +2644,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
         }
     }
 
-    int32_t prevIdx = instructionIndex - 1;
+    int32_t prevIdx = resolvedIdx - 1;
     if (prevIdx >= 0) {
         const auto &prevInst = m_currentFunction->lpLiftedFunction->instructions[prevIdx];
         if (prevInst.operation == LiftedOperation::CALL && prevInst.operands[2].value.imm.n == 0) {
@@ -2081,7 +2657,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
 
     std::vector<std::shared_ptr<Expression>> rets;
     if (isNameCall) {
-        auto kIdx = inst.operands[2].value.imm.k;
+        auto kIdx = resolvedInst.operands[2].value.imm.k;
         std::string method = std::get<std::string>(m_currentFunction->lpLiftedFunction->lpDeserialized->constants.at(kIdx).constantData);
 
         return std::make_shared<NameCallExpressionNode>(
@@ -2092,23 +2668,114 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     }
 }
 
+static bool IsLegalLuauIdentifier(const std::string &str) {
+    if (str.empty() || std::isdigit(static_cast<unsigned char>(str.front())))
+        return false;
+    return std::ranges::all_of(str, [](char c) {
+        auto uc = static_cast<unsigned char>(c);
+        return std::isalnum(uc) || uc == '_';
+    });
+}
+
+static std::shared_ptr<Expression> MakeTableKey(const std::string &keyStr) {
+    if (IsLegalLuauIdentifier(keyStr))
+        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(keyStr));
+    return std::make_shared<StringLiteralNode>(keyStr);
+}
+
 std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst) {
     std::vector<std::shared_ptr<Expression>> elements;
     std::vector<int32_t> candidatesIndexes;
     int32_t tableReg = inst.operands[0].value.reg;
+    // The SSA version of *this* table instance. A later store that writes the same
+    // register but a different version belongs to a different table (the register
+    // was reused) and must not be folded into this constructor.
+    int32_t tableVersion = inst.operands[0].ssaVersion;
     size_t scanLimit = 100;
     size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
     bool bFoundSetList = false;
+
+    if (inst.operation == LiftedOperation::DUPTABLE) {
+        int constantIdx = inst.operands[1].value.imm.k;
+        const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
+        if (constantIdx < 0 || static_cast<size_t>(constantIdx) >= constants.size())
+            return std::make_shared<TableLiteralNode>();
+
+        const auto &constant = constants[constantIdx];
+        if (constant.kType == LUA_TTABLE) {
+            const auto &tableData = constant.GetValue<LuauTable>();
+            for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
+                auto keyExpr = MakeTableKey(tableData.keys[i]);
+                std::shared_ptr<Expression> valExpr = nullptr;
+                const auto valIdx = tableData.valueConstantIndices[i];
+                if (valIdx < 0 || static_cast<size_t>(valIdx) >= constants.size()) {
+                    elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, std::make_shared<NilLiteralNode>()));
+                    continue;
+                }
+
+                const auto &valConst = constants[valIdx];
+                switch (valConst.kType) {
+                case LUA_TNIL:
+                    valExpr = std::make_shared<NilLiteralNode>();
+                    break;
+                case LUA_TBOOLEAN:
+                    valExpr = std::make_shared<BooleanLiteralNode>(std::get<bool>(valConst.constantData));
+                    break;
+                case LUA_TNUMBER:
+                    valExpr = std::make_shared<NumberLiteralNode>(std::get<double>(valConst.constantData));
+                    break;
+                case LUA_TINTEGER:
+                    valExpr = std::make_shared<IntegerLiteralNode>(std::get<int64_t>(valConst.constantData));
+                    break;
+                case LUA_TSTRING:
+                    valExpr = std::make_shared<StringLiteralNode>(std::get<std::string>(valConst.constantData));
+                    break;
+                case LUA_TVECTOR: {
+                    const auto &[x, y, z, w] = std::get<LuauVector>(valConst.constantData);
+                    valExpr = std::make_shared<VectorNode>(x, y, z, w);
+                    break;
+                }
+                default:
+                    valExpr = std::make_shared<NilLiteralNode>();
+                    break;
+                }
+                elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
+            }
+        }
+        return std::make_shared<TableLiteralNode>(elements);
+    }
+
+    // A field value can only live inside the `{ ... }` constructor if it is an
+    // expression we can inline at the field site. Values that are emitted as their
+    // own statement (closures, non-trivial calls, anything `ShouldInline` rejects)
+    // would otherwise be referenced by a bare, often-reused register name (e.g.
+    // `getLocalPlayer = v5`) which is both wrong and not sound. When we hit one,
+    // abort coalescing entirely: the table stays `{}` and every assignment is
+    // emitted as a separate, locally-sound `t.field = value` statement.
+    auto valueFoldable = [&](const LiftedOperand &valOp) -> bool {
+        if (valOp.type != LiftedOperandType::Register)
+            return true; // immediates / constants inline trivially
+        const auto *def = m_currentFunction->GetDefinition(valOp);
+        if (!def)
+            return true; // parameter / plain identifier reference
+        return ShouldInline(def);
+    };
+    bool bAbortCoalesce = false;
 
     for (size_t i = inst.instructionIndex + 1; i < inst.instructionIndex + scanLimit && i < maxIdx; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
 
         if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF ||
             candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::RETURN ||
-            candidate.operation == LiftedOperation::BREAK)
+            candidate.operation == LiftedOperation::BREAK || candidate.operation == LiftedOperation::FORNPREP ||
+            candidate.operation == LiftedOperation::FORNLOOP || candidate.operation == LiftedOperation::FORGLOOP ||
+            candidate.operation == LiftedOperation::FORGPREP || candidate.operation == LiftedOperation::FORGPREP_INEXT ||
+            candidate.operation == LiftedOperation::FORGPREP_NEXT)
             break;
 
         if (candidate.operation == LiftedOperation::SETLIST) {
+            if (candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion != tableVersion)
+                break; // register reused for a different table — stop here.
             if (candidate.operands[0].value.reg == tableReg) {
                 if (m_currentFunction->implicitUses.contains(&candidate)) {
                     const auto &versions = m_currentFunction->implicitUses.at(&candidate);
@@ -2124,6 +2791,9 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                             if (lpDef->operation == LiftedOperation::LOAD) {
                                 expr = LiftExpression(itemOp, true);
                                 this->m_processedInstructions.insert(lpDef->instructionIndex); // mark as processed.
+                            } else if (lpDef->operation == LiftedOperation::MOVE) {
+                                expr = LiftExpression(lpDef->operands[1], false);
+                                this->m_processedInstructions.insert(lpDef->instructionIndex);
                             } else {
                                 expr = LiftExpression(itemOp, false);
                             }
@@ -2136,19 +2806,31 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
+            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                break;
             if (candidate.operands[1].value.reg == tableReg) {
+                if (!valueFoldable(candidate.operands[0])) {
+                    bAbortCoalesce = true;
+                    break;
+                }
                 auto kIdx = candidate.operands[2].value.imm.k;
                 const auto &k = m_currentFunction->lpLiftedFunction->lpDeserialized->constants[kIdx];
                 std::string keyStr = std::get<std::string>(k.constantData);
 
-                auto keyExpr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(keyStr));
+                auto keyExpr = MakeTableKey(keyStr);
                 auto valExpr = LiftExpression(candidate.operands[0]);
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEN) {
+            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                break;
             if (candidate.operands[1].value.reg == tableReg) {
+                if (!valueFoldable(candidate.operands[0])) {
+                    bAbortCoalesce = true;
+                    break;
+                }
                 int idx = candidate.operands[2].value.imm.n + 1;
 
                 auto keyExpr = std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx));
@@ -2165,7 +2847,13 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
+            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                break;
             if (candidate.operands[1].value.reg == tableReg) {
+                if (!valueFoldable(candidate.operands[0])) {
+                    bAbortCoalesce = true;
+                    break;
+                }
                 auto keyExpr = LiftExpression(candidate.operands[2], true);
                 auto valExpr = LiftExpression(candidate.operands[0]);
 
@@ -2175,21 +2863,39 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         }
     }
 
-    if (bFoundSetList)
+    // A non-inlinable field value was found: discard the partial constructor and
+    // emit nothing-consumed so the assignments lift as their own statements.
+    if (bAbortCoalesce)
+        return std::make_shared<TableLiteralNode>();
+
+    if (bFoundSetList || !elements.empty())
         // the instructions are processed, since they're inlined.
         for (const auto &ins : candidatesIndexes)
             m_processedInstructions.insert(ins);
 
-    if (bFoundSetList)
+    if (!elements.empty())
         return std::make_shared<TableLiteralNode>(elements);
     else
-        return std::make_shared<TableLiteralNode>(); // the list is likely instanciated and then added to. This can cause some malformations in some cases,
+        return std::make_shared<TableLiteralNode>(); // the list is likely instantiated and then added to. This can cause some malformations in some cases,
                                                      // reject inlining.
 }
 
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     if (!inst || inst->operands.size() < 1)
         return false;
+
+    // A register captured by a closure (VAL or REF) must remain a real local: the
+    // closure's upvalue is aliased to this variable's name (no `local uv = source`
+    // copy is emitted), so inlining its def into a single use would erase the
+    // declaration the upvalue binds to — and for REF would desync writes. (LCT_UPVAL
+    // captures a parent upvalue, not a local def here, so it is unaffected.)
+    if (inst->operands[0].type == LiftedOperandType::Register) {
+        const SSARef defRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
+        if (auto it = m_currentFunction->users.find(defRef); it != m_currentFunction->users.end())
+            for (const auto *user : it->second)
+                if (user && user->operation == LiftedOperation::CAPTURE && user->operands.size() >= 1 && user->operands[0].value.imm.n <= 1)
+                    return false;
+    }
 
     // these statements have side-effects which cannot be skipped.
     // the values they produce aren't inlineable in any way, doing so would break them anyway!
@@ -2219,11 +2925,13 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
             const auto &users = m_currentFunction->users[defRef];
             int realUses = 0;
             for (const auto *user : users) {
+                if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
+                     user->operation == LiftedOperation::SETTABLEN) &&
+                    user->operands[1].value.reg == inst->operands[0].value.reg)
+                    return false;
+
                 if (user->operation == LiftedOperation::SETLIST && user->operands[0].value.reg == inst->operands[0].value.reg)
                     continue;
-
-                if (user->operation == LiftedOperation::SETLIST && user->operands[0].value.reg != inst->operands[0].value.reg)
-                    return true; // two SETLIST references means that this is a nested table. Nested tables are to be inlined.
 
                 if (user->operation == LiftedOperation::MOVE)
                     // MOVE instructions points to the table being reused. It cannot be inlined because of this.
@@ -2297,9 +3005,49 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
         return false;
     }
 
+    if (inst->operation == LiftedOperation::MOVE)
+        return m_currentFunction->IsSingleUse(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]);
+
     if (m_currentFunction->IsSimpleOrConstant(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]) &&
         inst->operands[0].ssaVersion != 1 /* first version cannot be inlined. It is a declaration */)
         return true;
+
+    // A pure constant `LOAD` with no explicit users is a call argument (those are
+    // tracked via implicitUses, not useCounts) or simply dead. Either way it is
+    // safe to inline at its single use site: the value has no side effects and
+    // there is no explicit reader whose declaration we would be removing. This
+    // lets `local v = "X"; f(v)` collapse to `f("X")` even at the first version.
+    // A pure constant `LOAD` is safe to inline (and duplicate) at every use: it has
+    // no side effects. The only hazard is removing the *declaration* of a register
+    // that is later reassigned, so restrict this to registers with a single SSA
+    // version (never redefined). This collapses `local v = "X"; f(v)` to `f("X")`
+    // even when the constant is a call argument (those are tracked via implicitUses
+    // and so escape the regular use-count, leaving the value stuck as a local).
+    if (inst->operation == LiftedOperation::LOAD && inst->operands.size() >= 2 && inst->operands[0].type == LiftedOperandType::Register &&
+        !m_currentFunction->IsConsumedByPhi(inst->operands[0])) {
+        const auto vt = inst->operands[1].type;
+        const bool isPureConst = vt == LiftedOperandType::ImmediateConstant || vt == LiftedOperandType::ImmediateInteger ||
+                                 vt == LiftedOperandType::ImmediateBool || vt == LiftedOperandType::ImmediateNil;
+        if (isPureConst) {
+            const uint8_t reg = inst->operands[0].value.reg;
+            const SSARef ref{reg, inst->operands[0].ssaVersion};
+            // Unsafe only if a reader of this value also writes the same register
+            // (a self-reassignment such as `x = x + 1`): inlining would delete the
+            // declaration the reassignment depends on. Otherwise the constant is
+            // free to inline at each use.
+            bool selfReassigned = false;
+            if (auto it = m_currentFunction->users.find(ref); it != m_currentFunction->users.end()) {
+                for (const auto *user : it->second) {
+                    if (!user->operands.empty() && user->operands[0].type == LiftedOperandType::Register && user->operands[0].value.reg == reg) {
+                        selfReassigned = true;
+                        break;
+                    }
+                }
+            }
+            if (!selfReassigned)
+                return true;
+        }
+    }
 
     if (m_currentFunction->IsSingleUse(inst->operands[0])) {
         if (m_currentFunction->IsConsumedByPhi(inst->operands[0]))
@@ -2322,6 +3070,187 @@ std::string ASTLifter::ResolveVariableName(const LiftedOperand &op) {
         return std::format("v{}", op.value.reg);
 
     return name;
+}
+
+std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterialization(uint32_t headerId) {
+    const auto &blocks = m_currentFunction->basicBlocks;
+    if (headerId >= blocks.size())
+        return std::nullopt;
+    const auto &H = blocks[headerId];
+    if (!H.ifStatementTrue.has_value() || !H.ifStatementFalse.has_value() || !H.lpTail)
+        return std::nullopt;
+
+    const uint32_t tIdx = *H.ifStatementTrue;  // jump-taken target
+    const uint32_t fIdx = *H.ifStatementFalse; // fall-through
+    if (tIdx >= blocks.size() || fIdx >= blocks.size())
+        return std::nullopt;
+
+    // First non-NOP instruction of a block, and how many non-NOP instructions it has.
+    auto firstReal = [&](const BasicBlock &blk) -> const LiftedInstruction * {
+        if (!blk.lpHead || !blk.lpTail)
+            return nullptr;
+        for (int i = blk.lpHead->instructionIndex; i <= blk.lpTail->instructionIndex; ++i) {
+            const auto &ins = m_currentFunction->lpLiftedFunction->instructions[i];
+            if (ins.operation != LiftedOperation::NOP)
+                return &ins;
+        }
+        return nullptr;
+    };
+    auto countReal = [&](const BasicBlock &blk) -> int {
+        if (!blk.lpHead || !blk.lpTail)
+            return 0;
+        int c = 0;
+        for (int i = blk.lpHead->instructionIndex; i <= blk.lpTail->instructionIndex; ++i)
+            if (m_currentFunction->lpLiftedFunction->instructions[i].operation != LiftedOperation::NOP)
+                ++c;
+        return c;
+    };
+    auto isBoolLoad = [](const LiftedInstruction *ins) {
+        return ins && ins->operands.size() >= 2 && ins->operands[0].type == LiftedOperandType::Register &&
+               ins->operands[1].type == LiftedOperandType::ImmediateBool;
+    };
+
+    // Fall-through block F: exactly one real instruction, a `LOADB Rd,bF` that
+    // jumps straight into T, and reached only from the header.
+    const auto &F = blocks[fIdx];
+    if (countReal(F) != 1)
+        return std::nullopt;
+    const LiftedInstruction *fLoad = firstReal(F);
+    if (!fLoad || fLoad->operation != LiftedOperation::LOADNJUMP || !isBoolLoad(fLoad))
+        return std::nullopt;
+    if (F.successors.size() != 1 || F.successors[0] != tIdx)
+        return std::nullopt;
+    if (F.predecessors.size() != 1 || F.predecessors[0] != headerId)
+        return std::nullopt;
+
+    // Jump target T: starts with `LOADB Rd,bT` for the same register.
+    const auto &T = blocks[tIdx];
+    const LiftedInstruction *tLoad = firstReal(T);
+    if (!tLoad || tLoad->operation != LiftedOperation::LOAD || !isBoolLoad(tLoad))
+        return std::nullopt;
+
+    const uint8_t reg = fLoad->operands[0].value.reg;
+    if (tLoad->operands[0].value.reg != reg)
+        return std::nullopt;
+    const bool bF = fLoad->operands[1].value.imm.b;
+    const bool bT = tLoad->operands[1].value.imm.b;
+    if (bF == bT)
+        return std::nullopt; // not a true/false split — leave it alone.
+
+    // The merge must be entered only from the header and the false-load block, so
+    // that `reg` is provably the diamond's boolean and nothing else.
+    if (std::set<uint32_t>(T.predecessors.begin(), T.predecessors.end()) != std::set<uint32_t>{headerId, fIdx})
+        return std::nullopt;
+
+    // Only collapse genuine condition jumps; LiftCondition yields BooleanLiteral
+    // for opcodes it cannot turn into a comparison/truth test.
+    auto cond = LiftCondition(H.lpTail);
+    if (!cond || std::dynamic_pointer_cast<BooleanLiteralNode>(cond))
+        return std::nullopt;
+
+    // Control reaches T directly when the jump is taken (cond true → bT) and via
+    // F when it is not (cond false → bF). So reg == cond when bT is true, else !cond.
+    std::shared_ptr<Expression> value = (bT && !bF) ? cond : InvertCondition(cond);
+
+    const LiftedOperand target = tLoad->operands[0];
+    const bool isDefined = m_definedRegisters.contains(reg);
+    const bool isParameter = reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
+    auto ident = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(target)));
+
+    std::shared_ptr<Statement> assignment;
+    if ((target.ssaVersion <= 1 && !isParameter) || !isDefined)
+        assignment = std::make_shared<VariableDeclarationNode>(ident, value);
+    else
+        assignment = std::make_shared<AssignmentStatementNode>(ident, value);
+    m_definedRegisters.insert(reg);
+
+    // Consume both boolean loads so block lifting does not re-emit them.
+    m_processedInstructions.insert(fLoad->instructionIndex);
+    m_processedInstructions.insert(tLoad->instructionIndex);
+
+    return BoolMaterialization{assignment, tIdx};
+}
+
+void ASTLifter::HoistPhiLocals(int32_t mergeIdx, const std::shared_ptr<IfStatementNode> &ifStmt,
+                               std::vector<std::shared_ptr<Statement>> &nodes, const std::unordered_set<int32_t> &definedBeforeBranches) {
+    if (mergeIdx < 0 || mergeIdx >= static_cast<int32_t>(m_currentFunction->basicBlocks.size()))
+        return;
+
+    const auto &mergeBlock = m_currentFunction->basicBlocks[mergeIdx];
+    if (mergeBlock.phiNodes.empty())
+        return;
+
+    // Top-level statements of a branch body; null-safe.
+    auto branchBody = [](const std::shared_ptr<BlockStatementNode> &branch) -> std::vector<std::shared_ptr<Statement>> * {
+        return branch ? &branch->body : nullptr;
+    };
+
+    std::vector<std::vector<std::shared_ptr<Statement>> *> branches;
+    if (auto *b = branchBody(ifStmt->thenBranch))
+        branches.push_back(b);
+    if (auto *b = branchBody(ifStmt->elseBranch))
+        branches.push_back(b);
+
+    for (const auto &phi : mergeBlock.phiNodes) {
+        if (phi.operands.empty() || phi.operands[0].type != LiftedOperandType::Register)
+            continue;
+
+        int32_t reg = phi.operands[0].value.reg;
+        std::string name = m_currentFunction->GetVarName(reg, phi.operands[0].ssaVersion);
+        if (name.empty())
+            name = std::format("v{}", reg);
+
+        // Find every initialized `local <name> = ...` at branch top-level. If a
+        // branch carries one, the value escapes the branch and must be hoisted.
+        bool needsHoist = false;
+        for (auto *body : branches) {
+            for (auto &stmt : *body) {
+                // Case 1: `local <name> = <expr>` (VariableDeclarationNode). Convert to a
+                // bare assignment so the hoisted pre-declaration is the sole `local`.
+                if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt); decl && decl->value != nullptr) {
+                    auto ident = std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier);
+                    if (!ident || !ident->identifier || ident->identifier->name != name)
+                        continue;
+
+                    stmt = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value);
+                    needsHoist = true;
+                    continue;
+                }
+
+                // Case 2: `local <name> = <call>` — a Call/NameCall whose single return target
+                // is the merged register. These keep their node (the call must stay in place);
+                // we only suppress the `local` keyword so the hoisted declaration owns it.
+                if (auto exprStmt = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
+                    auto retMatches = [&](const std::vector<std::shared_ptr<Expression>> &rets) -> bool {
+                        if (rets.size() != 1)
+                            return false;
+                        auto ident = std::dynamic_pointer_cast<IdentifierExpressionNode>(rets[0]);
+                        return ident && ident->identifier && ident->identifier->name == name;
+                    };
+                    if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(exprStmt->expression);
+                        nameCall && retMatches(nameCall->rets)) {
+                        nameCall->bIsLocalDeclaration = false;
+                        needsHoist = true;
+                    } else if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(exprStmt->expression);
+                               call && retMatches(call->rets)) {
+                        call->bIsLocalDeclaration = false;
+                        needsHoist = true;
+                    }
+                }
+            }
+        }
+
+        // Only declare `local <name>` when the register had no declaration BEFORE
+        // this `if`. If it was already defined in an enclosing scope (e.g.
+        // `local v = X; if v then <reassign v> end`), a fresh `local` would shadow
+        // it and the post-merge read would see the stale outer value. We test the
+        // pre-branch snapshot, not m_definedRegisters, because lifting the branch
+        // assignments already inserted `reg`.
+        if (needsHoist && !definedBeforeBranches.contains(reg)) {
+            nodes.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+            m_definedRegisters.insert(reg);
+        }
+    }
 }
 
 int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
@@ -2383,4 +3312,113 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
     }
 
     return -1;
+}
+
+// Only comparison conditionals (`==`, `~=`, `<`, `<=`, JUMPXEQK) anchor an
+// OR-dispatch. Raw truthiness jumps (JUMPIF/JUMPIFNOT) are how Luau lowers
+// value short-circuits (`x = a and b or c`); those are folded back into a single
+// expression by TryRewriteShortCircuitAssignment / the LOADB-diamond handler, so
+// coalescing them here would corrupt the expression.
+static bool IsComparisonConditional(LiftedOperation op) {
+    switch (op) {
+    case LiftedOperation::JUMPIFEQ:
+    case LiftedOperation::JUMPIFNOTEQ:
+    case LiftedOperation::JUMPIFLT:
+    case LiftedOperation::JUMPIFNOTLT:
+    case LiftedOperation::JUMPIFLE:
+    case LiftedOperation::JUMPIFNOTLE:
+    case LiftedOperation::JUMPXEQK:
+        return true;
+    default:
+        return false;
+    }
+}
+
+std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId) {
+    const auto &blocks = m_currentFunction->basicBlocks;
+    if (headerId >= blocks.size())
+        return std::nullopt;
+    const auto &head = blocks[headerId];
+    if (head.bType != BlockType::IfHeader || !head.ifStatementTrue.has_value() || !head.ifStatementFalse.has_value())
+        return std::nullopt;
+
+    // The shared OR target is the head's jump-to-true edge. Every link of the
+    // chain must reach this same block.
+    const uint32_t body = head.ifStatementTrue.value();
+
+    const auto isLink = [&](uint32_t id) {
+        if (id >= blocks.size())
+            return false;
+        const auto &b = blocks[id];
+        return b.bType == BlockType::IfHeader && b.ifStatementTrue.has_value() && b.ifStatementFalse.has_value() &&
+               (b.ifStatementTrue.value() == body || b.ifStatementFalse.value() == body);
+    };
+
+    // Structural walk first (no condition lifting): follow the run while each link
+    // shares `body`. A link whose TRUE edge hits body continues through its FALSE
+    // edge; the run must terminate on an inverted final link whose FALSE edge hits
+    // body (Luau's lowering of the last OR term). Terminating any other way is the
+    // AND-chain shape (uniform true-edge sharing) — reject it.
+    struct Link {
+        uint32_t blockId;
+        bool invert;
+    };
+    std::vector<Link> links;
+    std::set<uint32_t> guard;
+    uint32_t cur = headerId;
+    uint32_t elseIdx = static_cast<uint32_t>(-1);
+    bool invertedFinal = false;
+
+    while (cur < blocks.size() && !guard.contains(cur)) {
+        const auto &b = blocks[cur];
+        if (b.bType != BlockType::IfHeader || !b.ifStatementTrue.has_value() || !b.ifStatementFalse.has_value())
+            break;
+        if (!b.lpTail || !IsComparisonConditional(b.lpTail->operation))
+            break; // truthiness link → leave to the short-circuit expression folders
+
+        const uint32_t bt = b.ifStatementTrue.value();
+        const uint32_t bf = b.ifStatementFalse.value();
+
+        if (bt == body) {
+            links.push_back({cur, false});
+            guard.insert(cur);
+            if (isLink(bf) && !guard.contains(bf)) {
+                cur = bf; // fall-through is the next link
+                continue;
+            }
+            elseIdx = bf; // ran out without an inverted terminator → not an OR-chain
+            invertedFinal = false;
+            break;
+        }
+        if (bf == body) {
+            links.push_back({cur, true}); // inverted final term: false edge reaches body
+            guard.insert(cur);
+            elseIdx = bt;
+            invertedFinal = true;
+            break;
+        }
+        break; // does not share the body → end of (non-)chain
+    }
+
+    if (!invertedFinal || links.size() < 2 || elseIdx == static_cast<uint32_t>(-1))
+        return std::nullopt;
+
+    // Structure confirmed. Lift each link's condition (the condition under which it
+    // reaches `body`) and OR-fold left to right.
+    std::shared_ptr<Expression> condition;
+    for (const auto &lk : links) {
+        auto c = LiftCondition(blocks[lk.blockId].lpTail);
+        if (lk.invert)
+            c = InvertCondition(c);
+        condition = condition ? std::static_pointer_cast<Expression>(std::make_shared<BinaryExpressionNode>("or", condition, c)) : c;
+    }
+
+    OrChainInfo info;
+    info.condition = condition;
+    info.bodyIdx = body;
+    info.elseIdx = elseIdx;
+    info.chainBlocks.reserve(links.size());
+    for (const auto &lk : links)
+        info.chainBlocks.push_back(lk.blockId);
+    return info;
 }

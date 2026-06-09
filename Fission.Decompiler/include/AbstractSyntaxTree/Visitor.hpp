@@ -4,6 +4,7 @@
 
 #pragma once
 
+class VectorNode;
 class ExpressionStatementNode;
 class ReturnStatementNode;
 class MemberExpressionNode;
@@ -75,4 +76,5 @@ class Visitor {
     virtual void Visit(RepeatStatementNode *lpNode) = 0;
     virtual void Visit(VarArgExpression *lpNode) = 0;
     virtual void Visit(FunctionArgumentExpression *lpNode) = 0;
+    virtual void Visit(VectorNode* lpNode) = 0;
 };

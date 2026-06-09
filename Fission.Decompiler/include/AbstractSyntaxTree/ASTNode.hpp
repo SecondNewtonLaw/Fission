@@ -225,6 +225,7 @@ class VariableDeclarationNode : public Declaration {
   public:
     std::shared_ptr<Expression> identifier;
     std::shared_ptr<Expression> value;
+    std::optional<std::shared_ptr<Expression>> type = std::nullopt;
     VariableDeclarationNode(std::shared_ptr<Identifier> identifier) : identifier(std::make_shared<IdentifierExpressionNode>(identifier)), value(nullptr) {}
     VariableDeclarationNode(std::shared_ptr<Expression> identifier, std::shared_ptr<Expression> expr) : identifier(identifier), value(expr) {}
 
@@ -259,7 +260,7 @@ class NumberLiteralNode : public LiteralNode {
 };
 
 class IntegerLiteralNode : public LiteralNode {
-public:
+  public:
     int64_t value;
     IntegerLiteralNode(int64_t v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
@@ -282,6 +283,21 @@ class TableLiteralNode : public LiteralNode {
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
+class VectorNode : public LiteralNode {
+public:
+    float x, y, z, w = 0;
+    VectorNode() { this->nodeKind = ASTNodeKind::LiteralValue; }
+    VectorNode(const float x, const float y, const float z, const float w) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->x = x;
+        this->y = y;
+        this->z = z;
+        this->w = w;
+    }
+
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
+};
+
 class FunctionDeclarationNode : public Expression {
   public:
     std::string functionName;
@@ -289,9 +305,7 @@ class FunctionDeclarationNode : public Expression {
     std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argumentsNames{}; // arg1 -> it's name inside syntax
     bool bIsVarArg = false;
     bool bIsLocalDeclaration = false; // to be defined in lifter. If the only usage of this is inside of a function, and such function holds no debug name.
-    // Anonymous-inline form: emit as `function(args) ... end` directly at the
-    // expression site rather than as a top-level `local function name(...) ... end`.
-    // Used when the closure has a single use that is a call-argument slot.
+    // emit inline `function(args) ... end` at the expression site, not as a top-level local. single-use call-arg closures.
     bool bAnonymousInline = false;
     std::shared_ptr<BlockStatementNode> lpFunctionBody = nullptr;
 
@@ -316,8 +330,10 @@ class NameCallExpressionNode : public Expression {
     std::shared_ptr<Expression> callWhat;
     std::vector<std::shared_ptr<Expression>> arguments;
     std::vector<std::shared_ptr<Expression>> rets;
+    std::vector<std::shared_ptr<Expression>> retTypes;
     bool bIsVariadicCall;
     bool inlineCall = false;
+    bool bIsLocalDeclaration = true;
 
     NameCallExpressionNode(
         std::shared_ptr<Expression> calledOn, std::shared_ptr<Expression> calledWhat, std::vector<std::shared_ptr<Expression>> args,
@@ -336,8 +352,10 @@ class CallExpressionNode : public Expression {
     std::shared_ptr<Expression> callee;
     std::vector<std::shared_ptr<Expression>> arguments;
     std::vector<std::shared_ptr<Expression>> rets;
+    std::vector<std::shared_ptr<Expression>> retTypes;
     bool bIsVariadicCall;
     bool inlineCall;
+    bool bIsLocalDeclaration = true;
 
     CallExpressionNode(
         std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args, std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall,

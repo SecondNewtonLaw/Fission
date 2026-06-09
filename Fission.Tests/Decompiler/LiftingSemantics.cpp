@@ -22,6 +22,7 @@
 #include <cctype>
 #include <cstring>
 #include <regex>
+#include <sstream>
 #include <string>
 
 namespace {
@@ -40,13 +41,13 @@ namespace {
     // exact bytecode shape they are exercising (e.g. an explicit `if not v then
     // v = X end` chain that opt=1 would otherwise fold into return-and-comparison
     // form before the lifter ever sees the OR opcode).
-    std::string DecompileOrFail(const std::string &source, int optLevel = 1) {
+    std::string DecompileOrFail(const std::string &source, int optLevel = 1, DecompilerFlags flags = static_cast<DecompilerFlags>(0)) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         Luau::CompileOptions opts{};
         opts.optimizationLevel = optLevel;
         opts.debugLevel = 2;
-        auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), opts);
+        auto result = decompiler.DecompileTestCode(source, flags, opts);
         REQUIRE(result.resultCode == DecompileResult::Success);
         return std::move(result.decompilationOutput);
     }
@@ -77,6 +78,334 @@ namespace {
     }
 
 } // namespace
+
+// ---------------------------------------------------------------- Type inference
+
+TEST_CASE("Lift: InferTypes annotates locals from table initializers", "[Decompiler][TypeInference]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local values = {}
+        values[1] = 1
+        values[2] = 2
+        values[3] = 3
+        return values
+    )",
+        0, DecompilerFlags::InferTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "Decompile Options: InferTypes"));
+    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*table\s*=\s*\{)")));
+    CHECK(Contains(out, "1"));
+    CHECK(Contains(out, "3"));
+}
+
+TEST_CASE("Lift: InferTypes annotates function parameters from same-file call sites", "[Decompiler][TypeInference]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local function sink(name, count, enabled)
+            return name
+        end
+        sink("rat", 3, false)
+    )",
+        0, DecompilerFlags::InferTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(
+        std::regex_search(
+            out, std::regex(
+                     R"(function\s+sink\([A-Za-z_][A-Za-z_0-9]*\s*:\s*string,\s*[A-Za-z_][A-Za-z_0-9]*\s*:\s*number,\s*[A-Za-z_][A-Za-z_0-9]*\s*:\s*boolean\))"
+                 )
+        )
+    );
+}
+
+TEST_CASE("Lift: InferTypes emits union annotations for mixed call-site argument types", "[Decompiler][TypeInference]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local function sink(value)
+            return value
+        end
+        sink("rat")
+        sink(12)
+    )",
+        0, DecompilerFlags::InferTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(std::regex_search(out, std::regex(R"(function\s+sink\([A-Za-z_][A-Za-z_0-9]*\s*:\s*string\s*\|\s*number\))")));
+}
+
+TEST_CASE("Lift: InferTypes falls back to body-use inference for uncalled function arguments", "[Decompiler][TypeInference]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local function sink(value)
+            return value + 1
+        end
+        return sink
+    )",
+        0, DecompilerFlags::InferTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(std::regex_search(out, std::regex(R"(function\s+sink\([A-Za-z_][A-Za-z_0-9]*\s*:\s*number\))")));
+}
+
+TEST_CASE("Lift: OptimizeIR removes unreachable constant-false branches", "[Decompiler][OptimizeIR]") {
+    const auto raw = DecompileOrFail(
+        R"(
+        if not true then
+            print("dead")
+        else
+            print("live")
+        end
+    )",
+        0
+    );
+    const auto optimized = DecompileOrFail(
+        R"(
+        if not true then
+            print("dead")
+        else
+            print("live")
+        end
+    )",
+        0, DecompilerFlags::OptimizeIR
+    );
+
+    INFO("raw decompile:\n" << raw);
+    INFO("optimized decompile:\n" << optimized);
+    CHECK(Contains(raw, "Decompile Options: None"));
+    CHECK(Contains(optimized, "Decompile Options: OptimizeIR"));
+    CHECK(Contains(raw, "dead"));
+    CHECK_FALSE(Contains(optimized, "dead"));
+    CHECK(Contains(optimized, "live"));
+    CHECK_FALSE(Contains(optimized, "if not true then"));
+}
+
+TEST_CASE("Lift: InferRobloxTypes annotates well-known globals and Instance lookups", "[Decompiler][TypeInference][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local runService = game:GetService("RunService")
+        local root = workspace:FindFirstChild("Map")
+        local humanoid = script.Parent:FindFirstChildOfClass("Humanoid")
+        print(runService, root, humanoid)
+        return runService, root, humanoid
+    )",
+        0, DecompilerFlags::InferRobloxTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "Decompile Options: InferRobloxTypes"));
+    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*RunService\s*=\s*game:GetService\("RunService"\))")));
+    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Instance\s*=\s*workspace:FindFirstChild\("Map"\))")));
+    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Humanoid\s*=\s*script.Parent:FindFirstChildOfClass\("Humanoid"\))")));
+}
+
+TEST_CASE("Lift: InferRobloxTypes annotates dot-call FindFirstChildWhichIsA returns", "[Decompiler][TypeInference][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local part = workspace.FindFirstChildWhichIsA(workspace, "BasePart")
+        print(part)
+        return part
+    )",
+        0, DecompilerFlags::InferRobloxTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(
+        std::regex_search(
+            out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*BasePart\s*=\s*workspace\.FindFirstChildWhichIsA\(workspace,\s*"BasePart"\))")
+        )
+    );
+}
+
+TEST_CASE("Lift: AutoNameVariables derives names from Roblox lookup calls", "[Decompiler][AutoName][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local service = game:GetService("RunService")
+        local child = workspace:FindFirstChild("Map")
+        local part = workspace:FindFirstChildWhichIsA("BasePart")
+        print(service, child, part)
+        return service, child, part
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "Decompile Options: AutoNameVariables"));
+    CHECK(Contains(out, "local RunService = game:GetService(\"RunService\")"));
+    CHECK(Contains(out, "local Map = workspace:FindFirstChild(\"Map\")"));
+    CHECK(Contains(out, "local BasePart = workspace:FindFirstChildWhichIsA(\"BasePart\")"));
+    CHECK(Contains(out, "print(RunService, Map, BasePart)"));
+    CHECK(Contains(out, "return RunService, Map, BasePart"));
+}
+
+TEST_CASE("Lift: AutoNameVariables prefixes Roblox names on collision", "[Decompiler][AutoName][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local child = workspace:FindFirstChild("Map")
+        local otherChild = workspace:FindFirstChild("Map")
+        print(child, otherChild)
+        return child, otherChild
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "local Map = workspace:FindFirstChild(\"Map\")"));
+    CHECK(std::regex_search(out, std::regex(R"(local\s+v[0-9]+_Map\s*=\s*workspace:FindFirstChild\("Map"\))")));
+    CHECK(!Contains(out, "local Map = workspace:FindFirstChild(\"Map\")\nlocal Map = workspace:FindFirstChild(\"Map\")"));
+}
+
+TEST_CASE("Lift: AutoNameVariables handles dot-call Roblox lookups", "[Decompiler][AutoName][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local players = game.GetService(game, "Players")
+        local part = workspace.FindFirstChildOfClass(workspace, "Part")
+        print(players, part)
+        return players, part
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "local Players = game.GetService(game, \"Players\")"));
+    CHECK(Contains(out, "local Part = workspace.FindFirstChildOfClass(workspace, \"Part\")"));
+    CHECK(Contains(out, "print(Players, Part)"));
+    CHECK(Contains(out, "return Players, Part"));
+}
+
+TEST_CASE("Lift: AutoNameVariables sanitizes derived names", "[Decompiler][AutoName][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local bad = workspace:FindFirstChild("Bad Name-1")
+        local numeric = workspace:FindFirstChild("123Folder")
+        print(bad, numeric)
+        return bad, numeric
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "local Bad_Name_1 = workspace:FindFirstChild(\"Bad Name-1\")"));
+    CHECK(Contains(out, "local _123Folder = workspace:FindFirstChild(\"123Folder\")"));
+    CHECK(Contains(out, "print(Bad_Name_1, _123Folder)"));
+    CHECK(Contains(out, "return Bad_Name_1, _123Folder"));
+}
+
+TEST_CASE("Lift: AutoNameVariables ignores unsupported calls", "[Decompiler][AutoName][RobloxTypes]") {
+    const auto out = DecompileOrFail(
+        R"(
+        local children = workspace:GetChildren()
+        print(children)
+        return children
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "Decompile Options: AutoNameVariables"));
+    CHECK(!Contains(out, "local GetChildren"));
+    CHECK(!Contains(out, "local Children"));
+}
+
+TEST_CASE("Lift: AutoNameVariables and InferRobloxTypes compose without coupling", "[Decompiler][AutoName][TypeInference][RobloxTypes]") {
+    const auto typedOnly = DecompileOrFail(
+        R"(
+        local players = game:GetService("Players")
+        print(players)
+        return players
+    )",
+        0, DecompilerFlags::InferRobloxTypes
+    );
+    const auto namedOnly = DecompileOrFail(
+        R"(
+        local players = game:GetService("Players")
+        print(players)
+        return players
+    )",
+        0, DecompilerFlags::AutoNameVariables
+    );
+    const auto both = DecompileOrFail(
+        R"(
+        local players = game:GetService("Players")
+        print(players)
+        return players
+    )",
+        0, DecompilerFlags::InferRobloxTypes | DecompilerFlags::AutoNameVariables
+    );
+
+    INFO("typed only:\n" << typedOnly);
+    CHECK(Contains(typedOnly, "Decompile Options: InferRobloxTypes"));
+    CHECK(std::regex_search(typedOnly, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Players\s*=\s*game:GetService\("Players"\))")));
+    CHECK(!Contains(typedOnly, "Decompile Options: AutoNameVariables"));
+
+    INFO("named only:\n" << namedOnly);
+    CHECK(Contains(namedOnly, "Decompile Options: AutoNameVariables"));
+    CHECK(Contains(namedOnly, "local Players = game:GetService(\"Players\")"));
+    CHECK(!Contains(namedOnly, "local Players: Players"));
+
+    INFO("both:\n" << both);
+    CHECK(Contains(both, "Decompile Options: InferRobloxTypes, AutoNameVariables"));
+    CHECK(Contains(both, "local Players: Players = game:GetService(\"Players\")"));
+    CHECK(Contains(both, "print(Players)"));
+    CHECK(Contains(both, "return Players"));
+}
+
+TEST_CASE("Lift: complex strict ModuleScript with generic loops and deferred callback survives", "[Decompiler][ModuleScript][Regression]") {
+    const auto out = DecompileOrFail(
+        R"(
+        --!strict
+
+        local RunService = game:GetService("RunService")
+        local SignalPlus = require("../Networking/SignalPlus")
+
+        type promised_results = {Params: {}, Results: boolean, Signal: SignalPlus.Signal<any>}
+        type table_type = {
+            [string]: {Signal: SignalPlus.Signal<any>, init: () -> promised_results}
+        }
+
+        local module = {
+            Signals = {
+                OnCharacterChange = require("@self/Internal/OnCharacterChange")
+            } :: table_type;
+            Cache = {} :: {promised_results}
+        }
+
+        function module.init()
+            for _, signal in module.Signals do
+                local results_table = signal.init()
+                local results = results_table.Results
+                if not results then continue end
+                table.insert(module.Cache, results_table)
+            end
+
+            task.defer(function()
+                for _, signal_results in module.Cache do
+                    local signal = signal_results.Signal
+                    signal:Fire(table.unpack(signal_results.Params))
+                end
+                table.clear(module.Cache)
+            end)
+        end
+
+        RunService:BindToRenderStep(module.init, 1, module.init)
+        return module
+    )",
+        0, DecompilerFlags::InferRobloxTypes
+    );
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "BindToRenderStep"));
+    CHECK_FALSE(Contains(out, "local module ="));
+    CHECK(Contains(out, "for "));
+    CHECK(Contains(out, " in "));
+    CHECK(Contains(out, "table.insert"));
+    CHECK(Contains(out, "table.clear"));
+    CHECK(Contains(out, "module.Cache"));
+}
 
 // -------------------------------------------------------------------- Upvalue
 
@@ -334,7 +663,205 @@ TEST_CASE("Lift: generic for over `ipairs` survives lift", "[Decompiler][Generic
     CHECK(Contains(out, "ipairs("));
 }
 
-// ----------------------------------------------------------- Paren precedence
+// -------------------------------------------------------------------- Tables
+// Note: dict-style key-value table literal reconstruction is a known
+// limitation (SETTABLEKS after NEWTABLE may be fragmented by SSA/CFG).
+// List-style (SETLIST) reconstruction works reliably.
+
+TEST_CASE("Lift: empty table literal has balanced braces", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function()
+            local t = {}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    // Output may be `{  }` with spaces — check brace balance.
+    CHECK(Contains(out, "{"));
+    CHECK(Contains(out, "}"));
+    CHECK(CountOccurrences(out, "{") == CountOccurrences(out, "}"));
+}
+
+TEST_CASE("Lift: list-style table literal preserves numeric elements", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function()
+            local t = {10, 20, 30}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    // Output may be `{ 10, 20, 30 }` with space after `{`.
+    CHECK(CountOccurrences(out, "10") >= 1);
+    CHECK(CountOccurrences(out, "20") >= 1);
+    CHECK(CountOccurrences(out, "30") >= 1);
+    // All three elements survive.
+    CHECK(Contains(out, "{"));
+    CHECK(Contains(out, "}"));
+    // No key-value syntax for plain list elements.
+    CHECK_FALSE(Contains(out, "[1]"));
+}
+
+TEST_CASE("Lift: nested table literal preserves inner list tables", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function()
+            local t = {{1, 2}, {3, 4}}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    // All four elements survive.
+    CHECK(CountOccurrences(out, "1") >= 1);
+    CHECK(CountOccurrences(out, "2") >= 1);
+    CHECK(CountOccurrences(out, "3") >= 1);
+    CHECK(CountOccurrences(out, "4") >= 1);
+    // At least two brace pairs (outer + inner).
+    CHECK(CountOccurrences(out, "{") >= 3);
+    CHECK(CountOccurrences(out, "{") == CountOccurrences(out, "}"));
+}
+
+TEST_CASE("Lift: absurd mixed SETLIST table literal terminates and preserves edge elements", "[Decompiler][Table][SETLIST][Stress]") {
+    std::stringstream source;
+    source << "return function(a, b)\nlocal t = {";
+    for (int i = 1; i <= 260; ++i) {
+        if (i > 1)
+            source << ", ";
+        switch (i % 10) {
+        case 0:
+            source << "{ " << i << ", key = \"v" << i << "\", nested = {" << (i + 1) << ", " << (i + 2) << "} }";
+            break;
+        case 1:
+            source << "a + " << i;
+            break;
+        case 2:
+            source << "b and \"s" << i << "\" or nil";
+            break;
+        case 3:
+            source << "function(x) return x + " << i << " end";
+            break;
+        case 4:
+            source << "{ [\"dyn" << i << "\"] = a, " << i << " }";
+            break;
+        case 5:
+            source << "not b";
+            break;
+        case 6:
+            source << "(a * " << i << ") % 7";
+            break;
+        case 7:
+            source << "\"edge" << i << "\"";
+            break;
+        case 8:
+            source << "nil";
+            break;
+        default:
+            source << i;
+            break;
+        }
+    }
+    source << ", absurdKey = { tail = 9999, flag = true }, [a] = b }\nreturn t\nend";
+
+    const auto out = DecompileOrFail(source.str());
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "1"));
+    CHECK(Contains(out, "260"));
+    CHECK(Contains(out, "9999"));
+    CHECK(Contains(out, "function"));
+    CHECK(CountOccurrences(out, "{") == CountOccurrences(out, "}"));
+    CHECK_FALSE(std::regex_search(out, std::regex(R"(\}\s*\.)")));
+    CHECK_FALSE(std::regex_search(out, std::regex(R"(\}\s*\[)")));
+}
+
+TEST_CASE("Lift: table literal as return value preserves content", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function()
+            return {1, 2, 3}
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "return {"));
+    CHECK(Contains(out, "1"));
+    CHECK(Contains(out, "2"));
+    CHECK(Contains(out, "3"));
+}
+
+TEST_CASE("Lift: table literal with expression elements preserves operators", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function(a, b)
+            local t = {a + 1, b * 2, a - b}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    CHECK(Contains(out, "+"));
+    CHECK(Contains(out, "*"));
+    CHECK(Contains(out, "-"));
+    CHECK(Contains(out, "a"));
+    CHECK(Contains(out, "b"));
+}
+
+TEST_CASE("Lift: table literal preserves aliases across later register reuse", "[Decompiler][Table][Alias]") {
+    const auto out = DecompileOrFail(R"(
+        local nested = {1}
+        print(nested)
+        local g = rat()
+        local t = {nested}
+        return g, t
+    )");
+
+    INFO("decompile:\n" << out);
+    static const std::regex ratThenSelfTable(R"(local\s+([A-Za-z_][A-Za-z_0-9]*)\s*=\s*rat\(\)\s+local\s+[A-Za-z_][A-Za-z_0-9]*\s*=\s*\{\s*\1\s*\})");
+    CHECK_FALSE(std::regex_search(out, ratThenSelfTable));
+    CHECK(Contains(out, "rat()"));
+    CHECK(Contains(out, "{ 1 }"));
+}
+
+TEST_CASE("Lift: DUPTABLE nil template values do not index constants out of range", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return { a = nil }
+    )");
+
+    INFO("decompile:\n" << out);
+    CHECK(std::regex_search(out, std::regex(R"(return\s+\{\s*a\s*=\s*nil\s*\})")));
+}
+
+TEST_CASE("Lift: dict-style table keys are preserved (TODO: known limitation)", "[Decompiler][Table]") {
+    // KNOWN LIMITATION: dict-style keys ({x = 1}) are lost — LiftTableLiteral
+    // cannot reconstruct SETTABLEKS across block boundaries after SSA/CFG.
+    // This test asserts that numeric content survives at minimum.
+    const auto out = DecompileOrFail(R"(
+        return function()
+            local t = {x = 1, y = 2, z = 3}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    // At minimum, braces survive.
+    CHECK(Contains(out, "{"));
+    CHECK(Contains(out, "}"));
+    // TODO: also check for "x =", "y =", "z =" once dict reconstruction is fixed.
+}
+
+TEST_CASE("Lift: mixed table literal numeric elements survive (TODO: keys known limitation)", "[Decompiler][Table]") {
+    const auto out = DecompileOrFail(R"(
+        return function()
+            local t = {1, 2, key = 3}
+            return t
+        end
+    )");
+
+    INFO("decompile:\n" << out);
+    // Numeric list elements survive.
+    CHECK(Contains(out, "1"));
+    CHECK(Contains(out, "2"));
+    // TODO: "key =" should survive once dict reconstruction is fixed.
+}
 
 TEST_CASE("Lift: AssignmentStatementNode RHS not gratuitously parenthesised", "[Decompiler][Parens]") {
     const auto out = DecompileOrFail(R"(

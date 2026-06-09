@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include <libassert/assert.hpp>
 #include <string>
 
 class BinaryReader {
@@ -10,6 +11,14 @@ class BinaryReader {
     const std::uint8_t *m_lpBufferStart;
     const std::uint8_t *m_lpBufferEnd;
     const std::uint8_t *m_lpCurrentBufferPointer;
+
+    /// Max continuation bytes for a valid varint: 9 for uint64, 4 for uint32.
+    static constexpr unsigned int kMaxVarintBytes64 = 10;
+    static constexpr unsigned int kMaxVarintBytes32 = 5;
+
+    void AssertBoundsOrFail(std::size_t advanceBy) const {
+        ASSERT(this->m_lpCurrentBufferPointer + advanceBy <= this->m_lpBufferEnd, "Bounds check out: reading past end of buffer");
+    }
 
   public:
     explicit BinaryReader(uint8_t *bufferStart, size_t size) {
@@ -31,12 +40,15 @@ class BinaryReader {
 
         uint8_t byte;
 
-        do {
+        for (unsigned int i = 0; i < kMaxVarintBytes64; ++i) {
             byte = this->Read<uint8_t>();
             result |= ((uint64_t)(byte & 127)) << shift;
+            if (!(byte & 128))
+                return result;
             shift += 7;
-        } while (byte & 128);
+        }
 
+        ASSERT(false, "ReadVariableInteger64: malformed varint (exceeded max continuation bytes)");
         return result;
     }
 
@@ -46,21 +58,21 @@ class BinaryReader {
 
         uint8_t byte{};
 
-        do {
+        for (unsigned int i = 0; i < kMaxVarintBytes32; ++i) {
             byte = this->Read<uint8_t>();
             result |= (byte & 127) << shift;
+            if (!(byte & 128))
+                return result;
             shift += 7;
-        } while (byte & 128);
+        }
 
+        ASSERT(false, "ReadVariableInteger32: malformed varint (exceeded max continuation bytes)");
         return result;
     }
 
     template <typename T> T Read(const bool advance = true) {
         const auto advanceBy = sizeof(T);
-        // ASSERT(
-        //     this->m_lpCurrentBufferPointer + advanceBy <= this->m_lpBufferEnd,
-        //     "structure is too big for the given buffer, cannot read!"
-        // );
+        this->AssertBoundsOrFail(advanceBy);
         T tmp{};
         memcpy(&tmp, this->m_lpCurrentBufferPointer, advanceBy);
 
@@ -71,10 +83,7 @@ class BinaryReader {
     }
 
     std::string ReadString(std::size_t stringLength, bool advance = true) {
-        // ASSERT(
-        //     this->m_lpCurrentBufferPointer + stringLength <= this->m_lpBufferEnd,
-        //     "string is too long for the given buffer, cannot read!"
-        // );
+        this->AssertBoundsOrFail(stringLength);
         std::string tmp(stringLength, '\0');
 
         memcpy(tmp.data(), this->m_lpCurrentBufferPointer, stringLength);
@@ -86,10 +95,7 @@ class BinaryReader {
     }
 
     void AdvanceBy(std::size_t offset) {
-        // ASSERT(
-        //     this->m_lpCurrentBufferPointer + offset <= this->m_lpBufferEnd,
-        //     "advancing by that amount would lead us to exit the buffer bounds."
-        // );
+        this->AssertBoundsOrFail(offset);
         this->m_lpCurrentBufferPointer += offset;
     }
 

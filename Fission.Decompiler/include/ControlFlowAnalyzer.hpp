@@ -225,13 +225,43 @@ struct AnalyzedFunction {
 
     std::unordered_map<SSARef, std::string> variableNames;
     std::unordered_map<int32_t, std::string> upvalueNames;
+    // parent-forced upvalue names (LCT_UPVAL capture). separate from upvalueNames since PopulateNames() clears those.
+    std::unordered_map<int32_t, std::string> upvalueNameOverrides;
 
     std::unordered_map<int, std::string> globalRegNames;
     std::unordered_map<SSARef, std::string> ssaOverrides;
 
+    // suffix so our own vN/argN don't shadow a captured upvalue's vN when rendered inline. set by parent; empty for root.
+    std::string nameSuffix;
+    // suffixed -> original, for the INFO note the lifter emits per renamed own-register name.
+    std::unordered_map<std::string, std::string> disambiguatedNames;
+
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
 
     void SetVariableName(int32_t reg, int32_t version, const std::string &name) { variableNames[{static_cast<uint8_t>(reg), version}] = name; }
+
+    // suffix an auto name if it collides with a captured upvalue. explicit names don't go through here.
+    std::string DisambiguateOwnName(const std::string &name) {
+        if (nameSuffix.empty())
+            return name;
+        bool collides = false;
+        for (const auto &[idx, upName] : upvalueNameOverrides)
+            if (upName == name) {
+                collides = true;
+                break;
+            }
+        if (!collides)
+            for (const auto &[idx, upName] : upvalueNames)
+                if (upName == name) {
+                    collides = true;
+                    break;
+                }
+        if (!collides)
+            return name;
+        const std::string suffixed = name + nameSuffix;
+        disambiguatedNames[suffixed] = name; // recorded so the lifter can note the rename
+        return suffixed;
+    }
 
     std::string GetVarName(int32_t reg, int32_t version) {
         SSARef ref{static_cast<uint8_t>(reg), version};
@@ -239,16 +269,20 @@ struct AnalyzedFunction {
             return this->ssaOverrides.at(ref);
 
         if (this->globalRegNames.contains(reg))
-            return this->globalRegNames.at(reg);
+            return DisambiguateOwnName(this->globalRegNames.at(reg));
 
         if (variableNames.contains(ref))
             return variableNames.at(ref);
 
-        return std::format("v{}", reg);
+        return DisambiguateOwnName(std::format("v{}", reg));
     }
 
     void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }
+    // set by parent for LCT_UPVAL captures; survives PopulateNames.
+    void SetUpvalueNameOverride(int32_t index, const std::string &name) { upvalueNameOverrides[index] = name; }
     std::string GetUpvalueName(int32_t index) {
+        if (upvalueNameOverrides.contains(index))
+            return upvalueNameOverrides.at(index);
         if (upvalueNames.contains(index))
             return upvalueNames.at(index);
         return std::format("uv_{}", index);
@@ -272,6 +306,7 @@ struct AnalyzedFunction {
         this->ssaOverrides.clear();
         this->variableNames.clear();
         this->globalRegNames.clear();
+        this->disambiguatedNames.clear();
 
         int32_t uIdx = 0;
         for (const auto &name : lpDeserialized->upvalueNames)

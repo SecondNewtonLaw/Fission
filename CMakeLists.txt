@@ -20,8 +20,7 @@ set(ENABLE_PGO_CLANG_USE OFF) # enables PGO usage.
 set(ENABLE_ASAN OFF)
 set(ENABLE_UBSAN OFF)
 
-
-# be lenient in C for pointer types and fn decls, deps may fail to compile else.
+#be lenient in C for pointer types and fn decls, deps may fail to compile else.
 add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)
 add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
 add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
@@ -57,7 +56,7 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
         )
     endif ()
 elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    # msvc flags.
+#msvc flags.
     if (ENABLE_UBSAN)
         message(FATAL_ERROR "The Undefined Behaviour Sanitiser is not available on MSVC front-end compilers!")
     endif ()
@@ -75,8 +74,8 @@ include(cmake/identify_compiler.cmake)
 include(cmake/CPM.cmake)
 
 if (CXX_COMPILER_KIND STREQUAL "clang-cl")
-    # While clang-cl provides better diagnostics, it's still scuffed on some aspects
-    # and could cause previously compatible with MSVC code to not work anymore.
+#While clang - cl provides better diagnostics, it's still scuffed on some aspects
+#and could cause previously compatible with MSVC code to not work anymore.
     MESSAGE(FATAL_ERROR "Clang (with MSVC front-end) is not supported! Please use clang with a GNU front-end, or the Visual C/C++ compiler instead.")
 endif ()
 
@@ -114,7 +113,7 @@ set_target_properties(
 )
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
-    # gnu flags.
+#gnu flags.
     set(CXX_COMPILE_OPTIONS -mavx -static -Werror -Wall -Wextra -Wmicrosoft -Wpedantic -pedantic -fslp-vectorize -ftree-vectorize -fvectorize -funroll-loops -fstack-protector-strong -fstack-protector-all)
     set(CXX_LINK_OPTIONS -Wl,-Map -static)
 
@@ -154,7 +153,7 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     endif ()
 
 elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-    # msvc flags.
+#msvc flags.
     set(CXX_COMPILE_OPTIONS /arch:AVX2 /WX /W4 /permissive- /Zc:preprocessor /Ob3 /O2 /Ot
             /wd4127 #[==[ conditional expression is constant ]==]
             /wd4068 #[==[ unknown pragma '...' ]==]
@@ -192,7 +191,7 @@ add_library(Fission.Common STATIC
         Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
-# target_precompile_headers(Fission.Common PUBLIC Fission.Common/include/pch.hpp)
+#target_precompile_headers(Fission.Common PUBLIC Fission.Common / include / pch.hpp)
 target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 
@@ -206,8 +205,14 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/DenominatorAnalysis.cpp
         Fission.Decompiler/include/SSABuilder.hpp
         Fission.Decompiler/src/SSABuilder.cpp
+        Fission.Decompiler/include/Analysis/RobloxTypeInferer.hpp
+        Fission.Decompiler/src/Analysis/RobloxTypeInferer.cpp
         Fission.Decompiler/src/Decompiler.cpp
+        Fission.Decompiler/include/SafetyGuard.hpp
         Fission.Decompiler/include/SourceGenerator/Generator.hpp
+        Fission.Decompiler/include/Rewriters/ASTRewriter.hpp
+        Fission.Decompiler/include/Rewriters/IfChainSimplifier.hpp
+        Fission.Decompiler/include/Rewriters/ShortCircuitFolder.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/ASTNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/RootNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
@@ -238,7 +243,14 @@ if (BUILD_TESTING)
     )
 
     add_executable(Fission.Tests
+            Fission.Tests/TestLibassertHandler.cpp
             Fission.Tests/Decoding/BytecodeV6Decoding.cpp
+            Fission.Tests/CFG/CFGCoherence.cpp
+            Fission.Tests/Decompiler/DecompilationRoundtrip.cpp
+            Fission.Tests/Decompiler/LiftingSemantics.cpp
+            Fission.Tests/Decompiler/ControlFlowRegressions.cpp
+            Fission.Tests/Decompiler/ComplexControlFlow.cpp
+            Fission.Tests/Decompiler/TypeInference.cpp
     )
 
     target_link_libraries(Fission.Tests PRIVATE

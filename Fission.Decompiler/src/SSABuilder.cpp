@@ -3,8 +3,10 @@
 //
 #include "SSABuilder.hpp"
 #include "Deserializer.hpp"
+
 #include <algorithm>
 #include <array>
+#include <libassert/assert.hpp>
 #include <queue>
 #include <set>
 #include <vector>
@@ -668,6 +670,8 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 }
 
 void SSABuilder::Build(AnalyzedFunction &func) {
+    DEBUG_ASSERT(!func.basicBlocks.empty());
+    DEBUG_ASSERT(func.lpLiftedFunction != nullptr);
     int totalRegs = 255;
     if (func.lpLiftedFunction && func.lpLiftedFunction->lpDeserialized) {
         totalRegs = func.lpLiftedFunction->lpDeserialized->maxstacksize;

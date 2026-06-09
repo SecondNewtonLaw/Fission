@@ -8,9 +8,10 @@
 class CommentNode final : public Expression {
   public:
     std::string comment;
-    bool bNewLine=true;
-    CommentNode(const std::string &commentContent, bool newline) : comment(commentContent),bNewLine(newline) {}
-    void Accept(Visitor *visitor) override {
-        visitor->Visit(this);
-    }
+    bool bNewLine = true;
+    // Fission info note (suppressed by OmitFissionComments). false by default so warnings always emit.
+    bool bIsInformational = false;
+    CommentNode(const std::string &commentContent, bool newline, bool informational = false)
+        : comment(commentContent), bNewLine(newline), bIsInformational(informational) {}
+    void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

@@ -28,28 +28,46 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
     std::vector<int> dfsNumber(Nmax, -1);
     int dfsTime = 0;
 
-    std::function<void(int)> dfs = [&](int idx) {
-        dfsNumber[idx] = dfsTime;
-        vertex[dfsTime] = idx;
-        semi[dfsTime] = dfsTime;
-        best[dfsTime] = dfsTime;
-        ancestor[dfsTime] = -1;
-        dfsTime++;
-
-        for (int32_t succ : blocks[idx].successors) {
-            auto it = idToIdx.find(succ);
-            if (it == idToIdx.end())
-                continue;
-
-            int w = it->second;
-            if (dfsNumber[w] == -1) {
-                parent[w] = idx;
-                dfs(w);
+    // recursion overflows the stack on CFGs with hundreds of blocks; walk with an explicit stack.
+    {
+        struct Frame {
+            int idx;
+            size_t succIdx;
+        };
+        std::vector<Frame> stack;
+        auto enter = [&](int idx, int parentIdx) {
+            dfsNumber[idx] = dfsTime;
+            vertex[dfsTime] = idx;
+            semi[dfsTime] = dfsTime;
+            best[dfsTime] = dfsTime;
+            ancestor[dfsTime] = -1;
+            dfsTime++;
+            if (parentIdx != -1)
+                parent[idx] = parentIdx;
+            stack.push_back({idx, 0});
+        };
+        enter(idToIdx[entryId], -1);
+        while (!stack.empty()) {
+            auto &top = stack.back();
+            const auto &succs = blocks[top.idx].successors;
+            bool descended = false;
+            while (top.succIdx < succs.size()) {
+                int32_t succ = succs[top.succIdx++];
+                auto it = idToIdx.find(succ);
+                if (it == idToIdx.end())
+                    continue;
+                int w = it->second;
+                if (dfsNumber[w] == -1) {
+                    int parentIdx = top.idx;
+                    enter(w, parentIdx);
+                    descended = true;
+                    break;
+                }
             }
+            if (!descended)
+                stack.pop_back();
         }
-    };
-
-    dfs(idToIdx[entryId]);
+    }
 
     const int N = dfsTime;
 
