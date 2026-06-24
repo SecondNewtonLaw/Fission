@@ -83,6 +83,7 @@ CPMAddPackage(
         NAME libassert
         GITHUB_REPOSITORY jeremy-rifkin/libassert
         GIT_TAG v2.2.0
+        PATCHES ${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/libassert-add-algorithm-include.patch
         OPTIONS
         "LIBASSERT_USE_MAGIC_ENUM ON"
 )
@@ -114,8 +115,23 @@ set_target_properties(
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
 #gnu flags.
-    set(CXX_COMPILE_OPTIONS -mavx -static -Werror -Wall -Wextra -Wmicrosoft -Wpedantic -pedantic -fslp-vectorize -ftree-vectorize -fvectorize -funroll-loops -fstack-protector-strong -fstack-protector-all)
-    set(CXX_LINK_OPTIONS -Wl,-Map -static)
+    set(CXX_COMPILE_OPTIONS -Werror -Wall -Wextra -Wmicrosoft -Wpedantic -pedantic -fslp-vectorize -ftree-vectorize -fvectorize -funroll-loops -fstack-protector-strong -fstack-protector-all)
+    set(CXX_LINK_OPTIONS)
+
+    if (NOT APPLE)
+        list(APPEND CXX_LINK_OPTIONS -Wl,-Map)
+    endif ()
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        list(APPEND CXX_COMPILE_OPTIONS -mavx)
+    endif ()
+
+    if (WIN32 AND NOT MSVC)
+        list(APPEND CXX_COMPILE_OPTIONS -static)
+        list(APPEND CXX_LINK_OPTIONS -static)
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND CXX_LINK_OPTIONS -static-libgcc -static-libstdc++)
+    endif ()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         list(APPEND CXX_COMPILE_OPTIONS -Og)
@@ -234,6 +250,20 @@ add_executable(Fission.CLI
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
+
+add_executable(Fission.Server
+        Fission.Server/src/main.cpp
+)
+target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast)
+if (WIN32)
+    target_link_libraries(Fission.Server PRIVATE ws2_32)
+endif ()
+if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    target_compile_options(Fission.Server PRIVATE ${CXX_COMPILE_OPTIONS} -Wno-error=deprecated-literal-operator)
+else ()
+    target_compile_options(Fission.Server PRIVATE ${CXX_COMPILE_OPTIONS})
+endif ()
+target_link_options(Fission.Server PRIVATE ${CXX_LINK_OPTIONS})
 
 if (BUILD_TESTING)
     CPMAddPackage(

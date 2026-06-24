@@ -1,0 +1,11 @@
+diff --git a/src/paths.cpp b/src/paths.cpp
+--- a/src/paths.cpp
++++ b/src/paths.cpp
+@@ -1,6 +1,7 @@
+ #include "paths.hpp"
+ 
+ #include "common.hpp"
++#include <algorithm>
+ #include <memory>
+ 
+ LIBASSERT_BEGIN_NAMESPACE
