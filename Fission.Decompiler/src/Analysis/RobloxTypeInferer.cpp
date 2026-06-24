@@ -367,8 +367,8 @@ std::string RobloxTypeInferer::ResolveAutoName(const std::string &currentName, c
 void RobloxTypeInferer::RenameIdentifier(const std::shared_ptr<Expression> &expr, const std::string &name) {
     if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); id && id->identifier)
         id->identifier->name = name;
-    else if (auto id = std::dynamic_pointer_cast<Identifier>(expr))
-        id->name = name;
+    else if (auto identifier = std::dynamic_pointer_cast<Identifier>(expr))
+        identifier->name = name;
 }
 
 void RobloxTypeInferer::RegisterExistingNames(const std::vector<std::shared_ptr<Statement>> &stmts) {

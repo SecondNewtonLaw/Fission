@@ -5,27 +5,31 @@ include(CTest)
 
 
 set(CMAKE_CXX_STANDARD 23)
-set(USE_CCACHE ON)
+option(USE_CCACHE "Use ccache as the compiler launcher when available." ON)
 
-set(ALLOW_NON_STANDARD_MATH ON)
-set(DEBUG_INFORMATION_EXTENSIVE ON)
-set(DEBUG_NO_INLINING ON) # for breakpointing really inlined stuff (like iterators)
-set(USE_LTO OFF) # increases build times.
+option(ALLOW_NON_STANDARD_MATH "Enable non-standard fast-math optimizations." ON)
+option(DEBUG_INFORMATION_EXTENSIVE "Emit extensive debug information." ON)
+option(DEBUG_NO_INLINING "Disable function inlining for Debug builds." ON)
+option(USE_LTO "Enable link-time optimization." OFF)
 
-set(PRODUCTION_BUILD OFF) # enables production build, removes certain function calls and strings to prevent leaking internal information.
+option(PRODUCTION_BUILD "Remove selected internal information from production builds." OFF)
 
-set(ENABLE_PGO_CLANG_INSTRUMENT OFF) # enables PGO instrumentation
-set(ENABLE_PGO_CLANG_USE OFF) # enables PGO usage.
+option(ENABLE_PGO_CLANG_INSTRUMENT "Enable Clang PGO instrumentation." OFF)
+option(ENABLE_PGO_CLANG_USE "Enable Clang PGO usage." OFF)
 
-set(ENABLE_ASAN OFF)
-set(ENABLE_UBSAN OFF)
+option(ENABLE_ASAN "Enable AddressSanitizer." OFF)
+option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer." OFF)
 
-#be lenient in C for pointer types and fn decls, deps may fail to compile else.
-add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)
-add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
-add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
-add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-unused-parameter>)
-add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-c2y-extensions>)
+if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    # Be lenient in C for dependency pointer types and function declarations.
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
+    add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-unused-parameter>)
+    if (CMAKE_C_COMPILER_ID MATCHES "Clang|AppleClang")
+        add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-c2y-extensions>)
+    endif ()
+endif ()
 
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
@@ -72,6 +76,19 @@ endif ()
 
 include(cmake/identify_compiler.cmake)
 include(cmake/CPM.cmake)
+include(CheckCXXCompilerFlag)
+
+function(append_supported_cxx_compile_options out_var)
+    foreach (flag IN LISTS ARGN)
+        string(MAKE_C_IDENTIFIER "FISSION_CXX_SUPPORTS_${flag}" flag_supported_var)
+        check_cxx_compiler_flag("${flag}" "${flag_supported_var}")
+        if (${flag_supported_var})
+            list(APPEND ${out_var} "${flag}")
+        endif ()
+    endforeach ()
+
+    set(${out_var} "${${out_var}}" PARENT_SCOPE)
+endfunction()
 
 if (CXX_COMPILER_KIND STREQUAL "clang-cl")
 #While clang - cl provides better diagnostics, it's still scuffed on some aspects
@@ -83,6 +100,11 @@ CPMAddPackage(
         NAME libassert
         GITHUB_REPOSITORY jeremy-rifkin/libassert
         GIT_TAG v2.2.0
+        # libassert v2.2.0 is missing <algorithm> in src/paths.cpp on newer toolchains.
+        # Keep this idempotent patch until the dependency release includes that header.
+        PATCH_COMMAND ${CMAKE_COMMAND}
+            -D "SOURCE_DIR=<SOURCE_DIR>"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/libassert-add-algorithm-include.cmake"
         OPTIONS
         "LIBASSERT_USE_MAGIC_ENUM ON"
 )
@@ -93,6 +115,8 @@ CPMAddPackage(
         GIT_TAG 0.718
 )
 
+set(BOOST_INCLUDE_LIBRARIES beast container CACHE STRING "Boost libraries required by Fission")
+
 CPMAddPackage(
         NAME Boost
         VERSION 1.86.0 # Versions less than 1.85.0 may need patches for installation targets.
@@ -101,6 +125,15 @@ CPMAddPackage(
         OPTIONS "BOOST_ENABLE_CMAKE ON" "BOOST_SKIP_INSTALL_RULES ON" # Set `OFF` for installation
         "BUILD_SHARED_LIBS OFF"
 )
+
+if (TARGET boost_asio)
+    target_compile_definitions(boost_asio INTERFACE BOOST_ASIO_DISABLE_BOOST_COROUTINE)
+    get_target_property(BOOST_ASIO_LINK_LIBRARIES boost_asio INTERFACE_LINK_LIBRARIES)
+    if (BOOST_ASIO_LINK_LIBRARIES)
+        list(REMOVE_ITEM BOOST_ASIO_LINK_LIBRARIES Boost::context Boost::coroutine)
+        set_target_properties(boost_asio PROPERTIES INTERFACE_LINK_LIBRARIES "${BOOST_ASIO_LINK_LIBRARIES}")
+    endif ()
+endif ()
 
 set_target_properties(
         Luau.VM
@@ -114,8 +147,24 @@ set_target_properties(
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
 #gnu flags.
-    set(CXX_COMPILE_OPTIONS -mavx -static -Werror -Wall -Wextra -Wmicrosoft -Wpedantic -pedantic -fslp-vectorize -ftree-vectorize -fvectorize -funroll-loops -fstack-protector-strong -fstack-protector-all)
-    set(CXX_LINK_OPTIONS -Wl,-Map -static)
+    set(CXX_COMPILE_OPTIONS -Werror -Wall -Wextra -Wpedantic -pedantic -funroll-loops -fstack-protector-strong -fstack-protector-all)
+    set(CXX_LINK_OPTIONS)
+    append_supported_cxx_compile_options(CXX_COMPILE_OPTIONS -ftree-vectorize)
+
+    if (CXX_COMPILER_KIND STREQUAL "clang")
+        append_supported_cxx_compile_options(CXX_COMPILE_OPTIONS -Wmicrosoft -fslp-vectorize -fvectorize)
+    endif ()
+
+    if (CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
+        list(APPEND CXX_COMPILE_OPTIONS -mavx)
+    endif ()
+
+    if (WIN32 AND CXX_TOOLCHAIN STREQUAL "mingw")
+        list(APPEND CXX_COMPILE_OPTIONS -static)
+        list(APPEND CXX_LINK_OPTIONS -static)
+    elseif (CMAKE_SYSTEM_NAME STREQUAL "Linux")
+        list(APPEND CXX_LINK_OPTIONS -static-libgcc -static-libstdc++)
+    endif ()
 
     if (CMAKE_BUILD_TYPE STREQUAL "Debug")
         list(APPEND CXX_COMPILE_OPTIONS -Og)
@@ -125,8 +174,13 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     endif ()
 
     if (USE_LTO)
-        list(APPEND CXX_COMPILE_OPTIONS -flto=full -fwhole-program-vtables)
-        list(APPEND CXX_LINK_OPTIONS -flto=full -fwhole-program-vtables)
+        if (CXX_COMPILER_KIND STREQUAL "clang")
+            list(APPEND CXX_COMPILE_OPTIONS -flto=full -fwhole-program-vtables)
+            list(APPEND CXX_LINK_OPTIONS -flto=full -fwhole-program-vtables)
+        else ()
+            list(APPEND CXX_COMPILE_OPTIONS -flto)
+            list(APPEND CXX_LINK_OPTIONS -flto)
+        endif ()
     endif ()
 
     if (ALLOW_NON_STANDARD_MATH)
@@ -161,6 +215,8 @@ elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
             /wd4820 #[==[ THIS IS A REALLY STUPID WARNING, MSVC WHY? ]==]
             /wd5045 #[==[ Compiler will insert Spectre mitigation for memory load if /Qspectre switch specified -- Why the fuck would you warn for this? ]==]
             /wd4365 #[==[ 'argument': conversion from '...' to '...', signed/unsigned mismatch ]==]
+            /wd4244 #[==[ conversion from '...' to '...', possible loss of data ]==]
+            /wd4267 #[==[ conversion from 'size_t' to '...', possible loss of data ]==]
             /wd5219 #[==[ implicit conversion from '...' to '...', possible loss of data ]==]
             /wd5039 #[==[ pointer or reference to potentially throwing function passed to 'extern "C"' function under -EHc. Undefined behavior may occur if this function throws an exception. ]==]
             /wd4625 #[==[ blah blah copy implcitly deleted blah blah ]==]
@@ -234,6 +290,30 @@ add_executable(Fission.CLI
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
+
+add_executable(Fission.Server
+        Fission.Server/src/main.cpp
+)
+target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast)
+if (WIN32)
+    target_link_libraries(Fission.Server PRIVATE ws2_32)
+    target_compile_definitions(Fission.Server PRIVATE _WIN32_WINNT=0x0601)
+endif ()
+target_compile_options(Fission.Server PRIVATE ${CXX_COMPILE_OPTIONS})
+if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+    target_compile_options(Fission.Server PRIVATE -Wno-error=deprecated-literal-operator)
+    if (WIN32)
+        target_compile_options(Fission.Server PRIVATE
+                -Wno-error=language-extension-token
+                -Wno-error=gnu-anonymous-struct
+                -Wno-error=nested-anon-types
+                -Wno-error=microsoft-cpp-macro
+        )
+    endif ()
+elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
+    target_compile_options(Fission.Server PRIVATE /wd5311)
+endif ()
+target_link_options(Fission.Server PRIVATE ${CXX_LINK_OPTIONS})
 
 if (BUILD_TESTING)
     CPMAddPackage(

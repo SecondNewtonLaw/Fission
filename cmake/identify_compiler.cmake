@@ -22,7 +22,7 @@ else ()
         set(CXX_TOOLCHAIN "posix")
     endif ()
 
-    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang")
+    if (CMAKE_CXX_COMPILER_ID STREQUAL "Clang" OR CMAKE_CXX_COMPILER_ID STREQUAL "AppleClang")
         set(CXX_COMPILER_KIND "clang")
         if (WIN32)
             set(CXX_TOOLCHAIN "win32") # clang most likely runs with the MSVC ABI properly.
