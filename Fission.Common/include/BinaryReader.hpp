@@ -4,6 +4,7 @@
 
 #pragma once
 #include <libassert/assert.hpp>
+#include <cstring>
 #include <string>
 
 class BinaryReader {

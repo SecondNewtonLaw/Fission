@@ -3,6 +3,7 @@
 //
 
 #include "Deserializer.hpp"
+#include <cstring>
 #include <sstream>
 
 std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string &bytecode) {

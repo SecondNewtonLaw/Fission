@@ -15,10 +15,12 @@
 #include <algorithm>
 #include <chrono>
 #include <filesystem>
+#include <format>
 #include <fstream>
 #include <iostream>
 #include <optional>
 #include <ostream>
+#include <sstream>
 #include <unordered_map>
 
 std::string GetIndentation(int indentationLevel) {
@@ -135,7 +137,11 @@ void writefile(const std::filesystem::path &path, const std::string &content) {
 }
 
 std::optional<std::string> readfile(const std::filesystem::path &path, const bool isBinary = false) {
-    std::ifstream file(path, (isBinary ? std::ios::binary : 0) | std::ios::ate);
+    auto mode = std::ios::ate;
+    if (isBinary)
+        mode |= std::ios::binary;
+
+    std::ifstream file(path, mode);
 
     if (!file.is_open())
         return std::nullopt;
@@ -699,11 +705,11 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto controlFlowAnalyzeEnd = std::chrono::steady_clock::now();
 
     const auto ssaStart = std::chrono::steady_clock::now();
-    SSABuilder.Build(controlFlowAnalyzedFunction);
+    ssaBuilder.Build(controlFlowAnalyzedFunction);
     const auto ssaEnd = std::chrono::steady_clock::now();
 
     const auto astStart = std::chrono::steady_clock::now();
-    auto liftedAST = ASTLifter.Lift(controlFlowAnalyzedFunction);
+    auto liftedAST = astLifter.Lift(controlFlowAnalyzedFunction);
     AddDecompilerOptionsToHeader(liftedAST, flags);
 
     // ---- AST Rewriting ----
@@ -737,12 +743,12 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
 
     RootNode root{liftedAST.statements};
 
-    SourceGenerator.bOmitInformationalComments = (flags & DecompilerFlags::OmitFissionComments) == DecompilerFlags::OmitFissionComments;
+    sourceGenerator.bOmitInformationalComments = (flags & DecompilerFlags::OmitFissionComments) == DecompilerFlags::OmitFissionComments;
     const auto sgenStart = std::chrono::steady_clock::now();
-    const auto generator = SourceGenerator.GenerateSource(&root);
+    const auto generator = sourceGenerator.GenerateSource(&root);
     const auto sgenEnd = std::chrono::steady_clock::now();
 
-    std::println(std::cout, "generated source code:\n{}", generator);
+    std::cout << "generated source code:\n" << generator << '\n';
 
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;

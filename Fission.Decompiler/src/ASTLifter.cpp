@@ -8,7 +8,11 @@
 
 #include <algorithm>
 
+#if defined(__clang__)
 #pragma clang optimize off
+#endif
+
+constexpr uint32_t InvalidBlockId = static_cast<uint32_t>(-1);
 
 // Forward declaration for the chain-fold pass used by CreateBlock below.
 static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts);
@@ -761,7 +765,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         }
 
         std::set<uint32_t> visited;
-        ast.statements = LiftControlFlow(0, -1, visited);
+        ast.statements = LiftControlFlow(0, InvalidBlockId, visited);
         std::string ttinfo = "Unavailable";
 
         if (analyzedFunction.lpLiftedFunction->lpDeserialized->typeinfo.size() != 0) {
@@ -884,6 +888,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
 
             return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
         }
+        return std::make_shared<BooleanLiteralNode>(false);
     }
     default:
         return std::make_shared<BooleanLiteralNode>(false);
@@ -915,7 +920,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
     // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
     while (true) {
-        if (currentBlockId == static_cast<uint32_t>(-1) || currentBlockId >= m_currentFunction->basicBlocks.size())
+        if (currentBlockId == InvalidBlockId || currentBlockId >= m_currentFunction->basicBlocks.size())
             break;
 
         // body code reaching the innermost loop exit directly == `break` (normal exit goes via latch).
@@ -941,7 +946,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
         auto stmts = LiftBlockInstructions(block);
 
         // Linear continuation for the next iteration; -1 terminates the loop.
-        uint32_t nextBlockId = static_cast<uint32_t>(-1);
+        uint32_t nextBlockId = InvalidBlockId;
 
         switch (block.bType) {
     case BlockType::IfHeader: {
@@ -973,7 +978,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
             uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
 
-            if (mergeIdx == (uint32_t)-1) {
+            if (mergeIdx == InvalidBlockId) {
                 bool trueIsReturn = (m_currentFunction->basicBlocks[trueIdx].bType == BlockType::Return);
                 bool falseIsReturn = (m_currentFunction->basicBlocks[falseIdx].bType == BlockType::Return);
 
@@ -986,7 +991,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
 
             auto ifStmt = std::make_shared<IfStatementNode>();
             auto visitedCopy = visited;
-            if (mergeIdx != (uint32_t)-1)
+            if (mergeIdx != InvalidBlockId)
                 visitedCopy.insert(mergeIdx);
 
             // snapshot regs declared BEFORE branches: HoistPhiLocals tests "already in outer scope?"
@@ -1007,7 +1012,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     uint32_t depth = 0;
                     uint32_t cur = startId;
                     std::set<uint32_t> seen;
-                    while (cur != static_cast<uint32_t>(-1) && cur < m_currentFunction->basicBlocks.size() && !seen.contains(cur)) {
+                    while (cur != InvalidBlockId && cur < m_currentFunction->basicBlocks.size() && !seen.contains(cur)) {
                         seen.insert(cur);
                         const auto &b = m_currentFunction->basicBlocks[cur];
                         if (b.bType != BlockType::IfHeader)
@@ -1017,7 +1022,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         uint32_t bt = b.ifStatementTrue.value();
                         uint32_t bf = b.ifStatementFalse.value();
                         uint32_t bm = FindMergeBlock(bt, bf);
-                        if (bm == static_cast<uint32_t>(-1)) {
+                        if (bm == InvalidBlockId) {
                             bool tR = (m_currentFunction->basicBlocks[bt].bType == BlockType::Return);
                             bool fR = (m_currentFunction->basicBlocks[bf].bType == BlockType::Return);
                             if (tR && !fR)
@@ -1041,7 +1046,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     uint32_t chainStopId = mergeIdx;
                     std::set<uint32_t> chainVisited = visitedCopy;
                     while (true) {
-                        if (chainBlockId == static_cast<uint32_t>(-1) || chainBlockId >= m_currentFunction->basicBlocks.size())
+                        if (chainBlockId == InvalidBlockId || chainBlockId >= m_currentFunction->basicBlocks.size())
                             break;
                         if (!m_loopExitStack.empty() && chainBlockId == m_loopExitStack.back())
                             break;
@@ -1061,7 +1066,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         uint32_t cTrueIdx = chainBlock.ifStatementTrue.value();
                         uint32_t cFalseIdx = chainBlock.ifStatementFalse.value();
                         uint32_t cMergeIdx = FindMergeBlock(cTrueIdx, cFalseIdx);
-                        if (cMergeIdx == (uint32_t)-1) {
+                        if (cMergeIdx == InvalidBlockId) {
                             bool t = (m_currentFunction->basicBlocks[cTrueIdx].bType == BlockType::Return);
                             bool f = (m_currentFunction->basicBlocks[cFalseIdx].bType == BlockType::Return);
                             if (t && !f)
@@ -1113,7 +1118,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             // don't fall through into the loop exit here (would inline post-loop code / emit a stray
             // break); it's the break target and is lifted once after the loop.
             const bool mergeIsLoopExit = !m_loopExitStack.empty() && mergeIdx == m_loopExitStack.back();
-            if (mergeIdx != (uint32_t)-1 && !mergeIsLoopExit)
+            if (mergeIdx != InvalidBlockId && !mergeIsLoopExit)
                 nextBlockId = mergeIdx;
 
         } else {
@@ -1166,7 +1171,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 } else {
                     // Pattern 2: latch is plain JUMP back to header. exit cond is in the header
                     // or decomposed into trailing if-return blocks (`until a or b`); lift body then scan.
-                    uint32_t bodyStart = static_cast<uint32_t>(-1);
+                    uint32_t bodyStart = InvalidBlockId;
                     for (auto s : block.successors) {
                         if (s != exitIdx) {
                             bodyStart = s;
@@ -1179,7 +1184,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     bodyVisited.insert(exitIdx);
 
                     std::vector<std::shared_ptr<Statement>> bodyStmts;
-                    if (bodyStart != static_cast<uint32_t>(-1)) {
+                    if (bodyStart != InvalidBlockId) {
                         bodyStmts = LiftControlFlow(bodyStart, latchIdx, bodyVisited);
                     }
 
@@ -1223,14 +1228,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 }
                 nodes.push_back(repeatNode);
             } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
-                uint32_t bodyIdx = -1;
+                uint32_t bodyIdx = InvalidBlockId;
                 for (auto succ : block.successors) {
-                    if (succ != block.loopLatch.value_or(-1)) {
+                    if (succ != block.loopLatch.value_or(InvalidBlockId)) {
                         bodyIdx = succ;
                         break;
                     }
                 }
-                if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(-1))
+                if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(InvalidBlockId))
                     exitIdx = block.loopExit.value();
                 else if (block.loopLatch.has_value()) {
                     for (auto succ : m_currentFunction->basicBlocks[*block.loopLatch].successors) {
@@ -1266,7 +1271,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                         this->m_currentFunction->SetVariableName(baseReg + 2, startVer, loopVarName);
                         // expose this loop's exit so body branches to it become `break` (real exit only).
                         const bool hasBreakTarget =
-                            (exitIdx != static_cast<uint32_t>(-1) && exitIdx != latchIdx && exitIdx != bodyIdx);
+                            (exitIdx != InvalidBlockId && exitIdx != latchIdx && exitIdx != bodyIdx);
                         if (hasBreakTarget)
                             m_loopExitStack.push_back(exitIdx);
                         forNode->lpLoopBody = CreateBlock(LiftControlFlow(
@@ -1362,7 +1367,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 if (block.loopExit.has_value())
                     exitIdx = block.loopExit.value();
 
-                uint32_t bodyStart = -1;
+                uint32_t bodyStart = InvalidBlockId;
                 for (auto s : block.successors)
                     if (s != exitIdx)
                         bodyStart = s;
@@ -1379,11 +1384,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 else
                     whileNode->condition = InvertCondition(LiftCondition(block.lpTail));
 
-                if (bodyStart != static_cast<uint32_t>(-1)) {
+                if (bodyStart != InvalidBlockId) {
                     std::set<uint32_t> cloopVisited = visited;
                     cloopVisited.insert(latchIdx);
                     cloopVisited.insert(exitIdx);
-                    const bool hasBreakTarget = (exitIdx != static_cast<uint32_t>(-1) && exitIdx != latchIdx && exitIdx != bodyStart);
+                    const bool hasBreakTarget = (exitIdx != InvalidBlockId && exitIdx != latchIdx && exitIdx != bodyStart);
                     if (hasBreakTarget)
                         m_loopExitStack.push_back(exitIdx);
                     auto bodyStmts = LiftControlFlow(bodyStart, latchIdx, cloopVisited);
@@ -1413,14 +1418,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                 (block.dwBlockFlags & LoopBlockFlags::ForGeneralLoop_Pairs) == LoopBlockFlags::ForGeneralLoop_Pairs ||
                 (block.dwBlockFlags & LoopBlockFlags::ForGeneralLoop_Indexed) == LoopBlockFlags::ForGeneralLoop_Indexed
             ) {
-                uint32_t bodyIdx = -1;
+                uint32_t bodyIdx = InvalidBlockId;
                 for (auto succ : block.successors) {
-                    if (succ != block.loopLatch.value_or(-1)) {
+                    if (succ != block.loopLatch.value_or(InvalidBlockId)) {
                         bodyIdx = succ;
                         break;
                     }
                 }
-                if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(-1))
+                if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(InvalidBlockId))
                     exitIdx = block.loopExit.value();
                 else if (block.loopLatch.has_value()) {
                     for (auto succ : m_currentFunction->basicBlocks[*block.loopLatch].successors) {
@@ -1450,7 +1455,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
                     }
 
                     const bool hasBreakTarget =
-                        (exitIdx != static_cast<uint32_t>(-1) && exitIdx != block.loopLatch.value_or(-1) && exitIdx != bodyIdx);
+                        (exitIdx != InvalidBlockId && exitIdx != block.loopLatch.value_or(InvalidBlockId) && exitIdx != bodyIdx);
                     if (hasBreakTarget)
                         m_loopExitStack.push_back(exitIdx);
                     forNode->body = CreateBlock(LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
@@ -1524,7 +1529,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
             whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
             whileNode->body = CreateBlock(loopBody);
             nodes.push_back(whileNode);
-            nextBlockId = static_cast<uint32_t>(-1); // infinite loop: nothing after the back-edge is reachable.
+            nextBlockId = InvalidBlockId; // infinite loop: nothing after the back-edge is reachable.
         }
         break;
     }
@@ -1555,7 +1560,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftControlFlow(uint32_t curr
     }
     }
 
-        if (nextBlockId == static_cast<uint32_t>(-1))
+        if (nextBlockId == InvalidBlockId)
             break;
         currentBlockId = nextBlockId;
     }
@@ -3366,7 +3371,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
     std::vector<Link> links;
     std::set<uint32_t> guard;
     uint32_t cur = headerId;
-    uint32_t elseIdx = static_cast<uint32_t>(-1);
+    uint32_t elseIdx = InvalidBlockId;
     bool invertedFinal = false;
 
     while (cur < blocks.size() && !guard.contains(cur)) {
@@ -3400,7 +3405,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         break; // does not share the body → end of (non-)chain
     }
 
-    if (!invertedFinal || links.size() < 2 || elseIdx == static_cast<uint32_t>(-1))
+    if (!invertedFinal || links.size() < 2 || elseIdx == InvalidBlockId)
         return std::nullopt;
 
     // Structure confirmed. Lift each link's condition (the condition under which it

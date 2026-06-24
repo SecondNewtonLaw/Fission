@@ -5,10 +5,21 @@
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wunused-parameter"
+#if defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wunused-parameter"
+#endif
+#if defined(_MSC_VER)
+#pragma warning(push)
+#pragma warning(disable : 4100)
+#endif
 #include "Luau/Compiler.h"
-#pragma clang diagnostic pop
+#if defined(_MSC_VER)
+#pragma warning(pop)
+#endif
+#if defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
 #include "ASTLifter.hpp"
 #include "SSABuilder.hpp"
 #include "SourceGenerator/Generator.hpp"
@@ -63,9 +74,9 @@ struct DecompilationResult {
 class Decompiler {
     Deserializer deserializer{};
     ControlFlowAnalyzer controlFlowAnalyzer{};
-    SSABuilder SSABuilder{};
-    ASTLifter ASTLifter{};
-    SourceGenerator SourceGenerator{};
+    SSABuilder ssaBuilder{};
+    ASTLifter astLifter{};
+    SourceGenerator sourceGenerator{};
     GraphVisualizer visualizer{};
 
     DecompilationResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
