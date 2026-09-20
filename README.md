@@ -12,7 +12,7 @@ So, after some months of work, here we are.
 
 As of right now, Fission is being actively developed. When I find a sample that breaks I try to fix it, somewhat. Currently, it supports `integer` and other Luau specifics. I have taken the time to ensure the quality of it post rework, however no real thing can be guaranteed when dealing with stuff like this.
 
-Fission can (as of right now) decompile *most* loop and conditional structures without falling apart, and also has type inferrance and name inferrance, they're not perfect, however they make the trick!
+Fission can (as of right now) decompile *most* loop and conditional structures without falling apart, and also has type inference and name inference, they're not perfect, however they make the trick!
 
 ### Disclaimer
 
