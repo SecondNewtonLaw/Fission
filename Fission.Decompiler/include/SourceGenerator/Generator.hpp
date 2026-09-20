@@ -6,22 +6,35 @@
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "AbstractSyntaxTree/Visitor.hpp"
+#include "SafetyGuard.hpp"
 
 #include <cstdint>
 #include <format>
 #include <sstream>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 
 class SourceGenerator : public Visitor {
   public:
     std::stringstream buffer;
     size_t dwIndentationLevel = 0;
     static constexpr size_t kIndentationSpaceCount = 4;
+    // Split table literals that exceed this column.
+    static constexpr size_t kTableInlineColumnLimit = 80;
 
-    // min precedence ctx wants; child lower than this wraps in parens. 0 = stmt ctx.
+    // Wrap children below this precedence; zero denotes statement context.
     int m_minPrecedence = 0;
 
-    // luau precedence table (low num = low prec), matches lparser.cpp. unary at 7.
+    // Luau rejects a disambiguating semicolon before a block's first statement.
+    bool m_firstStmtInBlock = false;
+
+    // Cache table renderings and bound hostile or cyclic nesting.
+    static constexpr int kMaxTableDepth = 100;
+    int m_tableDepth = 0;
+    std::unordered_map<const TableLiteralNode *, std::string> m_tableInlineCache;
+
+    // Luau precedence from lparser.cpp; lower numbers bind less tightly.
     static int OperatorPrecedence(const std::string &op) {
         if (op == "or")
             return 1;
@@ -42,10 +55,10 @@ class SourceGenerator : public Visitor {
 
     static bool IsRightAssociative(const std::string &op) { return op == ".." || op == "^"; }
 
-    // `..` treated as associative so flat concat chains don't gain redundant parens.
+    // Treat concatenation chains as associative for rendering.
     static bool IsAssociative(const std::string &op) { return op == "or" || op == "and" || op == "+" || op == "*" || op == ".."; }
 
-    // emit child with pushed min precedence, restore after. use for every expr child Accept.
+    // Emit a child under a temporary minimum precedence.
     template <typename Node> void EmitWithPrecedence(int minPrec, Node *child) {
         const int saved = m_minPrecedence;
         m_minPrecedence = minPrec;
@@ -53,40 +66,143 @@ class SourceGenerator : public Visitor {
         m_minPrecedence = saved;
     }
 
+    // Parenthesize non-prefix expressions before index, member, call, or method suffixes.
+    static bool IsPrefixSafe(const std::shared_ptr<Expression> &e) {
+        return std::dynamic_pointer_cast<IdentifierExpressionNode>(e) != nullptr || std::dynamic_pointer_cast<IndexExpressionNode>(e) != nullptr ||
+               std::dynamic_pointer_cast<MemberExpressionNode>(e) != nullptr || std::dynamic_pointer_cast<CallExpressionNode>(e) != nullptr ||
+               std::dynamic_pointer_cast<NameCallExpressionNode>(e) != nullptr;
+    }
+
+    static bool ShouldEmitTypeAnnotation(const std::shared_ptr<Expression> &type) {
+        auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(type);
+        return !id || !id->identifier || id->identifier->name != "nil";
+    }
+    void EmitPrefix(const std::shared_ptr<Expression> &e) {
+        if (e == nullptr || IsPrefixSafe(e)) {
+            if (e != nullptr)
+                e->Accept(this);
+            return;
+        }
+        buffer << "(";
+        EmitWithPrecedence(0, e.get());
+        buffer << ")";
+    }
+
+    // A parenthesized statement can attach to the preceding line as call arguments.
+    bool StartsWithOpenParen(const std::shared_ptr<Expression> &e) {
+        if (e == nullptr)
+            return false;
+        if (!IsPrefixSafe(e))
+            return true;
+        if (auto m = std::dynamic_pointer_cast<MemberExpressionNode>(e))
+            return StartsWithOpenParen(m->table);
+        if (auto i = std::dynamic_pointer_cast<IndexExpressionNode>(e))
+            return StartsWithOpenParen(i->left);
+        if (auto c = std::dynamic_pointer_cast<CallExpressionNode>(e))
+            return StartsWithOpenParen(c->callee);
+        if (auto n = std::dynamic_pointer_cast<NameCallExpressionNode>(e))
+            return StartsWithOpenParen(n->calledOn);
+        return false;
+    }
+
     std::string GetIndentation() { return std::string(this->dwIndentationLevel * kIndentationSpaceCount, ' '); } // NOLINT(*-return-braced-init-list)
 
     void NextLine() { buffer << "\n"; }
     void IncreaseIndentation() { this->dwIndentationLevel++; }
     void DecreaseIndentation() {
-        ASSERT(this->dwIndentationLevel - 1 >= 0, "indentation out of range. Overpopped");
+        ASSERT(this->dwIndentationLevel > 0, "indentation out of range. Overpopped");
         this->dwIndentationLevel--;
     }
 
+    static bool IsReservedLuauWord(const std::string &s) {
+        static const std::unordered_set<std::string> kKeywords = {"and", "break",    "do",     "else", "elseif", "end",   "false",
+                                                                  "for", "function", "if",     "in",   "local",  "nil",   "not",
+                                                                  "or",  "repeat",   "return", "then", "true",   "until", "while"};
+        return kKeywords.contains(s);
+    }
+
     bool IsLegalLuauIndex(const std::string &str) {
-        if (str.empty() || isdigit(str[0]))
+        if (str.empty() || isdigit(static_cast<unsigned char>(str[0])))
             return false;
-        return std::ranges::all_of(str, [](const char c) { return isalnum(c) || c == '_'; });
+        if (IsReservedLuauWord(str)) // `t.function` is illegal; caller falls back to `t["function"]`
+            return false;
+        return std::ranges::all_of(str, [](const char c) { return isalnum(static_cast<unsigned char>(c)) || c == '_'; });
+    }
+
+    // Return a valid multi-byte UTF-8 sequence length, or zero.
+    static int ValidUtf8Length(const std::string &v, size_t i) {
+        const size_t n = v.size();
+        const auto at = [&](size_t k) { return static_cast<unsigned char>(v[k]); };
+        const auto cont = [&](size_t k) { return k < n && (at(k) & 0xC0) == 0x80; };
+        const unsigned char c = at(i);
+        if (c < 0x80)
+            return 0;
+        if (c >= 0xC2 && c <= 0xDF)
+            return cont(i + 1) ? 2 : 0;
+        if (c == 0xE0)
+            return (i + 2 < n && at(i + 1) >= 0xA0 && at(i + 1) <= 0xBF && cont(i + 2)) ? 3 : 0; // no overlong
+        if (c >= 0xE1 && c <= 0xEC)
+            return (cont(i + 1) && cont(i + 2)) ? 3 : 0;
+        if (c == 0xED)
+            return (i + 2 < n && at(i + 1) >= 0x80 && at(i + 1) <= 0x9F && cont(i + 2)) ? 3 : 0; // no surrogates
+        if (c >= 0xEE && c <= 0xEF)
+            return (cont(i + 1) && cont(i + 2)) ? 3 : 0;
+        if (c == 0xF0)
+            return (i + 3 < n && at(i + 1) >= 0x90 && at(i + 1) <= 0xBF && cont(i + 2) && cont(i + 3)) ? 4 : 0; // no overlong
+        if (c >= 0xF1 && c <= 0xF3)
+            return (cont(i + 1) && cont(i + 2) && cont(i + 3)) ? 4 : 0;
+        if (c == 0xF4)
+            return (i + 3 < n && at(i + 1) >= 0x80 && at(i + 1) <= 0x8F && cont(i + 2) && cont(i + 3)) ? 4 : 0; // <= U+10FFFF
+        return 0; // lone continuation (0x80-0xBF), 0xC0/0xC1, 0xF5-0xFF
     }
 
     void EmitQuotedString(const std::string &value) {
         buffer << "\"";
-        for (char c : value) {
+        const size_t n = value.size();
+        for (size_t i = 0; i < n;) {
+            const unsigned char c = static_cast<unsigned char>(value[i]);
             switch (c) {
             case '\\':
                 buffer << "\\\\";
-                break;
+                ++i;
+                continue;
             case '"':
                 buffer << "\\\"";
-                break;
+                ++i;
+                continue;
+            case '\n':
+                buffer << "\\n";
+                ++i;
+                continue;
             case '\r':
                 buffer << "\\r";
-                break;
+                ++i;
+                continue;
             case '\t':
                 buffer << "\\t";
-                break;
+                ++i;
+                continue;
             default:
-                buffer << c;
                 break;
+            }
+            // Escape control bytes and DEL as fixed-width decimals.
+            if (c < 0x20 || c == 0x7f) {
+                buffer << std::format("\\{:03}", static_cast<int>(c));
+                ++i;
+                continue;
+            }
+            if (c < 0x80) { // printable ASCII
+                buffer << static_cast<char>(c);
+                ++i;
+                continue;
+            }
+            // Preserve valid UTF-8; escape lone high bytes without changing string bytes.
+            if (const int len = ValidUtf8Length(value, i); len > 0) {
+                buffer.write(value.data() + i, len);
+                i += static_cast<size_t>(len);
+            } else {
+                buffer << std::format("\\{:03}", static_cast<int>(c));
+                ++i;
             }
         }
         buffer << "\"";
@@ -96,8 +212,14 @@ class SourceGenerator : public Visitor {
 
     void Visit(RootNode *lpNode) override {
         (void)lpNode;
-        for (const auto &body : lpNode->programBody)
+        // Header comments do not end first-statement context.
+        bool first = true;
+        for (const auto &body : lpNode->programBody) {
+            m_firstStmtInBlock = first;
             body->Accept(this);
+            if (!std::dynamic_pointer_cast<CommentNode>(body))
+                first = false;
+        }
     }
 
     void Visit(Identifier *lpNode) override { buffer << lpNode->name; }
@@ -118,7 +240,7 @@ class SourceGenerator : public Visitor {
     void Visit(FunctionDeclarationNode *lpNode) override {
         (void)lpNode;
 
-        // anon inline `function(args) ... end` at expr site. no indent/local/name, caller does punctuation.
+        // Caller owns punctuation around an inline anonymous function.
         if (lpNode->bAnonymousInline) {
             buffer << "function(";
             EmitFunctionArguments(lpNode);
@@ -149,7 +271,29 @@ class SourceGenerator : public Visitor {
         this->NextLine();
     }
 
-    // drops informational comments only; warnings still emitted.
+    // Emit Luau class syntax.
+    void Visit(ClassDeclarationNode *lpNode) override {
+        buffer << this->GetIndentation();
+        if (lpNode->bExported)
+            buffer << "export ";
+        buffer << "class " << lpNode->className;
+        this->NextLine();
+
+        this->IncreaseIndentation();
+        for (const auto &prop : lpNode->propertyNames) {
+            buffer << this->GetIndentation() << "public " << prop;
+            this->NextLine();
+        }
+        for (const auto &method : lpNode->methods)
+            if (method)
+                method->Accept(this); // renders `function name(self, ...) ... end` at the class-body indent.
+        this->DecreaseIndentation();
+
+        buffer << this->GetIndentation() << "end";
+        this->NextLine();
+    }
+
+    // Drop informational comments but retain warnings.
     bool bOmitInformationalComments = false;
 
     void Visit(CommentNode *lpNode) override {
@@ -187,7 +331,7 @@ class SourceGenerator : public Visitor {
 
     void Visit(FunctionArgumentExpression *lpNode) override {
         lpNode->argumentName->Accept(this);
-        if (lpNode->type) {
+        if (lpNode->type && ShouldEmitTypeAnnotation(*lpNode->type)) {
             buffer << ": ";
             lpNode->type.value()->Accept(this);
         }
@@ -197,12 +341,15 @@ class SourceGenerator : public Visitor {
         (void)lpNode;
         if (!lpNode->inlineCall) {
             buffer << this->GetIndentation();
+            if (!m_firstStmtInBlock && lpNode->rets.empty() && StartsWithOpenParen(lpNode->callee))
+                buffer << ";"; // a bare `(expr)(...)` statement would merge with the previous line
             if (!lpNode->rets.empty()) {
                 if (lpNode->bIsLocalDeclaration)
                     buffer << "local ";
                 for (size_t i = 0; i < lpNode->rets.size(); i++) {
                     lpNode->rets.at(i)->Accept(this);
-                    if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr) {
+                    if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr &&
+                        ShouldEmitTypeAnnotation(lpNode->retTypes[i])) {
                         buffer << ": ";
                         lpNode->retTypes[i]->Accept(this);
                     }
@@ -211,7 +358,7 @@ class SourceGenerator : public Visitor {
                 }
                 buffer << " = ";
             }
-            lpNode->callee->Accept(this);
+            EmitPrefix(lpNode->callee);
             buffer << "(";
             for (size_t i = 0; i < lpNode->arguments.size(); i++) {
                 lpNode->arguments.at(i)->Accept(this);
@@ -222,7 +369,9 @@ class SourceGenerator : public Visitor {
             buffer << ")";
             this->NextLine();
         } else {
-            lpNode->callee->Accept(this);
+            if (lpNode->bAdjustToOne)
+                buffer << "("; // truncate a multiret call to one value in a spread position
+            EmitPrefix(lpNode->callee);
             buffer << "(";
             for (size_t i = 0; i < lpNode->arguments.size(); i++) {
                 lpNode->arguments.at(i)->Accept(this);
@@ -230,6 +379,8 @@ class SourceGenerator : public Visitor {
                     buffer << ", ";
             }
             buffer << ")";
+            if (lpNode->bAdjustToOne)
+                buffer << ")";
         }
     }
 
@@ -239,26 +390,40 @@ class SourceGenerator : public Visitor {
         const bool wrap = kUnaryPrec < m_minPrecedence;
         if (wrap)
             buffer << "(";
-        buffer << lpNode->op;
-        // unary binds tighter than everything but `^`, so wrap lower-prec operand.
+        // Separate adjacent minus tokens; Luau lexes `--` as a comment.
+        std::stringstream operandBuf;
+        operandBuf.swap(buffer);
+        // Unary operators bind tighter than every operator except exponentiation.
         EmitWithPrecedence(kUnaryPrec, lpNode->operand.get());
+        operandBuf.swap(buffer);
+        const std::string operand = operandBuf.str();
+        buffer << lpNode->op;
+        if (!lpNode->op.empty() && lpNode->op.back() == '-' && !operand.empty() && operand.front() == '-')
+            buffer << ' ';
+        const bool integerNegation = lpNode->op == "-" && dynamic_cast<IntegerLiteralNode *>(lpNode->operand.get());
+        if (integerNegation)
+            buffer << '(';
+        buffer << operand;
+        if (integerNegation)
+            buffer << ')';
         if (wrap)
             buffer << ")";
     }
 
     void Visit(IndexExpressionNode *lpNode) override {
         (void)lpNode;
-        lpNode->left->Accept(this);
+        EmitPrefix(lpNode->left);
         buffer << "[";
-        lpNode->right->Accept(this);
+        if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->right))
+            EmitQuotedString(str->value);
+        else
+            EmitWithPrecedence(11, lpNode->right.get());
         buffer << "]";
     }
 
     void Visit(MemberExpressionNode *lpNode) override {
         (void)lpNode;
-        // Walk left chain `a.b.c.d.e.f` iteratively. Recursive lpNode->table->Accept
-        // stacks one frame per hop and blows the stack on long Roblox lookup chains
-        // (e.g. game.Workspace.PlayerScripts.X.Y.Z.W...).
+        // Walk long member chains iteratively to bound stack use.
         std::vector<MemberExpressionNode *> chain;
         MemberExpressionNode *cur = lpNode;
         while (cur != nullptr) {
@@ -269,25 +434,26 @@ class SourceGenerator : public Visitor {
             cur = inner.get();
         }
 
-        // emit innermost base once (non-MemberExpression subtree), then unwind suffixes.
+        // Emit the base once, then unwind suffixes.
         MemberExpressionNode *innermost = chain.back();
         if (innermost->table != nullptr)
-            innermost->table->Accept(this);
+            EmitPrefix(innermost->table);
 
-        // Each MemberExpressionNode emits its own suffix: `.name` (legal ident with table),
-        // empty (StringLiteral-but-not-legal-ident with table → preserves original `return`-without-emit
-        // semantics), or `[key]` otherwise.
+        // Use bracket syntax for keys that are not legal identifiers.
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             MemberExpressionNode *node = *it;
             if (node->table != nullptr) {
-                if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(node->key)) {
-                    if (IsLegalLuauIndex(lpStringLiteral->value))
-                        buffer << "." << lpStringLiteral->value;
+                if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(node->key);
+                    lpStringLiteral && IsLegalLuauIndex(lpStringLiteral->value)) {
+                    buffer << "." << lpStringLiteral->value;
                     continue;
                 }
             }
             buffer << "[";
-            node->key->Accept(this);
+            if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(node->key))
+                EmitQuotedString(str->value);
+            else
+                EmitWithPrecedence(11, node->key.get());
             buffer << "]";
         }
     }
@@ -326,9 +492,25 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(BlockStatementNode *lpNode) override {
-        (void)lpNode;
+        // Preserve explicit register-reuse scopes.
+        const bool asDo = lpNode->bEmitAsDoBlock;
+        if (asDo) {
+            buffer << this->GetIndentation() << "do";
+            this->NextLine();
+            this->IncreaseIndentation();
+        }
+        // Leading comments do not end first-statement context.
+        bool first = true;
         for (const auto &node : lpNode->body) {
+            m_firstStmtInBlock = first;
             node->Accept(this);
+            if (!std::dynamic_pointer_cast<CommentNode>(node))
+                first = false;
+        }
+        if (asDo) {
+            this->DecreaseIndentation();
+            buffer << this->GetIndentation() << "end";
+            this->NextLine();
         }
     }
 
@@ -354,7 +536,7 @@ class SourceGenerator : public Visitor {
             this->NextLine();
             return;
         }
-        // Only-else form (no then branch): render as-is.
+        // Preserve an else-only recovered branch.
         if (lpNode->thenBranch == nullptr) {
             buffer << this->GetIndentation() << "if ";
             lpNode->condition->Accept(this);
@@ -368,7 +550,7 @@ class SourceGenerator : public Visitor {
             return;
         }
 
-        // walk if/elseif/else iteratively: else == single if -> render `elseif`, not nested.
+        // Flatten single-if else branches into elseif chains.
         IfStatementNode *cur = lpNode;
         bool first = true;
         while (true) {
@@ -409,7 +591,9 @@ class SourceGenerator : public Visitor {
     void Visit(AssignmentStatementNode *lpNode) override {
         (void)lpNode;
         buffer << this->GetIndentation();
-        // LHS is a write target, never wraps. RHS at stmt ctx so reset min prec.
+        if (!m_firstStmtInBlock && StartsWithOpenParen(lpNode->left))
+            buffer << ";"; // `(expr).f = v` as a statement would merge with the previous line
+        // Assignment targets never wrap; values use statement precedence.
         EmitWithPrecedence(0, lpNode->left.get());
         buffer << " = ";
         EmitWithPrecedence(0, lpNode->right.get());
@@ -418,9 +602,7 @@ class SourceGenerator : public Visitor {
 
     void Visit(BinaryExpressionNode *lpNode) override {
         (void)lpNode;
-        // Walk the left spine iteratively: chained binops `a+b+c+d+...` Visit-recurse one frame
-        // per link via left->Accept and blow the stack on deeply-nested expressions emitted by
-        // optimised/obfuscated bytecode. Collect spine entries top-down, then emit bottom-up.
+        // Walk deep binary left spines iteratively to bound stack use.
         const int savedMin = m_minPrecedence;
         struct SpineEntry {
             BinaryExpressionNode *node;
@@ -446,7 +628,7 @@ class SourceGenerator : public Visitor {
             auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->left);
             if (!lb)
                 break;
-            // mirror the recursive Accept's m_minPrecedence push so inner wrap decisions match.
+            // Match recursive precedence propagation.
             m_minPrecedence = leftMin;
             cur = lb.get();
         }
@@ -468,19 +650,44 @@ class SourceGenerator : public Visitor {
         m_minPrecedence = savedMin;
     }
 
+    void Visit(IfExpressionNode *lpNode) override {
+        // If-expressions need parentheses inside operators; nested else arms form elseif chains.
+        const bool wrap = m_minPrecedence > 0;
+        if (wrap)
+            buffer << "(";
+        IfExpressionNode *cur = lpNode;
+        buffer << "if ";
+        EmitWithPrecedence(1, cur->condition.get());
+        buffer << " then ";
+        EmitWithPrecedence(1, cur->thenExpr.get());
+        while (auto elseIf = std::dynamic_pointer_cast<IfExpressionNode>(cur->elseExpr)) {
+            buffer << " elseif ";
+            EmitWithPrecedence(1, elseIf->condition.get());
+            buffer << " then ";
+            EmitWithPrecedence(1, elseIf->thenExpr.get());
+            cur = elseIf.get();
+        }
+        buffer << " else ";
+        EmitWithPrecedence(1, cur->elseExpr.get());
+        if (wrap)
+            buffer << ")";
+    }
+
     void Visit(StringLiteralNode *lpNode) override {
         (void)lpNode;
 
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        if (lpNode->value.find('\n') != std::string::npos) {
-            buffer << "[[" << lpNode->value << "]]";
-            if (lpNode->bUseParenthesis)
-                buffer << ")";
-            return;
-        }
 
-        EmitQuotedString(lpNode->value);
+        // Use long brackets only when contents cannot terminate or invalidate the literal.
+        const std::string &v = lpNode->value;
+        // A trailing bracket would fuse with the delimiter.
+        const bool longSafe = v.find('\n') != std::string::npos && v.front() != '\n' && v.find("]]") == std::string::npos && v.back() != ']' &&
+                              std::ranges::all_of(v, [](unsigned char c) { return c >= 0x20 || c == '\n' || c == '\t'; });
+        if (longSafe)
+            buffer << "[[" << v << "]]";
+        else
+            EmitQuotedString(v);
 
         if (lpNode->bUseParenthesis)
             buffer << ")";
@@ -509,6 +716,13 @@ class SourceGenerator : public Visitor {
     }
 
     std::string GenerateSource(RootNode *lpRoot) {
+        // A SourceGenerator instance is reused across decompiles.
+        buffer.str("");
+        buffer.clear();
+        dwIndentationLevel = 0;
+        m_minPrecedence = 0;
+        m_tableDepth = 0;
+        m_tableInlineCache.clear();
         lpRoot->Accept(this);
         return buffer.str();
     }
@@ -518,7 +732,7 @@ class SourceGenerator : public Visitor {
         buffer << this->GetIndentation();
         buffer << "local ";
         lpNode->identifier->Accept(this);
-        if (lpNode->type) {
+        if (lpNode->type && ShouldEmitTypeAnnotation(*lpNode->type)) {
             buffer << ": ";
             lpNode->type.value()->Accept(this);
         }
@@ -537,39 +751,106 @@ class SourceGenerator : public Visitor {
             buffer << ")";
     }
 
-    void Visit(TableLiteralNode *lpNode) override {
-        if (lpNode->bUseParenthesis)
-            buffer << "(";
-        buffer << "{ ";
-        for (size_t i = 0; i < lpNode->expressions.size(); i++) {
-            if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(lpNode->expressions.at(i)); lpBinExpr) {
-                if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpBinExpr->left)) {
-                    buffer << "[";
-                    lpBinExpr->left->Accept(this);
-                    buffer << "] ";
-                    buffer << lpBinExpr->op;
-                    buffer << " ";
-                    lpBinExpr->right->Accept(this);
-                } else {
-                    lpNode->expressions.at(i)->Accept(this);
-                }
-            } else {
-                lpNode->expressions.at(i)->Accept(this);
+    // Table entries use primary-expression precedence.
+    void EmitTableEntry(const std::shared_ptr<Expression> &entry) {
+        // Only assignment nodes encode keyed entries; other binary expressions remain values.
+        if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(entry); lpBinExpr && lpBinExpr->op == "=") {
+            if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpBinExpr->left)) {
+                buffer << "[";
+                EmitQuotedString(str->value);
+                buffer << "] " << lpBinExpr->op << " ";
+                lpBinExpr->right->Accept(this);
+                return;
             }
-            if (i < lpNode->expressions.size() - 1)
+        }
+        entry->Accept(this);
+    }
+
+    // Render entries separately to choose inline or multi-line layout.
+    std::string RenderTableEntriesInline(const std::vector<std::shared_ptr<Expression>> &entries) {
+        std::stringstream scratch;
+        scratch.swap(buffer); // buffer now empty; the real output is parked in `scratch`
+        const int savedMin = m_minPrecedence;
+        m_minPrecedence = 0;
+        for (size_t i = 0; i < entries.size(); ++i) {
+            EmitTableEntry(entries[i]);
+            if (i + 1 < entries.size())
                 buffer << ", ";
         }
-        buffer << " }";
+        m_minPrecedence = savedMin;
+        std::string rendered = buffer.str();
+        buffer.swap(scratch); // restore the real output stream
+        return rendered;
+    }
+
+    void Visit(TableLiteralNode *lpNode) override {
+        // Enforce the decompile budget during table measurement.
+        Fission::CheckDecompileDeadline();
+        if (lpNode->bUseParenthesis)
+            buffer << "(";
+
+        if (lpNode->expressions.empty()) {
+            buffer << "{  }";
+            if (lpNode->bUseParenthesis)
+                buffer << ")";
+            return;
+        }
+
+        // Bound deep or self-referential tables.
+        if (m_tableDepth >= kMaxTableDepth) {
+            buffer << std::format("{{ --[[ FISSION WARN: +{} nested table structure; refusing to lift further! ]] }}", kMaxTableDepth);
+            if (lpNode->bUseParenthesis)
+                buffer << ")";
+            return;
+        }
+        ++m_tableDepth;
+
+        // Cache inline forms so nested width measurement remains linear.
+        std::string inlineForm;
+        if (const auto it = m_tableInlineCache.find(lpNode); it != m_tableInlineCache.end()) {
+            inlineForm = it->second;
+        } else {
+            inlineForm = RenderTableEntriesInline(lpNode->expressions);
+            m_tableInlineCache.emplace(lpNode, inlineForm);
+        }
+        const size_t indentWidth = dwIndentationLevel * kIndentationSpaceCount;
+        // Split nested blocks or forms that exceed the estimated column limit.
+        const bool multiline = inlineForm.find('\n') != std::string::npos || (indentWidth + inlineForm.size() + 4) > kTableInlineColumnLimit;
+
+        if (!multiline) {
+            buffer << "{ " << inlineForm << " }";
+        } else {
+            buffer << "{";
+            this->NextLine();
+            this->IncreaseIndentation();
+            const int savedMin = m_minPrecedence;
+            m_minPrecedence = 0;
+            for (const auto &entry : lpNode->expressions) {
+                buffer << this->GetIndentation();
+                EmitTableEntry(entry);
+                buffer << ","; // trailing comma on each line; luau permits a dangling separator
+                this->NextLine();
+            }
+            m_minPrecedence = savedMin;
+            this->DecreaseIndentation();
+            buffer << this->GetIndentation() << "}";
+        }
+
+        --m_tableDepth;
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }
-
 
     void Visit(NameCallExpressionNode *lpNode) override {
         if (lpNode->rets.empty()) {
             if (!lpNode->inlineCall)
                 buffer << this->GetIndentation();
-            lpNode->calledOn->Accept(this);
+            if (!m_firstStmtInBlock && !lpNode->inlineCall && StartsWithOpenParen(lpNode->calledOn))
+                buffer << ";"; // a bare `(expr):m(...)` statement would merge with the previous line
+            const bool wrapOne = lpNode->inlineCall && lpNode->bAdjustToOne;
+            if (wrapOne)
+                buffer << "("; // truncate a multiret method call to one value in a spread position
+            EmitPrefix(lpNode->calledOn);
             buffer << ":";
             lpNode->callWhat->Accept(this);
             buffer << "(";
@@ -580,6 +861,8 @@ class SourceGenerator : public Visitor {
             }
 
             buffer << ")";
+            if (wrapOne)
+                buffer << ")";
 
             if (!lpNode->inlineCall)
                 this->NextLine();
@@ -590,7 +873,7 @@ class SourceGenerator : public Visitor {
             buffer << "local ";
         for (size_t i = 0; i < lpNode->rets.size(); i++) {
             lpNode->rets.at(i)->Accept(this);
-            if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr) {
+            if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr && ShouldEmitTypeAnnotation(lpNode->retTypes[i])) {
                 buffer << ": ";
                 lpNode->retTypes[i]->Accept(this);
             }
@@ -598,7 +881,7 @@ class SourceGenerator : public Visitor {
                 buffer << ", ";
         }
         buffer << " = ";
-        lpNode->calledOn->Accept(this);
+        EmitPrefix(lpNode->calledOn);
         buffer << ":";
         lpNode->callWhat->Accept(this);
         buffer << "(";
@@ -665,9 +948,23 @@ class SourceGenerator : public Visitor {
     void Visit(CompoundBinaryExpressionNode *lpNode) override {
         (void)lpNode;
         buffer << this->GetIndentation();
-        lpNode->left->Accept(this);
-        buffer << " " << lpNode->op << "= ";
-        lpNode->right->Accept(this);
+        if (!m_firstStmtInBlock && StartsWithOpenParen(lpNode->left))
+            buffer << ";"; // `(expr).f op= v` as a statement would merge with the previous line
+        // Luau lacks compound logical assignments.
+        const std::string &op = lpNode->op;
+        const bool compoundable = op == "+" || op == "-" || op == "*" || op == "/" || op == "//" || op == "%" || op == "^" || op == "..";
+        if (compoundable) {
+            lpNode->left->Accept(this);
+            buffer << " " << op << "= ";
+            lpNode->right->Accept(this);
+        } else {
+            const int prec = OperatorPrecedence(op);
+            lpNode->left->Accept(this);
+            buffer << " = ";
+            EmitWithPrecedence(prec, lpNode->left.get());
+            buffer << " " << op << " ";
+            EmitWithPrecedence(prec + 1, lpNode->right.get());
+        }
         this->NextLine();
     }
 
@@ -676,11 +973,15 @@ class SourceGenerator : public Visitor {
         buffer << this->GetIndentation() << "repeat";
         this->NextLine();
         this->IncreaseIndentation();
-        lpNode->body->Accept(this);
+        if (lpNode->body) // defensive: a malformed (null-body) loop must not segfault the generator
+            lpNode->body->Accept(this);
         this->DecreaseIndentation();
         this->NextLine();
         buffer << this->GetIndentation() << "until (";
-        lpNode->condition->Accept(this);
+        if (lpNode->condition)
+            lpNode->condition->Accept(this);
+        else
+            buffer << "true"; // a missing condition is malformed; emit a parseable placeholder
         buffer << ")";
         this->NextLine();
     }
@@ -691,13 +992,12 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(TableBinaryExpressionNode *lpNode) override {
-        // in binary expressions present in tables, the key may require to be wrapped in [], or else it will not be real compilable code.
+        // Computed table keys require brackets; values do not.
         (void)lpNode;
         buffer << "[";
         lpNode->left->Accept(this);
-        buffer << "] " << lpNode->op << " (";
+        buffer << "] " << lpNode->op << " ";
         lpNode->right->Accept(this);
-        buffer << ")";
     }
     void Visit(IntegerLiteralNode *lpNode) override {
         if (lpNode->bUseParenthesis)
@@ -708,33 +1008,29 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(VectorNode *lpNode) override {
-        const float x = lpNode->x;
-        const float y = lpNode->y;
-        const float z = lpNode->z;
+        std::visit(
+            [&](const auto &components) {
+                const auto [x, y, z, w] = components;
+                (void)w;
 
-        if (x == 0 && y == 0 && z == 0) {
-            buffer << "Vector3.zero";
-        }
-        else if (x == 1 && y == 0 && z == 0) {
-            buffer << "Vector3.xAxis";
-        }
-        else if (x == -1 && y == 0 && z == 0) {
-            buffer << "-Vector3.xAxis";
-        }
-        else if (x == 0 && y == 1 && z == 0) {
-            buffer << "Vector3.yAxis";
-        }
-        else if (x == 0 && y == -1 && z == 0) {
-            buffer << "-Vector3.yAxis";
-        }
-        else if (x == 0 && y == 0 && z == 1) {
-            buffer << "Vector3.zAxis";
-        }
-        else if (x == 0 && y == 0 && z == -1) {
-            buffer << "-Vector3.zAxis";
-        }
-        else {
-            buffer << "Vector3.new(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
-        }
+                if (x == 0 && y == 0 && z == 0)
+                    buffer << "Vector3.zero";
+                else if (x == 1 && y == 0 && z == 0)
+                    buffer << "Vector3.xAxis";
+                else if (x == -1 && y == 0 && z == 0)
+                    buffer << "-Vector3.xAxis";
+                else if (x == 0 && y == 1 && z == 0)
+                    buffer << "Vector3.yAxis";
+                else if (x == 0 && y == -1 && z == 0)
+                    buffer << "-Vector3.yAxis";
+                else if (x == 0 && y == 0 && z == 1)
+                    buffer << "Vector3.zAxis";
+                else if (x == 0 && y == 0 && z == -1)
+                    buffer << "-Vector3.zAxis";
+                else
+                    buffer << "Vector3.new(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
+            },
+            lpNode->components
+        );
     }
 };

@@ -8,13 +8,19 @@
 #include "Luau/BytecodeUtils.h"
 #include "lua.h"
 #include <array>
+#include <cctype>
 #include <libassert/assert.hpp>
+#include <memory>
 #include <optional>
 #include <span>
+#include <string>
+#include <string_view>
 #include <variant>
 #include <vector>
 
 #define USERDATA_TYPE_LIMIT (LBC_TYPE_TAGGED_USERDATA_END - LBC_TYPE_TAGGED_USERDATA_BASE)
+
+using LuauUserdataTypeNames = std::array<std::string, USERDATA_TYPE_LIMIT>;
 
 struct DeserializedBytecode;
 struct LuauLocalVar {
@@ -33,8 +39,6 @@ struct LuauInstruction {
     LuauInstruction() : instruction(0) {}
 
     LuauInstruction(const Instruction instruction) { this->instruction = instruction; }
-
-    [[nodiscard]] bool HasAux() const { return Luau::getOpLength(this->GetOpCode()) == 2; }
 
     [[nodiscard]] int GetOpCodeSize() const { return Luau::getOpLength(this->GetOpCode()); }
 
@@ -71,8 +75,14 @@ typedef bool LuauBoolean;
 typedef DeserializedFunction *LuauProto; // bytecode id?
 typedef int64_t LuauInteger;
 
-struct LuauVector {
-    float x, y, z, w;
+struct LuauVectorConstant {
+    using Float = std::array<float, 4>;
+    using Double = std::array<double, 4>;
+
+    std::variant<Float, Double> components;
+
+    LuauVectorConstant(float x, float y, float z, float w) : components(Float{x, y, z, w}) {}
+    LuauVectorConstant(double x, double y, double z, double w) : components(Double{x, y, z, w}) {}
 };
 
 struct LuauTable {
@@ -80,17 +90,27 @@ struct LuauTable {
     std::vector<int32_t> valueConstantIndices{};
 };
 
+// V10 class shape names a class and its declared members; NEWCLASSMEMBER provides method values.
+struct LuauClassShape {
+    std::string className{};
+    std::vector<std::string> propertyNames{};
+    std::vector<std::string> methodNames{};
+};
+
 struct LuauConstant {
     lua_Type kType{};
-    std::variant<LuauTable, LuauString, LuauVector, LuauNumber, LuauBoolean, LuauProto, LuauInteger> constantData{};
+    std::variant<LuauTable, LuauString, LuauVectorConstant, LuauNumber, LuauBoolean, LuauProto, LuauInteger, LuauClassShape> constantData{};
 
     LuauConstant() : kType(LUA_TNIL) {}
 
     LuauConstant(const lua_Type kType) { this->kType = kType; }
 
+    // Class shapes use LUA_TNIL because they have no runtime Lua type.
+    [[nodiscard]] bool IsClassShape() const { return std::holds_alternative<LuauClassShape>(constantData); }
+
     template <typename T> T GetValue() const {
         static_assert(
-            typeid(T) == typeid(LuauTable) || typeid(T) == typeid(LuauString) || typeid(T) == typeid(LuauVector) || typeid(T) == typeid(LuauNumber) ||
+            typeid(T) == typeid(LuauTable) || typeid(T) == typeid(LuauString) || typeid(T) == typeid(LuauVectorConstant) || typeid(T) == typeid(LuauNumber) ||
                 typeid(T) == typeid(LuauBoolean) || typeid(T) == typeid(LuauProto),
             "invalid templated typename T!"
         );
@@ -118,9 +138,11 @@ struct DeserializedFunction {
     std::optional<std::string> debugName;
     std::uint8_t linegaplog2;
     std::vector<std::uint8_t> lineinfo;
-    std::int32_t *abslineinfo;
+    // Offset avoids a pointer that would dangle when the enclosing function moves.
+    std::size_t abslineinfoOffset = 0;
     std::vector<LuauLocalVar> locvars{};
     std::vector<std::string> upvalueNames;
+    std::shared_ptr<const LuauUserdataTypeNames> userdataTypeNames;
 };
 
 struct DeserializedBytecode {
@@ -128,29 +150,52 @@ struct DeserializedBytecode {
     std::uint8_t typesVersion = 0;
     std::vector<std::string> stringTable{};
     std::vector<DeserializedFunction> functions{};
-    std::array<uint8_t, USERDATA_TYPE_LIMIT> userdataMappings{};
+    std::array<uint32_t, USERDATA_TYPE_LIMIT> userdataMappings{};
     DeserializedFunction *lpMainFunction;
 
     std::optional<std::string> ReadFromStringTable(const std::uint32_t stringId) const {
         if (stringId == 0)
             return std::nullopt;
 
-        return stringTable.at(stringId - 1);
+        // Malformed string references return an empty optional.
+        if (stringId - 1 >= stringTable.size())
+            return std::nullopt;
+
+        return stringTable[stringId - 1];
     }
 };
 
 class Deserializer {
 
   public:
-    static std::string GetBytecodeTypeName(uint8_t typeByte) {
+    static bool IsValidTypeName(std::string_view name) {
+        bool segmentStart = true;
+        for (const unsigned char c : name) {
+            if (c == '.') {
+                if (segmentStart)
+                    return false;
+                segmentStart = true;
+            } else if ((segmentStart && (std::isalpha(c) || c == '_')) || (!segmentStart && (std::isalnum(c) || c == '_'))) {
+                segmentStart = false;
+            } else {
+                return false;
+            }
+        }
+        return !segmentStart;
+    }
+
+    static std::string GetBytecodeTypeName(uint8_t typeByte, const LuauUserdataTypeNames *userdataTypeNames = nullptr) {
         uint8_t baseType = typeByte & ~LBC_TYPE_OPTIONAL_BIT;
         bool isOptional = (typeByte & LBC_TYPE_OPTIONAL_BIT) != 0;
 
         std::string typeName;
 
         if (baseType >= LBC_TYPE_TAGGED_USERDATA_BASE && baseType < LBC_TYPE_TAGGED_USERDATA_END) {
-            // typeName = typeMap[baseType - LBC_TYPE_TAGGED_USERDATA_BASE];
-            typeName = "any /* userdata, unmapped */";
+            const auto index = static_cast<size_t>(baseType - LBC_TYPE_TAGGED_USERDATA_BASE);
+            if (userdataTypeNames && IsValidTypeName((*userdataTypeNames)[index]))
+                typeName = (*userdataTypeNames)[index];
+            else
+                typeName = "any --[[ userdata, unmapped ]]";
         } else {
             switch (baseType) {
             case LBC_TYPE_NIL:
@@ -169,7 +214,7 @@ class Deserializer {
                 typeName = "table";
                 break;
             case LBC_TYPE_FUNCTION:
-                typeName = "function";
+                typeName = "(...any) -> ...any";
                 break;
             case LBC_TYPE_THREAD:
                 typeName = "thread";
@@ -193,7 +238,7 @@ class Deserializer {
         }
 
         if (isOptional) {
-            typeName += "?";
+            typeName = (baseType == LBC_TYPE_FUNCTION ? "(" + typeName + ")?" : typeName + "?");
         }
 
         return typeName;
@@ -216,10 +261,15 @@ class Deserializer {
             return std::nullopt;
 
         auto types = reader.GetCurrentReaderPosition();
-        return GetBytecodeTypeName(types[2 + arg]);
+        const auto typeByte = types[2 + arg];
+        const auto baseType = typeByte & ~LBC_TYPE_OPTIONAL_BIT;
+        if (baseType == LBC_TYPE_TABLE || baseType == LBC_TYPE_USERDATA)
+            return std::nullopt;
+        if (baseType >= LBC_TYPE_TAGGED_USERDATA_BASE && baseType < LBC_TYPE_TAGGED_USERDATA_END &&
+            (!lpFunc->userdataTypeNames || !IsValidTypeName((*lpFunc->userdataTypeNames)[baseType - LBC_TYPE_TAGGED_USERDATA_BASE])))
+            return std::nullopt;
+        return GetBytecodeTypeName(typeByte, lpFunc->userdataTypeNames.get());
     }
-
-    static std::string GetTypeName(DeserializedFunction *lpFunc, uint8_t arg) { return TryGetTypeName(lpFunc, arg).value_or("any"); }
 
     std::optional<DeserializedBytecode> Deserialize(const std::string &bytecode);
 };

@@ -8,6 +8,7 @@
 #include "Deserializer.hpp"
 #include "lua.h"
 
+#include <boost/unordered/unordered_flat_set.hpp>
 #include <memory>
 #include <set>
 #include <string>
@@ -21,6 +22,11 @@ struct ASTFunction {
     std::vector<ASTFunction> subFunctions;
 };
 
+class ControlFlowTask;
+
+// Limit recovery failure to one function.
+struct ASTLiftBudgetExceeded {};
+
 class ASTLifter {
   public:
     std::shared_ptr<Expression> InvertCondition(const std::shared_ptr<Expression> &cond);
@@ -29,10 +35,15 @@ class ASTLifter {
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
     std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
 
-    std::unordered_set<int32_t> m_definedRegisters;
-    std::unordered_set<int32_t> m_pinnedRegisters;
+    boost::unordered_flat_set<int32_t> m_definedRegisters;
+    boost::unordered_flat_set<int32_t> m_pinnedRegisters;
+    // Captured-register declarations must remain before their closures.
+    boost::unordered_flat_set<int32_t> m_capturedRegisters;
 
-    std::unordered_set<int32_t> m_processedInstructions;
+    boost::unordered_flat_set<int32_t> m_processedInstructions;
+
+    // Tail duplication must re-inline pure reads that never emitted a declaration.
+    boost::unordered_flat_set<int32_t> m_inlineConsumedDefs;
 
     struct PinnedRegisterScope {
         ASTLifter *m_lpLifter;
@@ -46,28 +57,48 @@ class ASTLifter {
         PinnedRegisterScope &operator=(const PinnedRegisterScope &) = delete;
     };
 
-    std::set<SSARef> m_phiConsumers;
+    boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_phiConsumers;
 
-    // Closures detected as single-use call-argument candidates. The NEWCLOSURE /
-    // DUPCLOSURE handler builds a FunctionDeclarationNode marked
-    // `bAnonymousInline = true`, parks it here keyed by the closure's SSA ref,
-    // and skips pushing it as a top-level statement. LiftExpression substitutes
-    // it in-place when the call argument lookup reaches the same SSA ref.
+    // Keep effectful loop-condition definitions at their original execution site.
+    boost::unordered_flat_set<const LiftedInstruction *> m_loopCondNoInline;
+
+    // Repeat conditions consume terminator-only definitions exactly once.
+    boost::unordered_flat_set<const LiftedInstruction *> m_deferToConditionInline;
+
+    // Single-use call-argument closures, keyed by SSA reference.
     std::unordered_map<SSARef, std::shared_ptr<FunctionDeclarationNode>> m_inlineableClosures;
 
-    std::unordered_map<std::string, DeserializedFunction *> m_takenFunctionNames;
+    // Class declarations collect following NEWCLASSMEMBER operations by SSA reference.
+    std::unordered_map<SSARef, std::shared_ptr<ClassDeclarationNode>> m_pendingClasses;
+
     int32_t m_dwLastFunctionIndex = 0;
 
   private:
     AnalyzedFunction *m_currentFunction = nullptr;
 
-    // Stack of innermost-loop exit blocks. While lifting a loop body, a branch that
-    // targets the top entry is a `break` (normal completion flows through the latch,
-    // never straight to the exit), so LiftControlFlow emits a BreakStatementNode
-    // instead of inlining the post-loop code.
+    // Reject malformed constant indices at the decompiler safety boundary.
+    const LuauConstant &ConstantAt(long idx) const;
+
+    // Bound recursive definition lookup for hostile graphs.
+    int m_expressionDepth = 0;
+
+    // Cap irreducible CFG re-lifts before memory exhaustion.
+    uint64_t m_blockLiftBudget = 0;
+    uint64_t m_blockLiftsPerformed = 0;
+
+    // FindMergeBlock is pure over a fixed CFG.
+    std::unordered_map<uint64_t, int32_t> m_mergeCache;
+
+    // Reverse definition map keeps ShouldInline lookup constant-time.
+    std::unordered_map<const LiftedInstruction *, std::vector<SSARef>> m_defsByInstruction;
+
+    // Captured SSA references must remain real locals.
+    boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_capturedDefs;
+
+    // Branches to the innermost loop exit become break statements.
     std::vector<uint32_t> m_loopExitStack;
 
-    std::vector<std::shared_ptr<Statement>> LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, std::set<uint32_t> &visited);
+    ControlFlowTask LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, boost::unordered_flat_set<uint32_t> &visited);
     std::string GetFunctionName(DeserializedFunction *lpDeserialized) {
         if (lpDeserialized->debugName.has_value())
             return std::format("{}", *lpDeserialized->debugName);
@@ -78,58 +109,63 @@ class ASTLifter {
     }
 
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const BasicBlock &block, bool forceDefinitions = false);
-    bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const std::set<uint32_t> &visitedScopes);
+    bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const boost::unordered_flat_set<uint32_t> &visitedScopes);
     std::shared_ptr<Expression> LiftExpression(const LiftedOperand &operand, bool forceExpression = false);
     std::shared_ptr<Expression> LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested);
     std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst);
+    // Resolve SETLIST elements for folded and deferred constructor paths.
+    std::shared_ptr<Expression> LiftSetListElement(const LiftedInstruction &setList, size_t k);
+    // Identify calls that require truncation when inlined into a spread-tail position.
+    bool IsMultretCall(const LiftedInstruction &callDef, int32_t callDefIndex) const;
     bool ShouldInline(const LiftedInstruction *inst);
+    bool ShouldInlineImpl(const LiftedInstruction *inst);
+    // ShouldInline inputs remain fixed during a function lift.
+    std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
+    // Materialized LOADB-diamond booleans cannot fold into table literals.
+    std::unordered_set<int32_t> m_diamondBoolRegs;
+    static bool CanOperationRaise(LiftedOperation op);
+    // Prevent effectful definitions from crossing retained instructions.
+    bool StaysAsStatement(const LiftedInstruction *e);
+    bool StoreTargetsFreshTable(const LiftedInstruction *e);
+    bool IsConstructorElement(const LiftedInstruction *e);
+    bool InliningReordersEffect(const LiftedInstruction *def, const LiftedInstruction *use);
     uint32_t FindBlockForInstruction(const LiftedInstruction *inst) const;
-    std::string ResolveVariableName(const LiftedOperand &op);
+    std::string ResolveVariableName(const LiftedOperand &op, bool markDefined = true);
+    void SeedEnclosingNames(AnalyzedFunction &target) const;
     int32_t FindMergeBlock(uint32_t branchA, uint32_t branchB);
 
-    // When a register is the target of a phi at the merge block, any
-    // `local vR = ...` the branches emitted is wrongly block-scoped: the value
-    // must outlive the `if`. Convert those branch declarations into plain
-    // assignments and hoist a single uninitialized `local vR` before the if.
-    void HoistPhiLocals(int32_t mergeIdx, const std::shared_ptr<IfStatementNode> &ifStmt,
-                        std::vector<std::shared_ptr<Statement>> &nodes, const std::unordered_set<int32_t> &definedBeforeBranches);
+    // Pure shared value arms may be re-lifted without duplicating effects.
+    bool IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) const;
+    // Extend safe re-lifting across pure short-circuit regions that reconverge at one merge.
+    bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
+    // Cap value-arm re-lifts for pathological CFGs.
+    uint32_t m_valueArmDuplications = 0;
 
-    // Result of recognising the LOADB-diamond that Luau emits when a comparison
-    // is materialised into a register as a boolean value (e.g. `x = a ~= b`).
+    // Hoist phi targets that must outlive branch scopes.
+    void HoistPhiLocals(
+        int32_t mergeIdx, uint32_t stopBlockId, const std::shared_ptr<IfStatementNode> &ifStmt, std::vector<std::shared_ptr<Statement>> &nodes,
+        const boost::unordered_flat_set<int32_t> &definedBeforeBranches
+    );
+
+    // Materialized comparison encoded as a LOADB diamond.
     struct BoolMaterialization {
         std::shared_ptr<Statement> assignment; // `Rd = <comparison>`
         uint32_t continueBlock;                // merge block (T) to keep lifting from
     };
-    // Detect the diamond rooted at `headerId`: a comparison/truth jump whose
-    // fall-through block is a single `LOADB Rd,bF (+jump)` and whose jump target
-    // begins with `LOADB Rd,bT` (bT != bF). Collapses it into `Rd = cond` (or its
-    // negation). Returns nullopt when the shape does not match. On success the
-    // two boolean loads are marked processed.
+    // Collapse a matching LOADB diamond into a boolean expression.
     std::optional<BoolMaterialization> DetectBooleanMaterialization(uint32_t headerId);
 
-    // A short-circuit OR-chain that Luau lowers into a run of IfHeaders all
-    // branching to one shared `then` body (`if a or b or c then BODY else ELSE`).
+    // Short-circuit OR chain whose headers share one body.
     struct OrChainInfo {
         std::shared_ptr<Expression> condition; // a or b or c ...
         uint32_t bodyIdx;                      // shared then-body block (the OR target)
         uint32_t elseIdx;                      // block reached when every term is false
         std::vector<uint32_t> chainBlocks;     // the header blocks subsumed into `condition`
     };
-    // Detect the OR-chain rooted at `headerId`: consecutive IfHeaders whose
-    // jump-to-true edge targets a common body, chained through their fall-through,
-    // with the final term inverted (its false edge reaches the body). Returns
-    // nullopt unless the run is at least two links and ends with that inverted
-    // final term — the signature that distinguishes an OR-chain from an AND-chain
-    // (whose links uniformly share their true edge with no inverted terminator).
-    // Without this the shared body is mistaken for the merge block and emitted as
-    // an unconditional tail, clobbering later sibling branches.
+    // Match consecutive headers ending in the inverted term that distinguishes OR from AND.
     std::optional<OrChainInfo> DetectOrChain(uint32_t headerId);
+    std::optional<OrChainInfo> DetectGuardRegion(uint32_t headerId);
 
-    // `while <const-true> do` has no header test, so Luau emits only an unconditional
-    // back-edge. When that back-edge's latch targets a block that is itself an inner
-    // loop header (e.g. a for), both loops share the header and the single loopLatch
-    // slot holds only the inner loop — the outer infinite while is lost. Returns that
-    // outer latch (a LoopLatch predecessor jumping back unconditionally, distinct from
-    // the inner loop's own latch) so the inner loop can be wrapped in `while true`.
+    // Recover an outer infinite loop when it shares an inner loop's header.
     std::optional<uint32_t> DetectInfiniteWhileLatch(uint32_t headerId, uint32_t innerLatchId);
 };

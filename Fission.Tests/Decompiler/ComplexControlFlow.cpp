@@ -1,8 +1,8 @@
 //
 // Created by Dottik on 2/6/2026.
 //
+
 // Complex control-flow stress tests (deep if/elseif chains, nested loops, break/continue).
-//
 
 #include "Decompiler.hpp"
 #include "Luau/Common.h"
@@ -55,9 +55,28 @@ namespace {
 
 } // namespace
 
-// =========================================================================
+// A store after a terminating branch join must remain one store.
+TEST_CASE("CCF: terminating branch join does not duplicate property store", "[Decompiler][ControlFlow][Regression]") {
+    const auto out = DecompileOrFail(R"(
+        local t = { value = false }
+        local function f(flag)
+            local value
+            if flag then
+                value = true
+            else
+                value = false
+            end
+            t.value = value
+            return t
+        end
+        return f
+    )");
+    INFO("decompile:\n" << out);
+    CHECK(CountSubstr(out, "t.value =") == 1);
+    CHECK(CountSubstr(out, "return t") == 1);
+}
+
 // if / elseif chains
-// =========================================================================
 
 // Plain 4-way `==` chain: every body present exactly once, else present.
 TEST_CASE("CCF: four-way elseif chain preserves every branch once", "[Decompiler][ControlFlow][If]") {
@@ -82,20 +101,19 @@ TEST_CASE("CCF: four-way elseif chain preserves every branch once", "[Decompiler
     CHECK(CountSubstr(out, "fd(") == 1);
 }
 
-// An assignment-bodied elseif chain compiles to nested *negated* ifs; the AST
-// flattener must invert them back into a readable `elseif` chain rather than a
 // `local v = a and b or c` lowers to a diamond (`if not a then v=c else v=b; if v
-// then ... end end`); the short-circuit folder must collapse it back to the single
-// expression rather than leaving the nested-if form.
+// then ... end end`). Fold it back to one short-circuit expression.
 TEST_CASE("CCF: a-and-b-or-c folds to a short-circuit expression", "[Decompiler][ShortCircuit]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(a, b, c)
             local x = a and b or c
             print(x)
         end
         return f
     )",
-        2);
+        2
+    );
     INFO("decompile:\n" << out);
     // One folded expression, not a staircase of ifs assigning x.
     CHECK(ContainsRegex(out, std::regex(R"(=\s*\w+\s+and\s+\w+\s+or\s+\w+)")));
@@ -105,13 +123,15 @@ TEST_CASE("CCF: a-and-b-or-c folds to a short-circuit expression", "[Decompiler]
 // The same, with a method-call middle term (the ShouldUseVehicleCamera isSubj
 // shape): `cs and cs:IsA("X") or false`.
 TEST_CASE("CCF: and-call-or folds with a namecall middle term", "[Decompiler][ShortCircuit]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(self, cs)
             self.x = cs and cs:IsA("VehicleSeat") or false
         end
         return f
     )",
-        2);
+        2
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(and\s+\w+:IsA\("VehicleSeat"\)\s+or\s+false)")));
 }
@@ -213,8 +233,7 @@ TEST_CASE("CCF: elseif chain with no-op tail branches", "[Decompiler][ControlFlo
     CHECK(ContainsRegex(out, std::regex(R"("Occlusion")")));
 }
 
-// Nested CameraMode handling (report cat 10 CameraMode sub-tree): if inside the
-// first elseif arm, with its own elseif/else.
+// Preserve a nested if with its own elseif and else inside an outer elseif arm.
 TEST_CASE("CCF: nested if inside an elseif arm", "[Decompiler][ControlFlow][If]") {
     const auto out = DecompileOrFail(R"(
         local function f(prop, mode)
@@ -312,9 +331,7 @@ TEST_CASE("CCF: compound boolean conditions in elseif arms", "[Decompiler][Contr
     CHECK(CountSubstr(out, "s(") >= 1);
 }
 
-// =========================================================================
 // Loops with nested control flow
-// =========================================================================
 
 // Nested while inside while; inner break exits only the inner loop.
 TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Loop]") {
@@ -346,10 +363,8 @@ TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Loop]
 }
 
 // repeat-until with an if/break inside the body. A `repeat ... until` with a
-// mid-body break is rendered as the equivalent `while true do ... if c break end`
-// — the key requirement is that the mid-body `break` keeps its position so `step`
-// is NOT run on the break iteration (it used to fold the break into the loop
-// condition and re-order it ahead of `step`).
+// mid-body break is rendered as the equivalent `while true do ... if c break end`;
+// the `break` must keep its position so `step` does not run on that iteration.
 TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow][Loop]") {
     const auto out = DecompileOrFail(R"(
         local function f()
@@ -376,7 +391,7 @@ TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow]
 
 // while containing a nested repeat-until.
 // The statements after the inner `repeat ... until` (`tail(i)`, `i = i + 1`) must
-// stay in the while body, after the repeat — not be pulled into the repeat body.
+// stay in the while body, after the repeat; not be pulled into the repeat body.
 // (Was a degenerate loopExit==latch making the exit block look like the body.)
 TEST_CASE("CCF: while with a nested repeat-until", "[Decompiler][ControlFlow][Loop]") {
     const auto out = DecompileOrFail(R"(
@@ -526,4 +541,24 @@ TEST_CASE("CCF: generic-for with conditional skip", "[Decompiler][ControlFlow][L
     CHECK(CountSubstr(out, "visit(") == 1);
     CHECK(CountSubstr(out, "finish(") == 1);
     CHECK(CountWord(out, "break") == 1);
+}
+
+// At O0 Luau lowers a short-circuit `or`/`and` chain feeding a table index into a ladder of
+// register-rewrites with a duplicated merge consumer. The chain must fold back into a single index
+// expression, not explode into if/return arms (which also duplicate the consumer N times). At O1+ the
+// leading concat constant-folds and the whole chain collapses, so the bug is O0-only.
+TEST_CASE("Regress: or/and short-circuit chain feeding a table index folds at O0", "[Decompiler][ShortCircuit][Regression]") {
+    const std::string source = "local t = { [\"hello\"] = 1 }\n"
+                               "print(t[(\"h\" .. \"e\" .. \"ll\" .. \"o\") or #t or #(\"halo\" .. \"halo\") and _])\n";
+    const std::string out = DecompileOrFail(source, 0);
+    INFO("decompiled:\n" << out);
+    CHECK(CountWord(out, "if") == 0);     // no exploded if-ladder
+    CHECK(CountWord(out, "return") == 0); // no duplicated early returns
+    CHECK(CountSubstr(out, "print(") == 1);
+    CHECK(ContainsRegex(out, std::regex(R"(\bor\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\band\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(print\([^\n]*\[)"))); // the chain feeds a table index
+    // O0 IR fixpoint: re-decompiling the decompiled source is stable (a wrong fold would diverge).
+    const std::string out2 = DecompileOrFail(out, 0);
+    CHECK(out == out2);
 }

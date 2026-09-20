@@ -1,11 +1,4 @@
-//
-// CFG coherence and sense tests.
-//
-// Each test compiles a Luau snippet, runs the full CFA pipeline
-// (DetermineBasicBlocks -> OptimizeGraph -> PruneUnreachable -> IdentifyStructures),
-// and asserts invariants the graph should hold regardless of the lifter's
-// downstream behavior.
-//
+// Assert graph invariants after the full control-flow analysis pipeline.
 
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
@@ -771,6 +764,48 @@ TEST_CASE("CFG: triple-nested loops", "[CFG]") {
     INFO("triple-nested for/while/repeat loops should produce at least 3 LoopHeaders");
     CHECK(CountBlocksByType(f, BlockType::LoopHeader) >= 3);
     CHECK(CountBlocksByType(f, BlockType::Return) >= 1);
+}
+
+TEST_CASE("CFG: unreachable trailing instructions do not fall past the function", "[CFG][Regression]") {
+    LiftedFunction function{};
+    function.instructions = {{LiftedOperation::RETURN, 0}, {LiftedOperation::NOP, 1}};
+
+    SECTION("Dead predecessor cycle") {
+        LiftedInstruction branch{LiftedOperation::JUMPIF, 1};
+        branch.operands.resize(2);
+        branch.operands[0].type = LiftedOperandType::Register;
+        branch.operands[0].value.reg = 0;
+        branch.operands[1].type = LiftedOperandType::ImmediateInteger;
+        branch.operands[1].value.imm.n = -1;
+        function.instructions.insert(function.instructions.begin() + 1, branch);
+        function.instructions.back().instructionIndex = 2;
+    }
+    SECTION("Dead cleanup after return") {}
+
+    ControlFlowAnalyzer analyzer{};
+    auto analyzed = analyzer.DetermineBasicBlocks(&function);
+    analyzer.PruneUnreachable(analyzed);
+    CHECK(analyzed.basicBlocks.front().bType == BlockType::Return);
+    CHECK(analyzed.basicBlocks.back().bType == BlockType::Dead);
+    CHECK(analyzed.basicBlocks.back().successors.empty());
+    CheckEdgeSymmetry(analyzed);
+}
+
+TEST_CASE("CFG: reachable fallthrough past the function is rejected", "[CFG][Safety]") {
+    LiftedFunction function{};
+    function.instructions = {{LiftedOperation::NOP, 0}};
+
+    SECTION("Entry falls through") {}
+    SECTION("Jump bypasses return") {
+        LiftedInstruction jump{LiftedOperation::JUMP, 0};
+        jump.operands.resize(1);
+        jump.operands[0].type = LiftedOperandType::ImmediateInteger;
+        jump.operands[0].value.imm.n = 2;
+        function.instructions = {jump, {LiftedOperation::RETURN, 1}, {LiftedOperation::NOP, 2}};
+    }
+
+    ControlFlowAnalyzer analyzer{};
+    CHECK_THROWS(analyzer.DetermineBasicBlocks(&function));
 }
 
 TEST_CASE("CFG: empty while loop body", "[CFG]") {

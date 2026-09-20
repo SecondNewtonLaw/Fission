@@ -93,10 +93,8 @@ RobloxTypeInferer::CallReturnType(const std::string &methodName, const std::vect
 
     if (methodName == "insert" || methodName == "remove" || methodName == "sort" || methodName == "clear")
         return std::nullopt;
-    if (methodName == "create" || methodName == "freeze" || methodName == "clone" || methodName == "pack")
+    if (methodName == "create" || methodName == "freeze" || methodName == "clone")
         return "table";
-    if (methodName == "find")
-        return "number";
     if (methodName == "keys" || methodName == "values")
         return "table";
     if (methodName == "concat")
@@ -113,8 +111,10 @@ RobloxTypeInferer::CallReturnType(const std::string &methodName, const std::vect
         return "thread";
     if (methodName == "resume")
         return "boolean";
-    if (methodName == "status" || methodName == "running")
+    if (methodName == "status")
         return "string";
+    if (methodName == "running")
+        return "thread";
     if (methodName == "isyieldable")
         return "boolean";
 
@@ -129,15 +129,73 @@ RobloxTypeInferer::CallReturnType(const std::string &methodName, const std::vect
     if (methodName == "btest")
         return "boolean";
 
-    if (methodName == "len" || methodName == "create")
-        return "number";
     if (methodName == "tostring")
         return "string";
     if (methodName == "fromstring")
         return "buffer";
-    if (methodName == "read")
-        return "number";
 
+    return std::nullopt;
+}
+
+// A dot-call on a named stdlib table (`table.create`, `coroutine.create`, `buffer.create`) is library-gated:
+// the same method name returns a different type per library, so the receiver-agnostic CallReturnType
+// mis-resolves it (first match wins). Resolve by the receiver table name here instead.
+std::optional<std::string> RobloxTypeInferer::LibraryFunctionType(const std::string &library, const std::string &methodName) {
+    if (library == "string") {
+        if (methodName == "lower" || methodName == "upper" || methodName == "rep" || methodName == "reverse" || methodName == "format" || methodName == "sub" ||
+            methodName == "match" || methodName == "gsub" || methodName == "char" || methodName == "pack")
+            return "string";
+        if (methodName == "byte" || methodName == "len" || methodName == "find" || methodName == "packsize")
+            return "number";
+        if (methodName == "split")
+            return "{string}";
+        if (methodName == "gmatch")
+            return "(...any) -> ...any";
+        return std::nullopt;
+    }
+    if (library == "table") {
+        if (methodName == "create" || methodName == "clone" || methodName == "freeze")
+            return "table";
+        if (methodName == "concat")
+            return "string";
+        if (methodName == "find" || methodName == "maxn" || methodName == "getn")
+            return "number";
+        return std::nullopt;
+    }
+    if (library == "math")
+        return "number";
+    if (library == "bit32") {
+        if (methodName == "btest")
+            return "boolean";
+        return "number";
+    }
+    if (library == "coroutine") {
+        if (methodName == "create" || methodName == "wrap")
+            return "thread";
+        if (methodName == "resume" || methodName == "isyieldable")
+            return "boolean";
+        if (methodName == "status")
+            return "string";
+        if (methodName == "running")
+            return "thread";
+        return std::nullopt;
+    }
+    if (library == "buffer") {
+        if (methodName == "create" || methodName == "fromstring")
+            return "buffer";
+        if (methodName == "tostring" || methodName == "readstring")
+            return "string";
+        if (methodName == "len" || methodName.rfind("read", 0) == 0)
+            return "number";
+        return std::nullopt;
+    }
+    if (library == "os") {
+        if (methodName == "clock" || methodName == "time" || methodName == "difftime")
+            return "number";
+        if (methodName == "date")
+            return "string";
+        return std::nullopt;
+    }
     return std::nullopt;
 }
 
@@ -166,7 +224,7 @@ std::optional<std::string> RobloxTypeInferer::GlobalFunctionType(const std::stri
         return "number";
     if (name == "setmetatable") {
         // `setmetatable(x, MyClass)` is conventionally typed as the class, but only
-        // when the metatable is a real named identifier — an auto-generated local
+        // when the metatable is a real named identifier; an auto-generated local
         // (v2, uv_0, ...) is a value, not a type, and must fall back to `table`.
         if (args.size() >= 2)
             if (auto secondType = IdentifierName(args[1]); secondType && !IsGeneratedName(*secondType))
@@ -175,20 +233,14 @@ std::optional<std::string> RobloxTypeInferer::GlobalFunctionType(const std::stri
     }
     if (name == "require" || name == "newproxy")
         return "table";
-    if (name == "next" || name == "pairs" || name == "ipairs")
-        return "function";
+    if (name == "pairs" || name == "ipairs")
+        return "(...any) -> ...any";
     if (name == "loadstring")
-        return "function";
+        return "(...any) -> ...any";
     if (name == "collectgarbage" || name == "gcinfo")
         return "number";
     if (name == "getfenv")
         return "table";
-    (void)args;
-    return std::nullopt;
-}
-
-std::optional<std::string> RobloxTypeInferer::GlobalFunctionAutoName(const std::string &name, const std::vector<std::shared_ptr<Expression>> &args) {
-    (void)name;
     (void)args;
     return std::nullopt;
 }
@@ -203,8 +255,10 @@ std::optional<std::string> RobloxTypeInferer::LibraryReceiverMethodType(const st
             return "number";
         if (methodName == "find" || methodName == "match")
             return "string";
-        if (methodName == "gsub" || methodName == "gmatch")
-            return "function";
+        if (methodName == "gsub")
+            return "string";
+        if (methodName == "gmatch")
+            return "(...any) -> ...any";
         if (methodName == "split")
             return "{string}";
     }
@@ -246,7 +300,8 @@ void RobloxTypeInferer::AnnotateCallReturn(CallExpressionNode *call, const std::
         return;
     if (call->retTypes.size() < call->rets.size())
         call->retTypes.resize(call->rets.size());
-    call->retTypes[0] = MakeTypeAnnotation(*type);
+    if (*type != "table")
+        call->retTypes[0] = MakeTypeAnnotation(*type);
     if (auto retName = IdentifierName(call->rets[0]))
         env[*retName] = *type;
 }
@@ -256,7 +311,8 @@ void RobloxTypeInferer::AnnotateCallReturn(NameCallExpressionNode *call, const s
         return;
     if (call->retTypes.size() < call->rets.size())
         call->retTypes.resize(call->rets.size());
-    call->retTypes[0] = MakeTypeAnnotation(*type);
+    if (*type != "table")
+        call->retTypes[0] = MakeTypeAnnotation(*type);
     if (auto retName = IdentifierName(call->rets[0]))
         env[*retName] = *type;
 }
@@ -302,9 +358,13 @@ std::optional<std::string> RobloxTypeInferer::ExpressionType(const std::shared_p
 
     if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
         if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(call->callee)) {
-            if (auto methodName = MemberKeyName(member->key))
+            if (auto methodName = MemberKeyName(member->key)) {
+                if (auto libName = IdentifierName(member->table))
+                    if (auto result = LibraryFunctionType(*libName, *methodName))
+                        return result;
                 if (auto result = CallReturnType(*methodName, call->arguments, 1))
                     return result;
+            }
         }
         if (auto globalId = std::dynamic_pointer_cast<IdentifierExpressionNode>(call->callee)) {
             if (auto gname = IdentifierName(globalId))
@@ -327,11 +387,6 @@ std::optional<std::string> RobloxTypeInferer::ExpressionAutoName(const std::shar
         if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(call->callee)) {
             if (auto methodName = MemberKeyName(member->key))
                 if (auto result = CallAutoName(*methodName, call->arguments, 1))
-                    return result;
-        }
-        if (auto globalId = std::dynamic_pointer_cast<IdentifierExpressionNode>(call->callee)) {
-            if (auto gname = IdentifierName(globalId))
-                if (auto result = GlobalFunctionAutoName(*gname, call->arguments))
                     return result;
         }
     }
@@ -358,7 +413,8 @@ std::string RobloxTypeInferer::ResolveAutoName(const std::string &currentName, c
     do {
         prefixed = std::format("v{}_{}", ++m_autoNameCounter, clean);
     } while (m_names.contains(prefixed));
-    m_names.erase(currentName);
+    if (currentName != clean)
+        m_names.erase(currentName);
     m_names.insert(prefixed);
     m_autoNames.insert(prefixed);
     return prefixed;
@@ -442,6 +498,12 @@ void RobloxTypeInferer::Visit(FunctionDeclarationNode *lpNode) {
         VisitStatementList(lpNode->lpFunctionBody->body, m_env);
 }
 
+void RobloxTypeInferer::Visit(ClassDeclarationNode *lpNode) {
+    for (const auto &method : lpNode->methods)
+        if (method)
+            Visit(method.get());
+}
+
 void RobloxTypeInferer::Visit(CallExpressionNode *lpNode) {
     VisitNode(lpNode->callee);
     for (const auto &arg : lpNode->arguments)
@@ -481,7 +543,7 @@ void RobloxTypeInferer::Visit(ExpressionStatementNode *lpNode) {
                 if (auto wanted = ExpressionAutoName(call)) {
                     auto resolved = ResolveAutoName(*current, *wanted);
                     RenameIdentifier(call->rets[0], resolved);
-                    if (resolved != *current && (*current != *wanted || SanitizeIdentifier(*wanted) != *wanted)) {
+                    if (resolved != *current) {
                         m_renames[*current] = resolved;
                         if (m_env.contains(*current))
                             m_env[resolved] = m_env.at(*current);
@@ -495,7 +557,7 @@ void RobloxTypeInferer::Visit(ExpressionStatementNode *lpNode) {
                 if (auto wanted = ExpressionAutoName(nameCall)) {
                     auto resolved = ResolveAutoName(*current, *wanted);
                     RenameIdentifier(nameCall->rets[0], resolved);
-                    if (resolved != *current && (*current != *wanted || SanitizeIdentifier(*wanted) != *wanted)) {
+                    if (resolved != *current) {
                         m_renames[*current] = resolved;
                         if (m_env.contains(*current))
                             m_env[resolved] = m_env.at(*current);
@@ -537,6 +599,12 @@ void RobloxTypeInferer::Visit(BinaryExpressionNode *lpNode) {
     VisitNode(lpNode->right);
 }
 
+void RobloxTypeInferer::Visit(IfExpressionNode *lpNode) {
+    VisitNode(lpNode->condition);
+    VisitNode(lpNode->thenExpr);
+    VisitNode(lpNode->elseExpr);
+}
+
 void RobloxTypeInferer::Visit(CompoundBinaryExpressionNode *lpNode) {
     VisitNode(lpNode->left);
     VisitNode(lpNode->right);
@@ -545,7 +613,7 @@ void RobloxTypeInferer::Visit(CompoundBinaryExpressionNode *lpNode) {
 void RobloxTypeInferer::Visit(VariableDeclarationNode *lpNode) {
     auto type = ExpressionType(lpNode->value, m_env);
     if (m_inferTypes && type) {
-        if (!lpNode->type)
+        if (!lpNode->type && *type != "table")
             lpNode->type = MakeTypeAnnotation(*type);
         if (auto name = IdentifierName(lpNode->identifier))
             m_env[*name] = *type;
@@ -555,7 +623,7 @@ void RobloxTypeInferer::Visit(VariableDeclarationNode *lpNode) {
             if (auto wanted = ExpressionAutoName(lpNode->value)) {
                 auto resolved = ResolveAutoName(*current, *wanted);
                 RenameIdentifier(lpNode->identifier, resolved);
-                if (resolved != *current && (*current != *wanted || SanitizeIdentifier(*wanted) != *wanted)) {
+                if (resolved != *current) {
                     m_renames[*current] = resolved;
                     if (m_env.contains(*current))
                         m_env[resolved] = m_env.at(*current);

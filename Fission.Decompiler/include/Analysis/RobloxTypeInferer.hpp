@@ -31,6 +31,7 @@ class RobloxTypeInferer : public Visitor {
     void Visit(AssignmentStatementNode *lpNode) override;
     void Visit(TableBinaryExpressionNode *lpNode) override;
     void Visit(BinaryExpressionNode *lpNode) override;
+    void Visit(IfExpressionNode *lpNode) override;
     void Visit(StringLiteralNode *lpNode) override;
     void Visit(NumberLiteralNode *lpNode) override;
     void Visit(BooleanLiteralNode *lpNode) override;
@@ -47,6 +48,7 @@ class RobloxTypeInferer : public Visitor {
     void Visit(VarArgExpression *lpNode) override;
     void Visit(FunctionArgumentExpression *lpNode) override;
     void Visit(VectorNode *lpNode) override;
+    void Visit(ClassDeclarationNode *lpNode) override;
 
   private:
     using TypeEnv = std::unordered_map<std::string, std::string>;
@@ -71,8 +73,8 @@ class RobloxTypeInferer : public Visitor {
     static void AnnotateCallReturn(NameCallExpressionNode *call, const std::optional<std::string> &type, TypeEnv &env);
 
     static std::optional<std::string> GlobalFunctionType(const std::string &name, const std::vector<std::shared_ptr<Expression>> &args);
-    static std::optional<std::string> GlobalFunctionAutoName(const std::string &name, const std::vector<std::shared_ptr<Expression>> &args);
     static std::optional<std::string> LibraryReceiverMethodType(const std::string &receiverType, const std::string &methodName);
+    static std::optional<std::string> LibraryFunctionType(const std::string &library, const std::string &methodName);
     static std::optional<std::string> LiteralType(const std::shared_ptr<Expression> &expr);
 
     std::optional<std::string> ExpressionType(const std::shared_ptr<Expression> &expr, const TypeEnv &env);

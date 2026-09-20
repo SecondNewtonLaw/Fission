@@ -6,6 +6,7 @@
 
 #include "DenominatorAnalysis.hpp"
 #include "Deserializer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <libassert/assert.hpp>
 
@@ -33,9 +34,7 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     case LiftedOperation::RETURN:
         return true;
 
-        // FORNLOOP and FORGLOOP will jump to them. When resolving the jumps this
-        // will cause them to not be the block leaders, failing tailing checks
-        // and causing blocks to be discarded by mistake.
+        // FORNLOOP and FORGLOOP targets must remain leaders or tail checks discard their blocks.
     case LiftedOperation::FORGPREP_INEXT:
     case LiftedOperation::FORGPREP_NEXT:
     case LiftedOperation::FORGPREP:
@@ -58,12 +57,6 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
 
     case LiftedOperation::LOADNJUMP:
         return lpInstruction->operands[2].value.imm.n;
-
-        // case LiftedOperation::FORNPREP:
-        // case LiftedOperation::FORGPREP:
-        // case LiftedOperation::FORGPREP_INEXT:
-        // case LiftedOperation::FORGPREP_NEXT:
-        //     return lpInstruction->operands[1].value.imm.n + 2;
 
     case LiftedOperation::FORNPREP:
         return lpInstruction->operands[1].value.imm.n;
@@ -99,7 +92,9 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
 
 int32_t ControlFlowAnalyzer::GetBlockIdAtInstruction(const LiftedInstruction *lpTargetInstruction, const std::map<LiftedInstruction *, int32_t> &leaderMap) {
     auto it = leaderMap.find(const_cast<LiftedInstruction *>(lpTargetInstruction));
-    ASSERT(it != leaderMap.end(), "leader mapping not properly constructed, or function misused.");
+    // A target between instructions or on an AUX word is malformed bytecode.
+    if (it == leaderMap.end())
+        throw Fission::DecompilerError("malformed bytecode: jump target is not a basic-block leader");
     return it->second;
 }
 
@@ -114,17 +109,15 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
     for (size_t i = 0; i < blocks.size(); i++) {
         BasicBlock &currentBlock = blocks[i];
 
-        // we will identify where execution goes next
         std::vector<LiftedInstruction *> nextInstructions;
 
         switch (currentBlock.bTerminator) {
         case BlockTerminator::Fallthrough:
-            // immediately to next block.
-            nextInstructions.push_back(currentBlock.lpTail + 1);
+            if (i + 1 < blocks.size())
+                nextInstructions.push_back(currentBlock.lpTail + 1);
             break;
 
         case BlockTerminator::Unconditional: {
-            // jumps to offset.
             int32_t offset = GetJumpOffset(currentBlock.lpTail);
             nextInstructions.push_back((currentBlock.lpTail) + offset);
             break;
@@ -133,39 +126,31 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
         case BlockTerminator::Conditional: {
             if ((currentBlock.lpTail->operation == LiftedOperation::FORNLOOP || currentBlock.lpTail->operation == LiftedOperation::FORGLOOP) &&
                 currentBlock.bType == BlockType::LoopLatch) {
-                // loop header. adjust logic.
-                // jump (True/False depends on opcode)
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
                 nextInstructions.push_back((currentBlock.lpTail) + offset);
 
                 currentBlock.loopHeader = GetBlockIdAtInstruction((currentBlock.lpTail) + offset, leaderToBlockId);
                 blocks.at(*currentBlock.loopHeader).loopLatch = i; // current block is exit for the loop.
 
-                // fallthrough (else)
                 nextInstructions.push_back(currentBlock.lpTail + 1);
                 currentBlock.loopLatch = i /* self */;
                 break;
             }
 
             if (currentBlock.lpTail->operation == LiftedOperation::JUMPXEQK) {
-                // we must check the NOT flag
                 ASSERT(currentBlock.lpTail->operands.size() == 4, "missized operands for JUMPXEQK");
                 auto isNot = currentBlock.lpTail->operands[3].value.imm.b;
 
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
-                // both polarities: the jump is taken exactly when LiftCondition is true. not-flag
-                // clear → `==`, jump-on-equal; not-flag set → `~=`, jump-on-not-equal. so jump-target
-                // == cond-TRUE either way (previously the not-flag-clear branch was swapped).
+                // LiftCondition includes the NOT flag, so jump targets always represent true branches.
                 (void)isNot;
                 currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
                 currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
                 nextInstructions.push_back(currentBlock.lpTail + 1);
                 nextInstructions.push_back((currentBlock.lpTail) + offset);
             } else {
-                // jump (True/False depends on opcode)
                 int32_t offset = GetJumpOffset(currentBlock.lpTail);
 
-                // fallthrough (else)
                 switch (currentBlock.lpTail->operation) {
                 case LiftedOperation::JUMPIFNOT:
                 default:
@@ -175,9 +160,7 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
                     break;
                 case LiftedOperation::JUMPIF:
-                    // JUMPIF jumps when R[A] is truthy. LiftCondition emits the raw
-                    // expression (no inversion), so jump-target == lifted-cond TRUE
-                    // and fallthrough == lifted-cond FALSE.
+                    // JUMPIF targets the true branch of LiftCondition's unchanged expression.
                     nextInstructions.push_back((currentBlock.lpTail) + offset);
                     currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
                     currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
@@ -186,8 +169,7 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
 
                 case LiftedOperation::JUMPIFEQ:
                 case LiftedOperation::JUMPIFLE:
-                    // Positive comparisons: jump when the comparison holds. Jump
-                    // target == lifted-cond TRUE, fallthrough == lifted-cond FALSE.
+                    // Positive comparisons jump when LiftCondition is true.
                     currentBlock.ifStatementTrue = GetBlockIdAtInstruction(currentBlock.lpTail + offset, leaderToBlockId);
                     currentBlock.ifStatementFalse = GetBlockIdAtInstruction(currentBlock.lpTail + 1, leaderToBlockId);
                     nextInstructions.push_back(currentBlock.lpTail + 1);
@@ -211,23 +193,34 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
         }
 
         case BlockTerminator::Return:
-            // nowhere to go
             break;
 
         default:
             break;
         }
 
-        // PCs to BIDs and link.
         for (LiftedInstruction *targetInst : nextInstructions) {
             int32_t targetBlockId = GetBlockIdAtInstruction(targetInst, leaderToBlockId);
             ASSERT(targetBlockId != -1, "bad parsing or invalid bytecode");
 
-            // edge: current->target
             currentBlock.successors.push_back(targetBlockId);
 
-            // edge: target<-current (rev link)
             blocks[targetBlockId].predecessors.push_back(currentBlock.dwBlockId);
+        }
+    }
+    if (!blocks.empty() && blocks.back().bTerminator == BlockTerminator::Fallthrough) {
+        std::vector<bool> visited(blocks.size(), false);
+        std::vector<uint32_t> pending{blocks.back().dwBlockId};
+        while (!pending.empty()) {
+            Fission::CheckDecompileDeadline();
+            const auto id = pending.back();
+            pending.pop_back();
+            if (id == 0)
+                throw Fission::DecompilerError("malformed bytecode: reachable fallthrough past the instruction stream");
+            if (visited[id])
+                continue;
+            visited[id] = true;
+            pending.insert(pending.end(), blocks[id].predecessors.begin(), blocks[id].predecessors.end());
         }
     }
 }
@@ -245,8 +238,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             if (currentIndex + 1 < totalInstructions)
                 leaderIndexes.insert(currentIndex + 1);
 
-            // FORNLOOP/FORGLOOP always means a new block.
-            // logic may jump to them for branching and control-flow such as loop skipping.
+            // FORNLOOP and FORGLOOP targets must start blocks because other branches can skip to them.
             if (instruction->operation == LiftedOperation::FORNLOOP || instruction->operation == LiftedOperation::FORGLOOP ||
                 instruction->operation == LiftedOperation::FORNPREP || instruction->operation == LiftedOperation::FORGPREP ||
                 instruction->operation == LiftedOperation::FORGPREP_INEXT || instruction->operation == LiftedOperation::FORGPREP_NEXT ||
@@ -264,9 +256,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         }
     }
 
-    // FORXPREP not in IsTerminator but still needs its fallthrough (body start)
-    // and jump target (loop exit) as block leaders. Otherwise body instructions
-    // merge into the same block as FORNPREP, breaking if/else detection.
+    // FORXPREP needs leaders for both body entry and loop exit despite not being a terminator.
     for (size_t currentIndex = 0; currentIndex < totalInstructions; ++currentIndex) {
         auto instruction = &lpLiftedFunction->instructions.at(currentIndex);
         if (instruction->operation == LiftedOperation::FORNPREP || instruction->operation == LiftedOperation::FORGPREP ||
@@ -284,6 +274,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
     auto it = leaderIndexes.begin();
 
     while (it != leaderIndexes.end()) {
+        Fission::CheckDecompileDeadline();
         size_t startIndex = *it;
         ++it; // next leader is likely the end of the block.
 
@@ -298,22 +289,20 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         block.dwBlockId = blockIdCounter++;
         block.lpHead = &lpLiftedFunction->instructions[startIndex];
         block.lpTail = &lpLiftedFunction->instructions[endIndex];
-        // if (block.lpHead->operation == LiftedOperation::NOP && block.lpHead != block.lpTail) // blocks may be a lonely NOP sometimes.
-        //     block.lpHead++; // NOPs are injected for AUXs, they musn't be heads or CFA will begin failing.
-
         LiftedInstruction *tailInst = block.lpTail;
 
         block.bType = BlockType::Standard;
 
-        // TODO: FIGURE OUT WHY FORXPREP INSTRUCTIONS ARE BEING USED AS BLOCK TERMINATORS, CAUSING FORXLOOP INSTRUCTIONS TO BREAK!
+        // Malformed bytecode may end with JUMP instead of RETURN.
+        const LiftedInstruction *lpInstructionsEnd = lpLiftedFunction->instructions.data() + lpLiftedFunction->instructions.size();
+        const bool hasNextInst = (tailInst + 1) < lpInstructionsEnd;
 
         switch (tailInst->operation) {
         case LiftedOperation::JUMP: {
             block.bTerminator = BlockTerminator::Unconditional;
 
-            if ((tailInst + 1)->operation == LiftedOperation::FORNLOOP || (tailInst + 1)->operation == LiftedOperation::FORGLOOP) {
-                // this means the jump instruction is a break out of a loop. FORXLOOP instructions are
-                // in charge of looping back to the beginning.
+            if (hasNextInst && ((tailInst + 1)->operation == LiftedOperation::FORNLOOP || (tailInst + 1)->operation == LiftedOperation::FORGLOOP)) {
+                // FORXLOOP owns the back-edge; this forward jump leaves the loop.
                 auto jmpOffset = GetJumpOffset(tailInst);
                 if (jmpOffset > 0)
                     block.bType = BlockType::Break; // possibly breaking out of a loop.
@@ -325,12 +314,9 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
 
             auto jmpOffset = GetJumpOffset(tailInst);
             if (jmpOffset < 0) {
-                // backward jump = loop back-edge
                 block.bType = BlockType::Continue;
             } else {
-                // Forward JUMP — leave as Standard. IdentifyStructuresInternal
-                // at line ~683 will reclassify as Break/Continue via dominance
-                // analysis if this block lives inside a loop.
+                // Dominance analysis later classifies forward jumps inside loops.
             }
 
             break;
@@ -340,8 +326,6 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             if (GetJumpOffset(tailInst) < 0)
                 block.bType = BlockType::LoopLatch;
             else {
-                // TODO: we must perform dominance analysis to determine this properly.
-                // block.bType = BlockType::Break; // possibly breaking out of a loop.
             }
 
             break;
@@ -399,12 +383,13 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         subfuncs.push_back(analyzed);
     }
 
-    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs, {}, {}, {}, {}, {}, {}, {}, {}, {}};
+    return AnalyzedFunction{lpLiftedFunction, basicBlocks, {}, {}, subfuncs, {}, {}, {}, {}, {}, {}, {}, {}, {}, {}};
 }
 
 void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks) {
     bool changed = true;
     while (changed) {
+        Fission::CheckDecompileDeadline();
         changed = false;
 
         for (auto &block : blocks) {
@@ -426,29 +411,23 @@ void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks)
                 int32_t currentId = block.dwBlockId;
                 int32_t targetId = block.successors[0];
 
-                // the entry block cannot be removed.
                 if (currentId == 0)
                     continue;
 
-                // prevent inf loop.
                 if (targetId == currentId)
                     continue;
 
-                // reassign predecesors to point to the correct next block, as this block will be yanked
-                // we have to simply reassign the predecessor's successor that's us to point to our only successor.
-                // this unlinks us from the graph and allows us shorten it.
+                // Redirect predecessors before removing this block.
 
                 std::vector<std::uint32_t> newPredecessors;
                 for (int32_t predecesorId : block.predecessors) {
                     BasicBlock &predBlock = blocks[predecesorId];
 
-                    // update successors
                     for (size_t i = 0; i < predBlock.successors.size(); ++i) {
                         if (predBlock.successors[i] == static_cast<uint32_t>(currentId))
                             predBlock.successors[i] = targetId; // reassign to this block's target.
                     }
 
-                    // Update structural links that might reference the removed block
                     auto updateRef = [&](std::optional<uint32_t> &field) {
                         if (field.has_value() && *field == static_cast<uint32_t>(currentId))
                             field = targetId;
@@ -459,7 +438,6 @@ void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks)
                     updateRef(predBlock.loopLatch);
                     updateRef(predBlock.loopExit);
 
-                    // add our predecessors to our successor blk.
                     BasicBlock &ourSuccessor = blocks[targetId];
                     bool alreadyExists = false;
                     for (int32_t predecessors : ourSuccessor.predecessors) {
@@ -470,7 +448,6 @@ void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks)
                     if (!alreadyExists)
                         ourSuccessor.predecessors.push_back(predecesorId); // add our predecessor to the successor.
 
-                    // clear ourselves from predecessors.
                     BasicBlock &targetBlock = blocks[targetId];
                     auto &preds = targetBlock.predecessors;
                     std::erase(preds, currentId);
@@ -521,6 +498,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     auto dominates = [&](int32_t header, int32_t latchCandidate) -> bool {
         int32_t cur = latchCandidate;
         while (cur != -1) {
+            Fission::CheckDecompileDeadline();
             if (cur == header)
                 return true;
             auto it = domInfo.find(cur);
@@ -531,9 +509,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return false;
     };
 
-    // Pre-pass: detect loops anchored by Continue blocks with backward JUMPs.
-    // This catches cases like `while true do break end` where the back-edge
-    // has no predecessors (break bypasses it) and fails the dominates check.
+    // A break can bypass an otherwise predecessor-free back-edge in `while true`.
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Continue)
             continue;
@@ -558,6 +534,17 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             continue;
 
         auto &header = blocks[headerId];
+
+        // A back-edge into a FORxPREP header belongs to an enclosing while loop. Marking that header
+        // as both loop types makes ASTLifter choose WhileLoop and drop the for body.
+        const bool headerIsForPrep =
+            header.lpTail && (header.lpTail->operation == LiftedOperation::FORNPREP || header.lpTail->operation == LiftedOperation::FORGPREP ||
+                              header.lpTail->operation == LiftedOperation::FORGPREP_NEXT || header.lpTail->operation == LiftedOperation::FORGPREP_INEXT);
+        if (headerIsForPrep) {
+            blk.bType = BlockType::LoopLatch; // still surface the back-edge so the wrapper-detect succeeds
+            continue;
+        }
+
         blk.loopHeader = headerId;
         header.loopLatch = blk.dwBlockId;
         blk.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
@@ -596,9 +583,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         }
     }
 
-    // unconditional self-jump = infinite `while true` with header/body/latch fused in one block.
-    // back-edge passes retype it LoopLatch so it never lifts; restore the header role. for-latches
-    // self-jump too but conditionally, so the uncond guard excludes them.
+    // An unconditional self-jump represents a fused infinite-while header, body, and latch.
     for (BasicBlock &block : blocks) {
         if (block.bTerminator != BlockTerminator::Unconditional)
             continue;
@@ -622,26 +607,18 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             }
     }
 
-    // during the previous phases we have cleaned up lots of room for identifying the loop structures truly.
-    // while n do ... end structures perform their jump to a comparison instruction that jumps out of the loop.
-    // repeat ... until n structures perform a comparison at the end, before jumping to a NON comparison instruction at the start of the body of the loop (which
-    // has no FORXPREP instruction) for ... do end structures perform a FORXLOOP instruction at the end, before jumping if succeeding to repeat at the
-    // instruction after a FORXPREP instruction.
-
-    // recognizing FOR loops.
+    // FOR loops pair a FORxPREP header with a FORxLOOP latch.
     for (BasicBlock &block : blocks) {
         if (block.bType != BlockType::LoopHeader)
             continue;
 
-        // FORxPREP must be the terminator, but higher opt levels bundle the start/limit/step LOADs
-        // into this block, so don't require it to be the sole instruction.
+        // Optimized bytecode can place start, limit, and step loads before the FORxPREP terminator.
         if (block.lpTail->operation != LiftedOperation::FORNPREP && block.lpTail->operation != LiftedOperation::FORGPREP_INEXT &&
             block.lpTail->operation != LiftedOperation::FORGPREP && block.lpTail->operation != LiftedOperation::FORGPREP_NEXT)
             continue; // not supported by this pass.
 
         for (uint32_t succId : block.successors) {
-            // we realistically do not care about dominance.
-            // we have the guarantee that FORXLOOP instructions will be after a loop header that we know is a FORXPREP and is an only instruction.
+            // Opcode pairing determines this relation without a dominance test.
 
             auto &successor = blocks.at(succId);
             if (successor.lpTail != successor.lpHead ||
@@ -677,33 +654,69 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 }
             }
         }
+
+        // An unconditional break can prune the FORxLOOP latch. Recover the loop from FORxPREP's exit
+        // target before an enclosing back-edge can misclassify the header.
+        constexpr uint32_t kForMaskFP = static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
+                                        static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                                        static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed);
+        if ((block.dwBlockFlags & kForMaskFP) == 0 && !block.lpTail->operands.empty()) {
+            const int baseReg = block.lpTail->operands[0].value.reg;
+            const int32_t headerIdx = block.lpTail->instructionIndex;
+            const LiftedOperation wantLoop = (block.lpTail->operation == LiftedOperation::FORNPREP) ? LiftedOperation::FORNLOOP : LiftedOperation::FORGLOOP;
+            const auto loopFlag = (block.lpTail->operation == LiftedOperation::FORGPREP_INEXT)  ? LoopBlockFlags::ForGeneralLoop_Indexed
+                                  : (block.lpTail->operation == LiftedOperation::FORGPREP_NEXT) ? LoopBlockFlags::ForGeneralLoop_Pairs
+                                  : (block.lpTail->operation == LiftedOperation::FORGPREP)      ? LoopBlockFlags::ForGeneralLoop
+                                                                                                : LoopBlockFlags::ForNumericLoop;
+            BasicBlock *latch = nullptr;
+            for (BasicBlock &cand : blocks) {
+                if (!cand.lpTail || cand.lpTail->operation != wantLoop || cand.lpTail->operands.empty())
+                    continue;
+                if (cand.lpTail->operands[0].value.reg != baseReg || cand.lpTail->instructionIndex <= headerIdx)
+                    continue;
+                if (!latch || cand.lpTail->instructionIndex < latch->lpTail->instructionIndex)
+                    latch = &cand; // nearest FOR*LOOP after this prep with matching base register
+            }
+            if (latch) {
+                latch->loopHeader = block.dwBlockId;
+                block.loopLatch = latch->dwBlockId;
+                block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+                latch->dwBlockFlags |= static_cast<uint32_t>(loopFlag);
+                // Resolve loop fallthrough from the latch during lifting.
+            }
+        }
     }
 
     for (BasicBlock &block : blocks) {
         if (block.bType != BlockType::LoopLatch)
             continue; // we only need loop latches to fix the determination and mark the loop type.
 
-        // blocks already wired into a for-loop by the FOR pass: a FORNLOOP/FORGLOOP latch would be
-        // mis-tagged repeat-until here, leave it alone.
-        constexpr uint32_t kForLoopMask =
-            static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
-            static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed);
+        // Do not reclassify FORNLOOP or FORGLOOP latches as repeat-until.
+        constexpr uint32_t kForLoopMask = static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
+                                          static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                                          static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed);
         if ((block.dwBlockFlags & kForLoopMask) != 0)
             continue;
 
         for (uint32_t succ : block.successors) {
             if (succ == block.dwBlockId || dominates(succ, block.dwBlockId)) {
                 auto &successor = blocks.at(succ);
-                // for-header reached by a separate unconditional back-edge = outer infinite `while`
-                // wrapping a for. leave the for's latch intact; the wrapper is recovered at lift time.
+                // A separate back-edge into a for header belongs to an enclosing infinite while loop.
                 if ((successor.dwBlockFlags & kForLoopMask) != 0)
                     continue;
+
+                // A back-edge through an inner loop exit belongs to an enclosing loop.
+                if (successor.loopLatch && successor.loopExit && *successor.loopLatch != block.dwBlockId &&
+                    blocks[*successor.loopLatch].lpTail->instructionIndex < block.lpTail->instructionIndex && dominates(*successor.loopExit, block.dwBlockId) &&
+                    !dominates(*successor.loopExit, *successor.loopLatch)) {
+                    block.loopHeader = successor.dwBlockId;
+                    continue;
+                }
                 // conditional jump.
 
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
                 if (block.lpTail->operation == LiftedOperation::JUMP) {
-                    // unconditional jump back = while or repeat-until. header's conditional jumping
-                    // straight to the latch (not a body block) means header IS the body → repeat-until.
+                    // A conditional header that jumps straight to the latch is a repeat-until body.
                     bool isRepeatUntil = false;
                     if (successor.bTerminator == BlockTerminator::Conditional) {
                         for (uint32_t headerSucc : successor.successors) {
@@ -752,22 +765,18 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     }
                 }
 
-                // repeat-until: the latch (conditional JUMPIFNOT) holds the exit as its fallthrough
-                // (ifStatementFalse), since the header has no ifStatement fields (header IS the body).
+                // A repeat-until latch stores its exit in the false branch.
                 bool isRepeatUntil = (block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop;
                 if (isRepeatUntil) {
-                    // pattern 1: condition in latch (conditional JUMPIF); latch.ifStatementFalse = exit.
+                    // Condition stored in the latch.
                     if (block.ifStatementFalse.has_value()) {
                         block.loopExit = block.ifStatementFalse.value();
                         successor.loopExit = block.ifStatementFalse.value();
                     } else {
-                        // pattern 2: condition in header (latch is uncond JUMP); exit = the header
-                        // successor that isn't the latch.
+                        // Condition stored in the header; its non-latch successor is the exit.
                         for (auto headerSucc : successor.successors) {
                             if (headerSucc != block.dwBlockId) {
-                                // but Luau may decompose a compound `until a or b` into body if-return
-                                // blocks, so the header's "exit" is really a body block that loops back.
-                                // prefer a Return-typed successor; pattern 3 below scans if none.
+                                // Compound conditions can route the apparent exit back into the body.
                                 if (blocks.at(headerSucc).bType == BlockType::Return) {
                                     block.loopExit = headerSucc;
                                     successor.loopExit = headerSucc;
@@ -775,7 +784,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                                 break;
                             }
                         }
-                        // pattern 3: compound condition fully in body; scan for the first Return block.
+                        // Compound condition stored in body blocks.
                         if (!block.loopExit.has_value()) {
                             for (auto &b : blocks) {
                                 if (b.dwBlockId == successor.dwBlockId || b.dwBlockId == block.dwBlockId)
@@ -792,8 +801,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     if (!successor.ifStatementFalse && !successor.ifStatementTrue)
                         continue;
 
-                    // header already tagged RepeatUntilLoop by a different latch (nested repeat sharing
-                    // the header); don't overwrite loopExit, the repeat-until logic set it.
+                    // Nested repeats can share a header; preserve the first repeat's exit.
                     if ((successor.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop)
                         continue;
 
@@ -809,8 +817,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         }
     }
 
-    // Identify Break/Continue: find forward Unconditional JUMPs inside loops
-    // and classify them by comparing the jump target against the loop exit.
+    // Classify forward jumps inside loops against the loop exit.
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Standard)
             continue;
@@ -823,7 +830,6 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         if (jmpOffset <= 0)
             continue; // backward jump, handled elsewhere
 
-        // Forward JUMP: find the target block
         LiftedInstruction *targetInst = blk.lpTail + jmpOffset;
         int32_t targetId = -1;
         for (const auto &b : blocks) {
@@ -835,7 +841,6 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         if (targetId < 0)
             continue;
 
-        // Find the innermost loop header that dominates this block
         int32_t innermostHeader = -1;
         int32_t innermostExit = -1;
         for (const auto &b : blocks) {
@@ -844,11 +849,10 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             if (!dominates(b.dwBlockId, blk.dwBlockId))
                 continue;
 
-            // b dominates our block → we're inside b's loop.
-            // Check if b is deeper (more nested) than current innermost.
+            // Choose the deepest dominating loop header.
             bool deeper = (innermostHeader < 0);
             if (!deeper && dominates(innermostHeader, b.dwBlockId))
-                deeper = true; // innermost dominates b → b is deeper
+                deeper = true; // innermost dominates b -> b is deeper
 
             if (deeper) {
                 innermostHeader = b.dwBlockId;
@@ -866,7 +870,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         }
     }
 
-    // Identify Break/Continue: find forward Unconditional JUMPs inside loops
+    // Classify forward jumps inside loops.
 }
 
 void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks) {
@@ -876,6 +880,7 @@ void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks
     reachable[0] = true;
 
     while (!qq.empty()) {
+        Fission::CheckDecompileDeadline();
         const int32_t id = qq.front();
         qq.pop();
         for (int32_t succ : blocks[id].successors) {

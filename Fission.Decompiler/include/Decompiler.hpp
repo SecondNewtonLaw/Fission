@@ -1,10 +1,8 @@
-//
-// Created by Pixeluted on 01/12/2025.
-//
 #pragma once
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
+#include <chrono>
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wunused-parameter"
@@ -41,8 +39,12 @@ enum class DecompilerFlags : uint16_t {
     OptimizeIR = 1 << 6,
     InferRobloxTypes = 1 << 7,
     AutoNameVariables = 1 << 8,
-    // drop Fission's info comments (function info, capture/name notes). warnings + banner still emitted.
-    OmitFissionComments = 1 << 9
+    // Omit informational comments while preserving warnings and the banner.
+    OmitFissionComments = 1 << 9,
+    // Capture CFG as in-memory Graphviz DOT.
+    CaptureCFGGraph = 1 << 10,
+    // Capture lifted AST as JSON.
+    CaptureAST = 1 << 11
 };
 
 constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {
@@ -70,6 +72,10 @@ struct DecompilationResult {
     std::string irOutput;
     std::string timingStatistics;
     DecompileResult resultCode;
+    // Capture fields remain empty unless requested and trail existing aggregate fields for compatibility.
+    std::string cfgGraph{};
+    std::string astJson{};
+    std::string errorMessage{};
 };
 class Decompiler {
     Deserializer deserializer{};
@@ -79,8 +85,11 @@ class Decompiler {
     SourceGenerator sourceGenerator{};
     GraphVisualizer visualizer{};
 
+    // Wall-clock limit for hostile or runaway CFG and lifting work.
+    std::chrono::steady_clock::duration m_decompileBudget = std::chrono::seconds(120);
+
     DecompilationResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
-    // the actual pipeline; CommonDecompilerEntry wraps it in the safety boundary so throws become FailedToDecompile.
+    // CommonDecompilerEntry converts pipeline exceptions into FailedToDecompile.
     DecompilationResult CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
 
   public:
@@ -91,4 +100,9 @@ class Decompiler {
     );
     DecompilationResult DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
     DecompilationResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    // Decompile non-Roblox Luau bytecode with the identity decoder.
+    DecompilationResult DecompileVanillaBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+
+    // Callers handling untrusted input can reduce the default 120-second budget.
+    void SetDecompileBudget(std::chrono::steady_clock::duration budget) { m_decompileBudget = budget; }
 };

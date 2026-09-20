@@ -12,8 +12,11 @@
 class RootNode final : public ASTNode {
   public:
     std::vector<std::shared_ptr<Statement>> programBody{};
-    explicit RootNode() = default;
-    explicit RootNode(const std::vector<std::shared_ptr<Statement>> &programBody) { this->programBody = programBody; }
+    explicit RootNode() { this->nodeKind = ASTNodeKind::Root; }
+    explicit RootNode(const std::vector<std::shared_ptr<Statement>> &programBody) {
+        this->nodeKind = ASTNodeKind::Root;
+        this->programBody = programBody;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

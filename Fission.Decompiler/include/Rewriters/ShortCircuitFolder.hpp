@@ -1,10 +1,8 @@
 //
 // Created by Dottik on 2/6/2026.
 //
-// Collapses the diamond Luau lowers `local V = C and P or F` into back to a single
-// expression. The three duplicated `tail` copies must be identical (checked by
-// rendering) for the fold to be sound.
-//
+
+// Collapses short-circuit diamonds only when all duplicated tails render identically.
 
 #pragma once
 #include "Rewriters/ASTRewriter.hpp"
@@ -86,11 +84,31 @@ class ShortCircuitFolder : public ASTRewriter {
         auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(ifS->condition);
         auto &thenB = ifS->thenBranch->body;
         auto &elseB = ifS->elseBranch->body;
-        if (!un || un->op != "not " || thenB.empty() || elseB.size() != 2)
+        if (!un || un->op != "not " || thenB.empty() || elseB.empty())
             return false;
 
         auto fallback = AsAssignToVar(thenB[0], vname);
         auto primary = AsAssignToVar(elseB[0], vname);
+        if (fallback && primary && thenB.size() == 1 && elseB.size() <= 2) {
+            auto selected = std::dynamic_pointer_cast<BinaryExpressionNode>(AsAssignToVar(elseB.back(), vname));
+            const auto fallbackName = SimpleIdentName(fallback);
+            const bool plainFallback = (fallbackName && *fallbackName != vname) || std::dynamic_pointer_cast<NilLiteralNode>(fallback) ||
+                                       std::dynamic_pointer_cast<BooleanLiteralNode>(fallback) || std::dynamic_pointer_cast<NumberLiteralNode>(fallback) ||
+                                       std::dynamic_pointer_cast<IntegerLiteralNode>(fallback) || std::dynamic_pointer_cast<StringLiteralNode>(fallback);
+            if (selected && selected->op == "or" && StatementsEqual({selected->right}, {fallback}) &&
+                (elseB.size() == 1 || (plainFallback && SimpleIdentName(selected->left).value_or("") == vname))) {
+                if (elseB.size() == 1)
+                    primary = selected->left;
+                InlineifyValue(primary);
+                InlineifyValue(fallback);
+                auto andExpr = std::make_shared<BinaryExpressionNode>("and", un->operand, primary);
+                auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallback);
+                stmts[i + 1] = std::make_shared<AssignmentStatementNode>(decl->identifier, orExpr);
+                return true;
+            }
+        }
+        if (elseB.size() != 2)
+            return false;
         auto innerIf = std::dynamic_pointer_cast<IfStatementNode>(elseB[1]);
         const bool innerOk = innerIf && innerIf->thenBranch && !innerIf->elseBranch && SimpleIdentName(innerIf->condition).value_or("") == vname;
         if (!fallback || !primary || !innerOk)
@@ -106,8 +124,8 @@ class ShortCircuitFolder : public ASTRewriter {
         InlineifyValue(fallback);
         auto andExpr = std::make_shared<BinaryExpressionNode>("and", un->operand, primary);
         auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallback);
-        decl->value = orExpr;                                                  // local V = C and P or F
-        stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1);       // drop the diamond
+        decl->value = orExpr;                                            // local V = C and P or F
+        stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1); // drop the diamond
         return true;
     }
 };

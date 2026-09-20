@@ -12,6 +12,8 @@ class CommentNode final : public Expression {
     // Fission info note (suppressed by OmitFissionComments). false by default so warnings always emit.
     bool bIsInformational = false;
     CommentNode(const std::string &commentContent, bool newline, bool informational = false)
-        : comment(commentContent), bNewLine(newline), bIsInformational(informational) {}
+        : comment(commentContent), bNewLine(newline), bIsInformational(informational) {
+        this->nodeKind = ASTNodeKind::Comment;
+    }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

@@ -28,6 +28,7 @@ class SSABuilder {
 
     void CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std::map<int32_t, DominatorInfo> &domInfo);
 
+    std::vector<int> RenameBlock(int blockId, AnalyzedFunction &func);
     void Rename(int blockId, AnalyzedFunction &func, const std::map<int32_t, DominatorInfo> &domInfo);
 
   public:

@@ -12,7 +12,6 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
     result.bytecodeVersion = reader.Read<uint8_t>();
 
     if (result.bytecodeVersion == 0) {
-        // Compiler error;
         return std::nullopt;
     }
 
@@ -27,50 +26,41 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
     }
 
     auto stringCount = reader.ReadVariableInteger32();
+    // Bound attacker-controlled counts by remaining input bytes.
+    if (reader.HasFailed() || stringCount > reader.Remaining())
+        return std::nullopt;
 
     for (unsigned int i = 0; i < stringCount; i++) {
         auto stringLength = reader.ReadVariableInteger32();
+        if (reader.HasFailed() || stringLength > reader.Remaining())
+            return std::nullopt;
 
+        // Preserve raw bytes; SourceGenerator owns escaping and UTF-8 emission.
         auto rS = reader.ReadString(stringLength);
-        bool bNeedsRebuilding = false;
-        for (const auto &c : rS) {
-            if (!isascii(c)) { // must be rebuilt
-                bNeedsRebuilding = true;
-                break;
-            }
-        }
-
-        if (bNeedsRebuilding) {
-            std::stringstream ss;
-            for (const auto &c : rS) { // escape strings into luau format on deserialization.
-                if (!isascii(c)) {     // must be rebuilt
-                    ss << "\\" << static_cast<int>(static_cast<unsigned char>(c));
-                } else {
-                    ss << c;
-                }
-            }
-            rS = ss.str();
-        }
-
         result.stringTable.emplace_back(rS);
     }
 
+    auto userdataTypeNames = std::make_shared<LuauUserdataTypeNames>();
     if (result.typesVersion == 3) {
-        // This is runtime information, we do not need this when decompiling (very likely)
         std::uint8_t index = reader.Read<uint8_t>();
         while (index != 0) {
-            auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
-            // ASSERT(str.has_value(), "malformed bytecode");
-
-            if (index - 1 < USERDATA_TYPE_LIMIT) {
-                // TODO: check if this is an error, and raise accordingly.
+            const auto stringId = reader.ReadVariableInteger32();
+            const auto name = result.ReadFromStringTable(stringId);
+            if (index - 1 < USERDATA_TYPE_LIMIT && name && Deserializer::IsValidTypeName(*name)) {
+                result.userdataMappings[index - 1] = stringId;
+                (*userdataTypeNames)[index - 1] = *name;
             }
+
+            if (reader.HasFailed()) // ran off the end mid-list: malformed.
+                return std::nullopt;
 
             index = reader.Read<uint8_t>(); // next index.
         }
     }
 
     auto protoCount = reader.ReadVariableInteger32();
+    if (reader.HasFailed() || protoCount > reader.Remaining())
+        return std::nullopt;
     result.functions.resize(protoCount);
 
     for (auto i = 0llu; i < protoCount; i++) {
@@ -78,28 +68,40 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         function.uTypeVersion = result.typesVersion;
         function.uBytecodeVersion = result.bytecodeVersion;
         function.bytecodeId = int(i);
+        function.userdataTypeNames = userdataTypeNames;
+
+        // V12 proto sizes include trailing cost and future extension data; resynchronize at the recorded end.
+        const std::uint8_t *protoStart = nullptr;
+        std::uint32_t protoSize = 0;
+        if (result.bytecodeVersion >= 12) {
+            protoSize = reader.ReadVariableInteger32();
+            if (reader.HasFailed() || protoSize > reader.Remaining())
+                return std::nullopt;
+            protoStart = reader.GetCurrentReaderPosition();
+        }
+
         function.maxstacksize = reader.Read<uint8_t>();
         function.numparams = reader.Read<uint8_t>();
         function.nups = reader.Read<uint8_t>();
         function.isvararg = reader.Read<uint8_t>();
 
+        // SSA register arrays cannot represent parameters beyond maxstacksize.
+        if (reader.HasFailed() || function.numparams > function.maxstacksize)
+            return std::nullopt;
+
         if (result.bytecodeVersion >= 4u) {
-            // Parse type information.
             function.flags = reader.Read<uint8_t>();
 
             if (result.typesVersion == 1) {
                 auto typeSize = reader.ReadVariableInteger32();
 
                 if (typeSize) {
+                    // memcpy needs an explicit bound before AdvanceBy can set the reader failure state.
+                    if (reader.HasFailed() || typeSize > reader.Remaining())
+                        return std::nullopt;
                     const uint8_t *types = reader.GetCurrentReaderPosition();
-                    // ASSERT(typeSize == unsigned(2 + function.numparams));
-                    // ASSERT(types[0] == LBC_TYPE_FUNCTION);
-                    // ASSERT(types[1] == function.numparams);
-
-                    // transform v1 into v2 format
                     int headerSize = typeSize > 127 ? 4 : 3;
 
-                    // function.typeinfo;
                     function.typeinfo.resize(headerSize + typeSize);
 
                     if (headerSize == 4) {
@@ -122,76 +124,32 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 uint32_t typesize = reader.ReadVariableInteger32();
 
                 if (typesize) {
+                    if (reader.HasFailed() || typesize > reader.Remaining())
+                        return std::nullopt;
                     const uint8_t *types = reader.GetCurrentReaderPosition();
 
                     function.typeinfo.resize(typesize);
 
                     memcpy(function.typeinfo.data(), types, typesize);
                     reader.AdvanceBy(typesize);
-
-                    if (result.typesVersion == 3) {
-                        // not much to do here, since we just have to remap types. However UDs are unmapped and they're done at Runtime, which we cannot really
-                        // do.
-                        BinaryReader _reader{std::string(function.typeinfo.data(), function.typeinfo.data() + function.typeinfo.size())};
-
-                        auto count = function.typeinfo.size();
-
-                        auto typeSize = _reader.ReadVariableInteger32();
-                        auto upvalCount = _reader.ReadVariableInteger32();
-                        auto localCount = _reader.ReadVariableInteger32();
-
-                        if (typeSize != 0) {
-                            uint8_t *_types = _reader.GetCurrentReaderPositionMut();
-
-                            // Skip two bytes of function type introduction
-                            for (uint32_t k = 2; k < typeSize; k++) {
-                                auto index = static_cast<uint32_t>(_types[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
-
-                                if (index < count)
-                                    _types[k] = (uint8_t)LBC_TYPE_USERDATA; /* we do not have runtime mappings. */ // userdataRemapping[index];
-                            }
-
-                            _reader.AdvanceBy(typeSize);
-                        }
-
-                        if (upvalCount != 0) {
-                            uint8_t *_types = _reader.GetCurrentReaderPositionMut();
-
-                            for (uint32_t k = 0; k < upvalCount; k++) {
-                                auto index = static_cast<uint32_t>(_types[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
-
-                                if (index < count)
-                                    _types[k] = (uint8_t)LBC_TYPE_USERDATA; /* we do not have runtime mappings. */ // userdataRemapping[index];
-                            }
-
-                            _reader.AdvanceBy(upvalCount);
-                        }
-
-                        if (localCount != 0) {
-                            for (uint32_t k = 0; k < localCount; k++) {
-                                auto index = static_cast<uint32_t>(_reader.GetCurrentReaderPositionMut()[k] - LBC_TYPE_TAGGED_USERDATA_BASE);
-
-                                if (index < count)
-                                    *_reader.GetCurrentReaderPositionMut() = (uint8_t)LBC_TYPE_USERDATA;
-                                /* we do not have runtime mappings. */ // userdataRemapping[index];
-
-                                _reader.AdvanceBy(2);
-                                _reader.ReadVariableInteger32();
-                                _reader.ReadVariableInteger32();
-                            }
-                        }
-                    }
                 }
             }
         }
 
         const auto sizecode = reader.ReadVariableInteger32();
+        // Every valid proto contains at least RETURN; bound instruction count before allocation.
+        if (reader.HasFailed() || sizecode == 0 || sizecode > reader.Remaining())
+            return std::nullopt;
         function.instructions.resize(sizecode);
 
         for (auto j = 0llu; j < sizecode; j++)
             function.instructions[j] = reader.Read<uint32_t>();
+        if (reader.HasFailed())
+            return std::nullopt;
 
         const auto sizek = reader.ReadVariableInteger32();
+        if (reader.HasFailed() || sizek > reader.Remaining())
+            return std::nullopt;
         function.constants.resize(sizek);
 
         for (auto j = 0llu; j < sizek; j++) {
@@ -199,7 +157,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             auto lbcConstant = reader.Read<uint8_t>();
             switch (lbcConstant) {
             case LBC_CONSTANT_NIL:
-                // All constants have already been pre-initialized to nil
+                // Constants are preinitialized to nil.
                 break;
 
             case LBC_CONSTANT_BOOLEAN: {
@@ -222,15 +180,25 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 auto z = reader.Read<float>();
                 auto w = reader.Read<float>();
                 function.constants[j].kType = LUA_TVECTOR;
-                function.constants[j].constantData = LuauVector{x, y, z, w};
+                function.constants[j].constantData = LuauVectorConstant{x, y, z, w};
+                break;
+            }
+
+            case LBC_CONSTANT_VECTORD: {
+                auto x = reader.Read<double>();
+                auto y = reader.Read<double>();
+                auto z = reader.Read<double>();
+                auto w = reader.Read<double>();
+                function.constants[j].kType = LUA_TVECTOR;
+                function.constants[j].constantData = LuauVectorConstant{x, y, z, w};
                 break;
             }
 
             case LBC_CONSTANT_STRING: {
                 function.constants[j].kType = LUA_TSTRING;
                 auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
-                // ASSERT(str.has_value(), "malformed bytecode");
-                function.constants[j].constantData = str.value();
+                // Preserve an empty value for malformed string references.
+                function.constants[j].constantData = str.value_or(std::string{});
 
                 break;
             }
@@ -243,13 +211,19 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             }
 
             case LBC_CONSTANT_TABLE: {
-                int keyCount = reader.ReadVariableInteger32();
+                uint32_t keyCount = reader.ReadVariableInteger32();
+                if (reader.HasFailed() || keyCount > reader.Remaining())
+                    return std::nullopt;
                 std::vector<std::string> vec;
                 vec.reserve(keyCount);
-                for (auto k = 0; k < keyCount; ++k) {
-                    int key = reader.ReadVariableInteger32();
+                for (uint32_t k = 0; k < keyCount; ++k) {
+                    uint32_t key = reader.ReadVariableInteger32();
+                    // Table keys must reference earlier string constants.
+                    if (reader.HasFailed() || key >= function.constants.size())
+                        return std::nullopt;
                     const auto &constant = function.constants[key];
-                    // ASSERT(constant.kType == LUA_TSTRING, "kString isn't correct.");
+                    if (!std::holds_alternative<std::string>(constant.constantData))
+                        return std::nullopt;
                     vec.emplace_back(std::get<std::string>(constant.constantData));
                 }
                 function.constants[j].kType = LUA_TTABLE;
@@ -259,16 +233,21 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
             case LBC_CONSTANT_TABLE_WITH_CONSTANTS: {
                 // bytecode v7 ewww
-                int keyCount = reader.ReadVariableInteger32();
+                uint32_t keyCount = reader.ReadVariableInteger32();
+                if (reader.HasFailed() || keyCount > reader.Remaining())
+                    return std::nullopt;
                 std::vector<std::string> vec;
                 vec.reserve(keyCount);
                 std::vector<int32_t> tableValues;
                 tableValues.reserve(keyCount);
-                for (auto k = 0; k < keyCount; ++k) {
-                    int key = reader.ReadVariableInteger32();
+                for (uint32_t k = 0; k < keyCount; ++k) {
+                    uint32_t key = reader.ReadVariableInteger32();
+                    if (reader.HasFailed() || key >= function.constants.size())
+                        return std::nullopt;
                     const auto &constant = function.constants[key];
                     auto valIdx = reader.Read<int32_t>();
-                    // ASSERT(constant.kType == LUA_TSTRING, "kString isn't correct.");
+                    if (!std::holds_alternative<std::string>(constant.constantData))
+                        return std::nullopt;
                     vec.emplace_back(std::get<std::string>(constant.constantData));
                     tableValues.emplace_back(valIdx);
                 }
@@ -280,6 +259,9 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
             case LBC_CONSTANT_CLOSURE: {
                 function.constants[j].kType = LUA_TFUNCTION;
                 uint32_t fid = reader.ReadVariableInteger32();
+                // Later stages dereference closure function pointers.
+                if (reader.HasFailed() || fid >= result.functions.size())
+                    return std::nullopt;
                 function.constants[j].constantData = result.functions.data() + fid;
                 break;
             }
@@ -292,35 +274,57 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 break;
             }
 
-#ifdef LBC_CONSTANT_CLASS_SHAPE
             case LBC_CONSTANT_CLASS_SHAPE: {
-                // V10. Wire: varint className, varint propCount, varint methodCount, varint per propName, varint per methodName.
-                // Decompilation does not require the shape; consume bytes and leave the constant as nil.
-                (void)reader.ReadVariableInteger32();
+                // V10 stores class name, property names, and method names as earlier string constants.
+                LuauClassShape shape{};
+                const auto classNameId = reader.ReadVariableInteger32();
                 const auto propCount = reader.ReadVariableInteger32();
                 const auto methodCount = reader.ReadVariableInteger32();
+                if (reader.HasFailed() || propCount > reader.Remaining() || methodCount > reader.Remaining())
+                    return std::nullopt;
+
+                // Invalid name references remain empty.
+                const auto resolveName = [&](uint32_t cid) -> std::string {
+                    if (cid >= function.constants.size())
+                        return {};
+                    const auto &c = function.constants[cid];
+                    if (!std::holds_alternative<std::string>(c.constantData))
+                        return {};
+                    return std::get<std::string>(c.constantData);
+                };
+
+                shape.className = resolveName(classNameId);
+                shape.propertyNames.reserve(propCount);
                 for (auto p = 0u; p < propCount; ++p)
-                    (void)reader.ReadVariableInteger32();
+                    shape.propertyNames.emplace_back(resolveName(reader.ReadVariableInteger32()));
+                shape.methodNames.reserve(methodCount);
                 for (auto m = 0u; m < methodCount; ++m)
-                    (void)reader.ReadVariableInteger32();
-                function.constants[j].kType = LUA_TNIL;
+                    shape.methodNames.emplace_back(resolveName(reader.ReadVariableInteger32()));
+                if (reader.HasFailed())
+                    return std::nullopt;
+
+                function.constants[j].kType = LUA_TNIL; // no lua runtime type; identified via LuauConstant::IsClassShape().
+                function.constants[j].constantData = std::move(shape);
                 break;
             }
-#endif
 
             default:
-                // ASSERT(false, "WARNING! Unknown constant!", lbcConstant);
                 break;
             }
         }
 
-        // here we would precalculate/ preload string atoms. However we are decompiling, not necessarily going to run the loaded result, meaning this is
-        // useless to do.
+        if (reader.HasFailed()) // a constant read ran off the end
+            return std::nullopt;
 
         auto sizep = reader.ReadVariableInteger32();
+        if (reader.HasFailed() || sizep > reader.Remaining())
+            return std::nullopt;
         function.subfunctions.resize(sizep);
         for (auto j = 0llu; j < sizep; j++) {
             auto fid = reader.ReadVariableInteger32();
+            // Later stages dereference subfunction pointers.
+            if (reader.HasFailed() || fid >= result.functions.size())
+                return std::nullopt;
             function.subfunctions[j] = result.functions.data() + fid;
         }
 
@@ -331,36 +335,46 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         if (lineinfo) {
             function.linegaplog2 = reader.Read<uint8_t>();
 
-            int intervals = ((function.instructions.size() - 1) >> function.linegaplog2) + 1;
-            int absoffset = (function.instructions.size() + 3) & ~3;
+            // Guard empty bodies and shifts wider than size_t.
+            if (reader.HasFailed() || function.instructions.empty() || function.linegaplog2 >= 32)
+                return std::nullopt;
 
-            const int sizelineinfo = absoffset + intervals * sizeof(int);
+            const size_t instrCount = function.instructions.size();
+            const size_t intervals = ((instrCount - 1) >> function.linegaplog2) + 1;
+            const size_t absoffset = (instrCount + 3) & ~static_cast<size_t>(3);
+            const size_t sizelineinfo = absoffset + intervals * sizeof(int);
             function.lineinfo = {};
             function.lineinfo.resize(sizelineinfo);
 
-            function.abslineinfo = reinterpret_cast<int *>(function.lineinfo.data() + absoffset);
+            function.abslineinfoOffset = absoffset;
+            // A pointer stored before copying function into result.functions would dangle.
+            auto *abslineinfo = reinterpret_cast<int *>(function.lineinfo.data() + absoffset);
 
             uint8_t lastoffset = 0;
-            for (auto j = 0llu; j < function.instructions.size(); ++j) {
+            for (size_t j = 0; j < instrCount; ++j) {
                 lastoffset += reader.Read<uint8_t>();
                 function.lineinfo[j] = lastoffset;
             }
 
             auto lastline = 0;
-            for (auto j = 0; j < intervals; ++j) {
+            for (size_t j = 0; j < intervals; ++j) {
                 lastline += reader.Read<int32_t>();
-                function.abslineinfo[j] = lastline;
+                abslineinfo[j] = lastline;
             }
+            if (reader.HasFailed())
+                return std::nullopt;
         }
 
         uint8_t debuginfo = reader.Read<uint8_t>();
 
         if (debuginfo) {
-            const int sizelocvars = reader.ReadVariableInteger32();
+            const uint32_t sizelocvars = reader.ReadVariableInteger32();
+            if (reader.HasFailed() || sizelocvars > reader.Remaining())
+                return std::nullopt;
             function.locvars = {};
             function.locvars.resize(sizelocvars);
 
-            for (int j = 0; j < sizelocvars; ++j) {
+            for (uint32_t j = 0; j < sizelocvars; ++j) {
                 auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 if (str.has_value())
                     function.locvars[j].varname = str.value();
@@ -372,13 +386,14 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                 function.locvars[j].reg = reader.Read<uint8_t>();
             }
 
-            const int sizeupvalues = reader.ReadVariableInteger32();
-            // ASSERT(sizeupvalues == function.nups, "nups != sizeupvalues");
+            const uint32_t sizeupvalues = reader.ReadVariableInteger32();
+            if (reader.HasFailed() || sizeupvalues > reader.Remaining())
+                return std::nullopt;
 
             function.upvalueNames = {};
             function.upvalueNames.resize(sizeupvalues);
 
-            for (int j = 0; j < sizeupvalues; ++j) {
+            for (uint32_t j = 0; j < sizeupvalues; ++j) {
                 auto str = result.ReadFromStringTable(reader.ReadVariableInteger32());
                 function.upvalueNames[j] = str.has_value() ? str.value() : "";
             }
@@ -386,23 +401,36 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
         if (result.bytecodeVersion >= 11) {
             auto fbSize = reader.ReadVariableInteger32();
+            if (reader.HasFailed() || fbSize > reader.Remaining())
+                return std::nullopt;
             for (uint32_t j = 0; j < fbSize; ++j) {
                 (void)reader.Read<uint8_t>();
                 (void)reader.ReadVariableInteger32();
             }
         }
 
+        if (result.bytecodeVersion >= 12) {
+            // Match lvmload by skipping per-proto cost and unknown trailing bytes.
+            const std::uint8_t *protoEnd = protoStart + protoSize;
+            const std::uint8_t *cur = reader.GetCurrentReaderPosition();
+            if (cur > protoEnd) // we over-read past the declared proto extent: malformed.
+                return std::nullopt;
+            reader.AdvanceBy(static_cast<std::size_t>(protoEnd - cur));
+        }
+
+        if (reader.HasFailed()) // ran off the end while parsing this function
+            return std::nullopt;
+
         result.functions[i] = function;
     }
 
     auto mainfid = reader.ReadVariableInteger32();
+    // bIsMain assignment dereferences the main function pointer.
+    if (reader.HasFailed() || mainfid >= result.functions.size())
+        return std::nullopt;
 
     result.lpMainFunction = result.functions.data() + mainfid;
     result.lpMainFunction->bIsMain = true;
 
-    // ASSERT(
-    //     reader.GetCurrentReaderPosition() == reader.GetEndPosition(),
-    //     "bytecode was not properly parsed. EndPosition != CurrentPosition", reader
-    // );
     return result;
 }

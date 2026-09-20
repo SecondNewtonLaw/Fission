@@ -1,6 +1,7 @@
 //
 // Created by Dottik on 04/17/2026.
 //
+
 #include "Deserializer.hpp"
 #include <catch2/catch_test_macros.hpp>
 
@@ -111,4 +112,25 @@ TEST_CASE("V6 - metadata check", "[BytecodeDecoder]") {
     REQUIRE(deserialized->lpMainFunction->nups == 0);
     REQUIRE(deserialized->lpMainFunction->numparams == 0);
     REQUIRE(deserialized->lpMainFunction->upvalueNames.empty());
+}
+
+// GetBytecodeTypeName strings are emitted verbatim into the decompiled source as Luau type
+// annotations, so they must parse as Luau -- never a C-style `/* */` comment.
+TEST_CASE("Type names are Luau, not C-style comments", "[BytecodeDecoder]") {
+    // an unmapped tagged-userdata type falls back to `any` with an inline note.
+    const std::string ud = Deserializer::GetBytecodeTypeName(LBC_TYPE_TAGGED_USERDATA_BASE);
+    INFO("userdata type name: " << ud);
+    CHECK(ud.find("/*") == std::string::npos); // no C-style block comment
+    CHECK(ud.find("*/") == std::string::npos);
+    CHECK(ud.find("--[[") != std::string::npos); // Luau inline block comment
+    CHECK(ud.rfind("any", 0) == 0);              // still resolves to `any`
+
+    // the optional bit keeps the `?` attached to the type.
+    const std::string udOpt = Deserializer::GetBytecodeTypeName(LBC_TYPE_TAGGED_USERDATA_BASE | LBC_TYPE_OPTIONAL_BIT);
+    CHECK(udOpt.find("/*") == std::string::npos);
+    CHECK(udOpt.back() == '?');
+
+    // plain scalar types are unaffected.
+    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_NUMBER) == "number");
+    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_STRING) == "string");
 }

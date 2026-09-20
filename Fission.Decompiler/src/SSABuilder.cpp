@@ -1,8 +1,6 @@
-//
-// Created by Pixeluted on 30/11/2025.
-//
 #include "SSABuilder.hpp"
 #include "Deserializer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <array>
@@ -21,7 +19,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
                     LiftedOperation::SETTABLEN,      LiftedOperation::SETLIST,     LiftedOperation::RETURN,        LiftedOperation::JUMPIF,
                     LiftedOperation::JUMPIFNOT,      LiftedOperation::JUMPIFEQ,    LiftedOperation::JUMPIFLE,      LiftedOperation::JUMPIFLT,
                     LiftedOperation::JUMPIFNOTEQ,    LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,   LiftedOperation::JUMPXEQK,
-                    LiftedOperation::CAPTURE,        LiftedOperation::FASTCALL,    LiftedOperation::FASTCALL1,     LiftedOperation::FASTCALL2,
+                    LiftedOperation::CAPTURE,        LiftedOperation::FASTCALL,    LiftedOperation::FASTPCALL,     LiftedOperation::FASTCALL1,
                     LiftedOperation::FASTCALL2K,     LiftedOperation::FORGLOOP,    LiftedOperation::FORGPREP_NEXT, LiftedOperation::FORGPREP,
                     LiftedOperation::FORGPREP_INEXT, LiftedOperation::FORNPREP,    LiftedOperation::FASTCALL3,     LiftedOperation::SETUDATAKS,
                     LiftedOperation::NEWCLASSMEMBER, LiftedOperation::CMPPROTO}) {
@@ -41,6 +39,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
         set(op, AccessType::Write);
     }
 
+    // ASTLifter consumes FORNLOOP's base-register definition; Rename handles the VM's R(A+2) write.
     set(LiftedOperation::CALL, AccessType::Read);
     set(LiftedOperation::CALLFB, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Deferred);
@@ -62,25 +61,62 @@ AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t ope
     return baseType;
 }
 
-int CalculateLuaStackForInstruction(AnalyzedFunction &func, LiftedInstruction &inst) {
+// Resolve a variadic SETLIST or RETURN through its preceding multret producer.
+int VariadicTailCount(AnalyzedFunction &func, const LiftedInstruction &inst, int startReg) {
+    const auto &instrs = func.lpLiftedFunction->instructions;
+    // Malformed bytecode can carry an instruction index beyond this function.
+    int32_t idx = inst.instructionIndex - 1;
+    if (idx >= static_cast<int32_t>(instrs.size()))
+        idx = static_cast<int32_t>(instrs.size()) - 1;
+    for (; idx >= 0; --idx) {
+        const auto &p = instrs[idx];
+        if (p.operation == LiftedOperation::NOP)
+            continue;
+        const bool callMulti =
+            (p.operation == LiftedOperation::CALL || p.operation == LiftedOperation::CALLFB) && p.operands.size() > 2 && p.operands[2].value.imm.n == 0;
+        const bool varargMulti = p.operation == LiftedOperation::GETVARARGS && p.operands.size() > 1 && p.operands[1].value.imm.n == 0;
+        if ((callMulti || varargMulti) && p.operands[0].value.reg >= startReg)
+            return p.operands[0].value.reg - startReg + 1;
+        break; // the multret tail is the last element: the instruction right before `inst`
+    }
+    return 1;
+}
+
+// A B==0 CALL ends at the preceding multret producer, not the highest register used by the function.
+int CalculateLuaStackForInstruction(AnalyzedFunction &func, const LiftedInstruction &inst) {
     if (LiftedOperation::CALL != inst.operation && LiftedOperation::CALLFB != inst.operation)
         return 0; // why bro.
+
+    if (inst.operands.size() < 2)
+        return 0; // hostile bytecode: truncated CALL
 
     if (inst.operands[1].value.imm.n != 0 /* not actually var arg, why the fuck was this called? */)
         return 0;
 
-    uint8_t maxRegister = inst.operands[0].value.reg;
+    const int regFunc = inst.operands[0].value.reg;
+    // Setup instructions can separate a variadic call from its producer. Stop when a write leaves the
+    // call frame; higher unrelated registers do not extend the argument list.
+    const auto &instrs = func.lpLiftedFunction->instructions;
+    int32_t idx = inst.instructionIndex - 1;
+    if (idx >= static_cast<int32_t>(instrs.size()))
+        idx = static_cast<int32_t>(instrs.size()) - 1;
+    for (; idx >= 0; --idx) {
+        const auto &p = instrs[idx];
+        if (p.operation == LiftedOperation::NOP)
+            continue;
+        const bool callMulti =
+            (p.operation == LiftedOperation::CALL || p.operation == LiftedOperation::CALLFB) && p.operands.size() > 2 && p.operands[2].value.imm.n == 0;
+        const bool varargMulti = p.operation == LiftedOperation::GETVARARGS && p.operands.size() > 1 && p.operands[1].value.imm.n == 0;
+        if ((callMulti || varargMulti) && !p.operands.empty() && p.operands[0].value.reg >= regFunc + 1)
+            return p.operands[0].value.reg - regFunc; // R(A+1)..R(producerBase) inclusive
 
-    for (const auto &insn : func.lpLiftedFunction->instructions) {
-        if (insn.instructionIndex == inst.instructionIndex)
-            break; // going further will break this.
-        for (const auto &ops : insn.operands) {
-            if (ops.type == LiftedOperandType::Register)
-                maxRegister = std::max(maxRegister, ops.value.reg);
-        }
+        const bool writesInFrame = !p.operands.empty() && p.operands[0].type == LiftedOperandType::Register && p.operands[0].value.reg >= regFunc;
+        const bool noRegDest = p.operands.empty() || p.operands[0].type != LiftedOperandType::Register;
+        if (writesInFrame || noRegDest)
+            continue;
+        break; // wrote a register below the call frame -> outside this call's arg setup
     }
-
-    return maxRegister - inst.operands[0].value.reg; // regMax - regStart ; basic for fucking vararg.
+    return 0;
 }
 
 std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &inst) {
@@ -88,6 +124,8 @@ std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &ins
     switch (inst.operation) {
     case LiftedOperation::CALL:
     case LiftedOperation::CALLFB: {
+        if (inst.operands.size() < 3)
+            break; // hostile bytecode: truncated instruction
         int regStart = inst.operands[0].value.reg;
         int retCount = inst.operands[2].value.imm.n;
         int effectiveRetCount = (retCount == 0) ? 1 : (retCount - 1);
@@ -97,11 +135,15 @@ std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &ins
         break;
     }
     case LiftedOperation::NAMECALL: {
+        if (inst.operands.empty())
+            break;
         int regA = inst.operands[0].value.reg;
         defs.push_back(regA + 1); // Implicit Self
         break;
     }
     case LiftedOperation::GETVARARGS: {
+        if (inst.operands.size() < 2)
+            break;
         int baseReg = inst.operands[0].value.reg;
         int count = inst.operands[1].value.imm.n;
         int effectiveCount = (count == 0) ? 1 : (count - 1);
@@ -111,6 +153,17 @@ std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &ins
         break;
     }
     case LiftedOperation::SETLIST: {
+        break;
+    }
+    case LiftedOperation::FORGLOOP: {
+        if (inst.operands.empty())
+            break;
+        // Loop variables need definitions at the latch so header phis separate pre-loop values.
+        const int base = inst.operands[0].value.reg;
+        const int numVars = inst.operands.size() > 2 ? (inst.operands[2].value.imm.n & 0xFF) : 0;
+        defs.push_back(base + 2);
+        for (int k = 0; k < numVars; ++k)
+            defs.push_back(base + 3 + k);
         break;
     }
     default:
@@ -175,12 +228,12 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 }
             }
 
-            if (inst->operation == LiftedOperation::CONCAT) {
+            if (inst->operation == LiftedOperation::CONCAT && inst->operands.size() > 2) {
                 int start = inst->operands[1].value.reg;
                 int end = inst->operands[2].value.reg;
                 for (int r = start; r <= end; ++r)
                     markRead(r);
-            } else if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) {
+            } else if ((inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) && inst->operands.size() > 2) {
                 int32_t regFunc = inst->operands[0].value.reg;
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
@@ -203,18 +256,18 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                     int32_t retReg = baseReg + k;
                     markWrite(retReg);
                 }
-            } else if (inst->operation == LiftedOperation::NAMECALL) {
+            } else if (inst->operation == LiftedOperation::NAMECALL && inst->operands.size() > 1) {
                 int base = inst->operands[0].value.reg;
                 markWrite(base); // self
                 markRead(inst->operands[1].value.reg);
-            } else if (inst->operation == LiftedOperation::RETURN) {
+            } else if (inst->operation == LiftedOperation::RETURN && inst->operands.size() > 1) {
                 int base = inst->operands[0].value.reg;
                 int count = inst->operands[1].value.imm.n - 1;
-                if (count == -1)
-                    count = 0;
-                for (int k = 0; k < count; ++k)
+                // Variadic returns read through the multret producer so merge phis remain live.
+                int effectiveCount = (count == -1) ? VariadicTailCount(*func, *inst, base) : count;
+                for (int k = 0; k < effectiveCount; ++k)
                     markRead(base + k);
-            } else if (inst->operation == LiftedOperation::SETLIST) { // TODO: Handle vararg SETLIST properly.
+            } else if (inst->operation == LiftedOperation::SETLIST && inst->operands.size() > 2) { // TODO: Handle vararg SETLIST properly.
                 int base = inst->operands[1].value.reg;
                 int count = inst->operands[2].value.imm.n;
                 int effectiveCount = (count > 0) ? (count - 1) : 1; // assume base is read, as we may use it.
@@ -247,6 +300,8 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
             for (int r = 0; r <= maxRegs; ++r) {
                 bool isLiveOut = false;
                 for (uint32_t succ : block.successors) {
+                    if (succ >= liveIn.size())
+                        continue; // hostile bytecode: wild jump target
                     if (liveIn[succ][r]) {
                         isLiveOut = true;
                         break;
@@ -333,11 +388,8 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 }
             }
 
-            // FORNLOOP writes to operand[2] (R(A+2)) via explicit NewVersion in
-            // Rename, but GetRegisterAccess only sees a Read.  Sync defBlocks so
-            // CreatePhiNodes inserts a phi for the loop-variable register at the
-            // header, letting the pre-header constant LOAD be single-use → inlined.
-            if (inst->operation == LiftedOperation::FORNLOOP) {
+            // Match Rename's explicit R(A+2) definition so the loop header receives a phi.
+            if (inst->operation == LiftedOperation::FORNLOOP && inst->operands.size() > 2) {
                 int reg = inst->operands[2].value.reg;
                 if (reg <= maxRegs) {
                     if (defBlocks[reg].empty() || static_cast<uint32_t>(defBlocks[reg].back()) != block.dwBlockId) {
@@ -354,8 +406,9 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
     std::vector<int> workList;
     workList.reserve(lpOriginalFunction->basicBlocks.size());
 
-    std::vector<int> hasPhi(lpOriginalFunction->basicBlocks.size() + 1, 0);
-    std::vector<int> inWorkList(lpOriginalFunction->basicBlocks.size() + 1, 0);
+    // Matching block count lets one bounds check protect frontier and liveness arrays.
+    std::vector<int> hasPhi(lpOriginalFunction->basicBlocks.size(), 0);
+    std::vector<int> inWorkList(lpOriginalFunction->basicBlocks.size(), 0);
     int visitedToken = 0;
 
     for (int reg = 0; reg <= maxRegs; ++reg) {
@@ -382,7 +435,7 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 if (frontierId >= hasPhi.size())
                     continue;
 
-                // skip dead Phis
+                // Skip dead phis.
                 if (!liveIn[frontierId][reg])
                     continue;
 
@@ -416,7 +469,10 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
     }
 }
 
-void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int32_t, DominatorInfo> &domInfo) {
+std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
+    if (blockId < 0 || static_cast<size_t>(blockId) >= func.basicBlocks.size())
+        return {};
+
     BasicBlock &block = func.basicBlocks[blockId];
 
     std::vector<int> varsDefinedHere;
@@ -435,8 +491,8 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
             if (inst->operation == LiftedOperation::NOP)
                 continue;
 
-            if (inst->operation == LiftedOperation::CONCAT) {
-                func.definitionMap[{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion}] = inst;
+            if (inst->operation == LiftedOperation::CONCAT && inst->operands.size() > 2) {
+                // The generic write pass records the destination after assigning its SSA version.
                 int32_t startReg = inst->operands[1].value.reg;
                 int32_t endReg = inst->operands[2].value.reg;
                 std::vector<int32_t> rangeVersions;
@@ -491,7 +547,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
             }
 
-            if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) {
+            if ((inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) && inst->operands.size() > 2) {
                 int32_t regFunc = inst->operands[0].value.reg;
                 int32_t argCount = inst->operands[1].value.imm.n - 1;
 
@@ -534,7 +590,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     func.definitionMap[{static_cast<uint8_t>(retReg), newVer}] = inst;
                 }
 
-            } else if (inst->operation == LiftedOperation::NAMECALL) {
+            } else if (inst->operation == LiftedOperation::NAMECALL && !inst->operands.empty()) {
                 int32_t regA = inst->operands[0].value.reg;
                 int32_t regSelf = regA + 1;
 
@@ -542,12 +598,13 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 varsDefinedHere.push_back(regSelf);
                 func.definitionMap[{static_cast<uint8_t>(regSelf), newVer}] = inst;
 
-            } else if (inst->operation == LiftedOperation::RETURN) {
+            } else if (inst->operation == LiftedOperation::RETURN && inst->operands.size() > 1) {
                 int regStart = inst->operands[0].value.reg;
                 int count = inst->operands[1].value.imm.n - 1;
 
                 std::vector<int32_t> retVersions;
-                int effectiveCount = (count == -1) ? 1 : count;
+                // A zero count returns values through the multret producer.
+                int effectiveCount = (count == -1) ? VariadicTailCount(func, *inst, regStart) : count;
 
                 for (int i = 0; i < effectiveCount; ++i) {
                     int reg = regStart + i;
@@ -560,7 +617,7 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
 
                 if (effectiveCount > 0) {
-                    // set version on first argument, which is a reg, fixing some issues relating to lifting and representation for RETURN IR ops.
+                    // RETURN's first operand carries the base register version.
                     int reg = inst->operands[0].value.reg;
                     if (CurrentVersion(reg) == -1) {
                         inst->operands[0].ssaVersion = NewVersion(reg);
@@ -571,10 +628,11 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 
                 func.implicitUses[inst] = std::move(retVersions);
 
-            } else if (inst->operation == LiftedOperation::SETLIST) {
+            } else if (inst->operation == LiftedOperation::SETLIST && inst->operands.size() > 2) {
                 int newItemsStartReg = inst->operands[1].value.reg;
                 int newItemsCount = inst->operands[2].value.imm.n;
-                int effectiveCount = (newItemsCount == 0) ? 1 : (newItemsCount - 1);
+                // A zero count gathers values through the multret producer.
+                int effectiveCount = (newItemsCount == 0) ? VariadicTailCount(func, *inst, newItemsStartReg) : (newItemsCount - 1);
 
                 std::vector<int32_t> itemVersions;
                 itemVersions.reserve(effectiveCount);
@@ -591,19 +649,21 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                 }
 
                 func.implicitUses[inst] = std::move(itemVersions);
-            } else if (inst->operation == LiftedOperation::GETVARARGS) {
+            } else if (inst->operation == LiftedOperation::GETVARARGS && inst->operands.size() > 1) {
                 int32_t count = inst->operands[1].value.imm.n;
                 int32_t effectiveCount = (count == 0) ? 1 : (count - 1);
                 uint8_t baseReg = inst->operands[0].value.reg;
-                for (int32_t k = 0; k < effectiveCount; ++k) {
+                // The generic write pass already defines GETVARARGS base register.
+                for (int32_t k = 1; k < effectiveCount; ++k) {
                     int32_t newVer = NewVersion(baseReg + k);
                     varsDefinedHere.push_back(baseReg + k);
 
                     func.definitionMap[{static_cast<uint8_t>(baseReg + k), newVer}] = inst;
                 }
             } else if (
-                inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
-                inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT
+                (inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
+                 inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT) &&
+                !inst->operands.empty()
             ) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 std::vector<int32_t> loopInputs;
@@ -619,14 +679,19 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
                     func.users[{r, v}].push_back(inst);
                 }
                 func.implicitUses[inst] = std::move(loopInputs);
-            } else if (inst->operation == LiftedOperation::FORNLOOP) {
+            } else if (inst->operation == LiftedOperation::FORNLOOP && inst->operands.size() > 2) {
+                // Pop this version when leaving the dominator subtree.
                 NewVersion(inst->operands[2].value.reg);
-            } else if (inst->operation == LiftedOperation::FORGLOOP) {
+                varsDefinedHere.push_back(inst->operands[2].value.reg);
+            } else if (inst->operation == LiftedOperation::FORGLOOP && inst->operands.size() > 2) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 int numVars = (inst->operands[2].value.imm.n & 0xFF);
                 NewVersion(baseReg + 2);
-                for (int i = 0; i < numVars; ++i)
+                varsDefinedHere.push_back(baseReg + 2);
+                for (int i = 0; i < numVars; ++i) {
                     NewVersion(baseReg + 3 + i);
+                    varsDefinedHere.push_back(baseReg + 3 + i);
+                }
             }
             if (inst == block.lpTail)
                 break;
@@ -634,6 +699,8 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
     }
 
     for (uint32_t succId : block.successors) {
+        if (succId >= func.basicBlocks.size())
+            continue; // hostile bytecode: wild jump target
         BasicBlock &succ = func.basicBlocks[succId];
 
         int predIndex = -1;
@@ -644,10 +711,29 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
             }
         }
 
+        // Generic-for variables enter only from the back-edge; entry phis must remain undefined.
+        const auto isEntryEdgeLoopVar = [&](const BasicBlock &header, int reg) -> bool {
+            if (!header.loopLatch.has_value() || header.loopLatch.value() == block.dwBlockId)
+                return false; // only the non-latch (entry) edge into the header
+            const uint32_t lid = header.loopLatch.value();
+            if (lid >= func.basicBlocks.size())
+                return false;
+            const BasicBlock &latch = func.basicBlocks[lid];
+            if (!latch.lpTail || latch.lpTail->operation != LiftedOperation::FORGLOOP || latch.lpTail->operands.size() < 3)
+                return false;
+            const int base = latch.lpTail->operands[0].value.reg;
+            const int numVars = latch.lpTail->operands[2].value.imm.n & 0xFF;
+            return reg >= base + 3 && reg < base + 3 + numVars;
+        };
+
         if (predIndex != -1) {
             for (auto &phi : succ.phiNodes) {
                 int reg = phi.operands[0].value.reg;
                 if (size_t(predIndex + 1) < phi.operands.size()) {
+                    if (isEntryEdgeLoopVar(succ, reg)) {
+                        phi.operands[predIndex + 1].ssaVersion = -1; // loop var: nothing flows in from the entry edge
+                        continue;
+                    }
                     phi.operands[predIndex + 1].ssaVersion = CurrentVersion(reg);
                     func.useCounts[SSARef{reg, CurrentVersion(reg)}]++;
                     func.users[SSARef{static_cast<uint8_t>(reg), CurrentVersion(reg)}].push_back(&phi);
@@ -656,16 +742,35 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
         }
     }
 
-    if (auto it = domInfo.find(blockId); it != domInfo.end()) {
-        for (const int childId : it->second.children) {
-            Rename(childId, func, domInfo);
-        }
-    }
+    return varsDefinedHere;
+}
 
-    for (int reg : varsDefinedHere) {
-        if (!versionStack[reg].empty()) {
-            versionStack[reg].pop_back();
+void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int32_t, DominatorInfo> &domInfo) {
+    struct Frame {
+        int blockId;
+        bool exiting = false;
+        std::vector<int> definitions;
+    };
+
+    std::vector<Frame> frames;
+    frames.push_back({blockId, false, {}});
+    while (!frames.empty()) {
+        Frame frame = std::move(frames.back());
+        frames.pop_back();
+
+        if (frame.exiting) {
+            for (int reg : frame.definitions)
+                if (!versionStack[reg].empty())
+                    versionStack[reg].pop_back();
+            continue;
         }
+        if (frame.blockId < 0 || static_cast<size_t>(frame.blockId) >= func.basicBlocks.size())
+            continue;
+
+        frames.push_back({frame.blockId, true, RenameBlock(frame.blockId, func)});
+        if (auto it = domInfo.find(frame.blockId); it != domInfo.end())
+            for (auto child = it->second.children.rbegin(); child != it->second.children.rend(); ++child)
+                frames.push_back({*child, false, {}});
     }
 }
 

@@ -39,6 +39,8 @@ class VarArgExpression;
 class FunctionArgumentExpression;
 class TableBinaryExpressionNode;
 class IntegerLiteralNode;
+class IfExpressionNode;
+class ClassDeclarationNode;
 
 class Visitor {
   public:
@@ -61,6 +63,7 @@ class Visitor {
     virtual void Visit(AssignmentStatementNode *lpNode) = 0;
     virtual void Visit(TableBinaryExpressionNode *lpNode) = 0;
     virtual void Visit(BinaryExpressionNode *lpNode) = 0;
+    virtual void Visit(IfExpressionNode *lpNode) = 0;
     virtual void Visit(StringLiteralNode *lpNode) = 0;
     virtual void Visit(NumberLiteralNode *lpNode) = 0;
     virtual void Visit(BooleanLiteralNode *lpNode) = 0;
@@ -76,5 +79,6 @@ class Visitor {
     virtual void Visit(RepeatStatementNode *lpNode) = 0;
     virtual void Visit(VarArgExpression *lpNode) = 0;
     virtual void Visit(FunctionArgumentExpression *lpNode) = 0;
-    virtual void Visit(VectorNode* lpNode) = 0;
+    virtual void Visit(VectorNode *lpNode) = 0;
+    virtual void Visit(ClassDeclarationNode *lpNode) = 0;
 };

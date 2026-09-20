@@ -1,6 +1,3 @@
-//
-// Created by Pixeluted on 29/11/2025.
-//
 #pragma once
 
 #include "InstructionDecoder.hpp"
@@ -75,6 +72,7 @@ enum class LiftedOperation : uint32_t {
     DUPCLOSURE,
     PREPVARARGS,
     FASTCALL,
+    FASTPCALL,
     CAPTURE,
     SUBRK,
     DIVRK,
@@ -131,7 +129,7 @@ struct LiftedFunction {
 };
 
 class BytecodeLifter {
-    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
+    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false, int depth = 0);
 
     Fission::InstructionDecoder *lpDecoder = nullptr;
 

@@ -1,14 +1,29 @@
-//
-// Created by Pixeluted on 01/12/2025.
-//
 #include "Decompiler.hpp"
 
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "Analysis/ConstantPropagation.hpp"
 #include "Analysis/RobloxTypeInferer.hpp"
+#include "Rewriters/AttributeRenamer.hpp"
+#include "Rewriters/ClassMethodRewriter.hpp"
+#include "Rewriters/ConstructorResultRenamer.hpp"
 #include "Rewriters/DeadLocalEliminator.hpp"
+#include "Rewriters/DeclarationHoister.hpp"
+#include "Rewriters/GetterRenamer.hpp"
+#include "Rewriters/GlobalAssignmentRenamer.hpp"
 #include "Rewriters/IfChainSimplifier.hpp"
+#include "Rewriters/IfExpressionFolder.hpp"
+#include "Rewriters/LengthCountRenamer.hpp"
+#include "Rewriters/LoopVariableRenamer.hpp"
+#include "Rewriters/PcallResultRenamer.hpp"
+#include "Rewriters/PropertyRenamer.hpp"
+#include "Rewriters/RequireRenamer.hpp"
+#include "Rewriters/ReverseFieldRenamer.hpp"
+#include "Rewriters/ScopeAwareRenamer.hpp"
+#include "Rewriters/ScopeBlockIntroducer.hpp"
+#include "Rewriters/SelfAssignmentEliminator.hpp"
 #include "Rewriters/ShortCircuitFolder.hpp"
 #include "SafetyGuard.hpp"
+#include "SourceGenerator/AstJsonSerializer.hpp"
 
 #include <libassert/assert.hpp>
 
@@ -48,6 +63,11 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
     stream << GetIndentation(indentationLevel) << "/* Function Name: '" << rawFunc->name << "' */\n";
     stream << GetIndentation(indentationLevel) << "/* Basic Blocks: " << analyzedFunc.basicBlocks.size() << " */\n";
 
+    // Reverse definitions annotate each instruction with SSA versions and use counts.
+    std::unordered_map<const LiftedInstruction *, std::vector<SSARef>> defsByInst;
+    for (const auto &[ref, inst] : analyzedFunc.definitionMap)
+        defsByInst[inst].push_back(ref);
+
     for (const auto &block : analyzedFunc.basicBlocks) {
         stream << "\n";
         stream << GetIndentation(indentationLevel + 2) << "BLOCK_" << block.dwBlockId << ":\n";
@@ -70,7 +90,7 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
                 const auto &operand = currentInst->operands[i];
                 switch (operand.type) {
                 case LiftedOperandType::Register:
-                    stream << "R" << std::to_string(operand.value.reg);
+                    stream << "R" << std::to_string(operand.value.reg) << "#" << std::to_string(operand.ssaVersion);
                     break;
                 case LiftedOperandType::ImmediateNil:
                     stream << "nil";
@@ -96,6 +116,27 @@ void PrintFunctionOntoStream(std::stringstream &stream, int indentationLevel, co
 
             if (currentInst->instructionRemarks)
                 stream << " /* " << *currentInst->instructionRemarks << " */";
+
+            // Single-use definitions expose unexpected spill decisions in diagnostic output.
+            if (const auto defIt = defsByInst.find(currentInst); defIt != defsByInst.end() && !defIt->second.empty()) {
+                stream << " /* SSA def:";
+                for (const auto &ref : defIt->second) {
+                    const auto ucIt = analyzedFunc.useCounts.find(ref);
+                    const int32_t uses = (ucIt != analyzedFunc.useCounts.end()) ? ucIt->second : 0;
+                    stream << " R" << std::to_string(ref.regIndex) << "#" << std::to_string(ref.version) << "(uses=" << uses << ")";
+                }
+                stream << " */";
+            }
+            // Include call, SETLIST, and RETURN reads not represented by explicit operands.
+            if (const auto iuIt = analyzedFunc.implicitUses.find(currentInst); iuIt != analyzedFunc.implicitUses.end() && !iuIt->second.empty()) {
+                stream << " /* implicit-use versions: [";
+                for (size_t j = 0; j < iuIt->second.size(); ++j) {
+                    stream << iuIt->second[j];
+                    if (j + 1 != iuIt->second.size())
+                        stream << ", ";
+                }
+                stream << "] */";
+            }
 
             stream << "\n";
 
@@ -152,9 +193,9 @@ std::optional<std::string> readfile(const std::filesystem::path &path, const boo
 
     std::string buffer(size, '\0');
 
-    if (file.read(&buffer[0], size))
-        return buffer;
-
+    file.read(&buffer[0], size);
+    // Trim after CRLF translation or a short read.
+    buffer.resize(static_cast<size_t>(file.gcount()));
     return buffer;
 }
 
@@ -237,8 +278,7 @@ static std::optional<std::string> InferExpressionType(const std::shared_ptr<Expr
             return "boolean";
         if (binary->op == "..")
             return "string";
-        if (binary->op == "+" || binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "//" || binary->op == "%" ||
-            binary->op == "^")
+        if (binary->op == "+" || binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "//" || binary->op == "%" || binary->op == "^")
             return "number";
     }
     return std::nullopt;
@@ -362,8 +402,7 @@ static void CollectBodyUseFactsFromExpression(const std::shared_ptr<Expression> 
         return;
 
     if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-        if (binary->op == "+" || binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "//" || binary->op == "%" ||
-            binary->op == "^") {
+        if (binary->op == "+" || binary->op == "-" || binary->op == "*" || binary->op == "/" || binary->op == "//" || binary->op == "%" || binary->op == "^") {
             AddIdentifierUseFact(binary->left, argName, "number", fact);
             AddIdentifierUseFact(binary->right, argName, "number", fact);
         } else if (binary->op == "..") {
@@ -538,7 +577,7 @@ static void AnnotateLocalDeclarations(std::vector<std::shared_ptr<Statement>> &s
     for (auto &stmt : stmts) {
         if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
             auto type = InferExpressionType(decl->value);
-            if (type && *type != "nil")
+            if (type && *type != "nil" && *type != "table")
                 decl->type = MakeTypeAnnotation(*type);
         } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt); fn && fn->lpFunctionBody) {
             AnnotateLocalDeclarations(fn->lpFunctionBody->body);
@@ -570,6 +609,29 @@ static std::optional<bool> EvaluateBooleanConstant(const std::shared_ptr<Express
         auto value = EvaluateBooleanConstant(unary->operand);
         if (value)
             return !*value;
+    }
+    if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
+        const auto compare = [&](const auto left, const auto right) -> std::optional<bool> {
+            if (binary->op == "==")
+                return left == right;
+            if (binary->op == "~=")
+                return left != right;
+            if (binary->op == "<")
+                return left < right;
+            if (binary->op == ">")
+                return left > right;
+            if (binary->op == "<=")
+                return left <= right;
+            if (binary->op == ">=")
+                return left >= right;
+            return std::nullopt;
+        };
+        if (const auto left = std::dynamic_pointer_cast<NumberLiteralNode>(binary->left))
+            if (const auto right = std::dynamic_pointer_cast<NumberLiteralNode>(binary->right))
+                return compare(left->value, right->value);
+        if (const auto left = std::dynamic_pointer_cast<IntegerLiteralNode>(binary->left))
+            if (const auto right = std::dynamic_pointer_cast<IntegerLiteralNode>(binary->right))
+                return compare(left->value, right->value);
     }
     return std::nullopt;
 }
@@ -633,7 +695,8 @@ static void ApplyFunctionArgumentFacts(const FunctionMap &functions, const Infer
                     type = InferArgumentTypeFromBody(fn, i);
                 if (!type)
                     type = "unknown";
-                fn->argumentsNames.at(i)->type = MakeTypeAnnotation(*type);
+                if (*type != "table")
+                    fn->argumentsNames.at(i)->type = MakeTypeAnnotation(*type);
             }
         }
     }
@@ -649,11 +712,11 @@ static void InferTypes(ASTFunction &ast) {
     AnnotateLocalDeclarations(ast.statements);
 }
 
-static void OptimizeIR(ASTFunction &ast) { OptimizeStatements(ast.statements); }
-
+static void OptimizeAST(ASTFunction &ast) { OptimizeStatements(ast.statements); }
 
 DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
     Fission::ScopedThrowingAssertHandler assertGuard;
+    Fission::ScopedDecompileBudget budget(m_decompileBudget);
 
     if (decoder == nullptr)
         return {"", "", "", DecompileResult::FailedToDecompile};
@@ -675,6 +738,13 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
 DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
     DEBUG_ASSERT(decoder != nullptr);
     DecompilationResult res{};
+#ifndef PRODUCTION_BUILD
+    if (!bytecode.empty() && bytecode.front() == '\0') {
+        res.resultCode = DecompileResult::FailedToDeserialize;
+        res.errorMessage = "Nothing to decompile, bytecode is a script error: " + bytecode.substr(1);
+        return res;
+    }
+#endif
     const auto deserializeStart = std::chrono::steady_clock::now();
     const auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
@@ -708,25 +778,59 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     ssaBuilder.Build(controlFlowAnalyzedFunction);
     const auto ssaEnd = std::chrono::steady_clock::now();
 
+    const auto irOptimizationStart = std::chrono::steady_clock::now();
+    if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR) {
+        while (Fission::ConstantPropagation{}.Run(controlFlowAnalyzedFunction).Changed()) {
+            controlFlowAnalyzedFunction = controlFlowAnalyzer.DetermineBasicBlocks(&liftedBytecode);
+            controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
+            controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
+            controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
+            ssaBuilder.Build(controlFlowAnalyzedFunction);
+        }
+    }
+    const auto irOptimizationEnd = std::chrono::steady_clock::now();
+
     const auto astStart = std::chrono::steady_clock::now();
     auto liftedAST = astLifter.Lift(controlFlowAnalyzedFunction);
     AddDecompilerOptionsToHeader(liftedAST, flags);
 
-    // ---- AST Rewriting ----
     const auto astRewriteStart = std::chrono::steady_clock::now();
+    // Hoisting must run while names still identify registers and before later passes reshape scopes.
+    DeclarationHoister{}.Run(liftedAST.statements);
+
     const auto shortCircuitStart = std::chrono::steady_clock::now();
     ShortCircuitFolder{}.Run(liftedAST.statements);
     const auto shortCircuitEnd = std::chrono::steady_clock::now();
+    // Method reconstruction must precede dead-local elimination.
+    ClassMethodRewriter{}.Run(liftedAST.statements);
+    DeclarationHoister{}.Run(liftedAST.statements);
+    DeadLocalEliminator{}.Run(liftedAST.statements);
+    SelfAssignmentEliminator{}.Run(liftedAST.statements);
     const auto ifChainStart = std::chrono::steady_clock::now();
     IfChainSimplifier{}.Run(liftedAST.statements);
     const auto ifChainEnd = std::chrono::steady_clock::now();
+    RequireRenamer{}.Run(liftedAST.statements);
+    GetterRenamer{}.Run(liftedAST.statements);
+    AttributeRenamer{}.Run(liftedAST.statements);
+    PropertyRenamer{}.Run(liftedAST.statements);
+    ConstructorResultRenamer{}.Run(liftedAST.statements);
+    LengthCountRenamer{}.Run(liftedAST.statements);
+    PcallResultRenamer{}.Run(liftedAST.statements);
+    LoopVariableRenamer{}.Run(liftedAST.statements);
+    // Assignment-based naming is weakest and runs after source-based naming.
+    ReverseFieldRenamer{}.Run(liftedAST.statements);
+    GlobalAssignmentRenamer{}.Run(liftedAST.statements);
+    // Fold branch assignments before scope blocks separate declarations from their diamonds.
+    IfExpressionFolder{}.Run(liftedAST.statements);
+    DeclarationHoister{}.Run(liftedAST.statements);
     DeadLocalEliminator{}.Run(liftedAST.statements);
+
+    // Scope blocks run last against final statement lifetimes.
+    ScopeBlockIntroducer{}.Run(liftedAST.statements);
     const auto astRewriteEnd = std::chrono::steady_clock::now();
 
-    const auto irOptimizationStart = std::chrono::steady_clock::now();
     if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR)
-        OptimizeIR(liftedAST);
-    const auto irOptimizationEnd = std::chrono::steady_clock::now();
+        OptimizeAST(liftedAST);
 
     const auto typeInferenceStart = std::chrono::steady_clock::now();
     if ((flags & DecompilerFlags::InferTypes) == DecompilerFlags::InferTypes)
@@ -738,6 +842,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto autoNameVariables = (flags & DecompilerFlags::AutoNameVariables) == DecompilerFlags::AutoNameVariables;
     if (inferRobloxTypes || autoNameVariables)
         RobloxTypeInferer{}.Infer(liftedAST, inferRobloxTypes, autoNameVariables);
+    ScopeAwareRenamer::PruneStaleRenameComments(liftedAST.statements);
     const auto robloxPropagationEnd = std::chrono::steady_clock::now();
     const auto astEnd = std::chrono::steady_clock::now();
 
@@ -748,9 +853,10 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto generator = sourceGenerator.GenerateSource(&root);
     const auto sgenEnd = std::chrono::steady_clock::now();
 
-    std::cout << "generated source code:\n" << generator << '\n';
-
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
+    if (printIR) // debug echo only; unconditional writes to std::cout race across threads and spam embedders
+        std::cout << "generated source code:\n" << generator << '\n';
+
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;
     const auto formattedIR = FormatAnalyzedIR(controlFlowAnalyzedFunction);
     if (printIR || writeIR) {
@@ -768,6 +874,15 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         );
 
         writefile("cfg.dot", dotGraph);
+    }
+
+    // Capture requested server artifacts without file I/O.
+    if ((flags & DecompilerFlags::CaptureCFGGraph) == DecompilerFlags::CaptureCFGGraph)
+        res.cfgGraph = GraphVisualizer::GenerateDotGraph(controlFlowAnalyzedFunction, GraphContent::IROnly);
+
+    if ((flags & DecompilerFlags::CaptureAST) == DecompilerFlags::CaptureAST) {
+        AstJsonSerializer astSerializer{};
+        res.astJson = astSerializer.Serialize(&root);
     }
 
     if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown) {
@@ -823,6 +938,11 @@ DecompilationResult Decompiler::DecompileTestCodeFromFile(const std::string &fil
         return {"", "", "", DecompileResult::FailedToReadFile};
 
     return DecompileTestCode(*readFile, flags, compileOpts);
+}
+
+DecompilationResult Decompiler::DecompileVanillaBytecode(const std::string &bytecode, DecompilerFlags flags) {
+    auto normalDecoder = Fission::InstructionDecoder{};
+    return CommonDecompilerEntry(bytecode, &normalDecoder, flags);
 }
 
 DecompilationResult Decompiler::DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags) {

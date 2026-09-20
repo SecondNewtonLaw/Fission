@@ -112,10 +112,11 @@ CPMAddPackage(
 CPMAddPackage(
         NAME Luau
         GITHUB_REPOSITORY luau-lang/luau
-        GIT_TAG 0.718
+        GIT_TAG 0.738
 )
 
-set(BOOST_INCLUDE_LIBRARIES beast container CACHE STRING "Boost libraries required by Fission")
+# Override stale Boost component lists cached before these dependencies were added.
+set(BOOST_INCLUDE_LIBRARIES beast json container CACHE STRING "Boost libraries required by Fission" FORCE)
 
 CPMAddPackage(
         NAME Boost
@@ -247,7 +248,6 @@ add_library(Fission.Common STATIC
         Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
-#target_precompile_headers(Fission.Common PUBLIC Fission.Common / include / pch.hpp)
 target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 
@@ -263,11 +263,22 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/SSABuilder.cpp
         Fission.Decompiler/include/Analysis/RobloxTypeInferer.hpp
         Fission.Decompiler/src/Analysis/RobloxTypeInferer.cpp
+        Fission.Decompiler/include/Analysis/ConstantPropagation.hpp
+        Fission.Decompiler/src/Analysis/ConstantPropagation.cpp
         Fission.Decompiler/src/Decompiler.cpp
         Fission.Decompiler/include/SafetyGuard.hpp
         Fission.Decompiler/include/SourceGenerator/Generator.hpp
         Fission.Decompiler/include/Rewriters/ASTRewriter.hpp
+        Fission.Decompiler/include/Rewriters/AttributeRenamer.hpp
+        Fission.Decompiler/include/Rewriters/ClassMethodRewriter.hpp
+        Fission.Decompiler/include/Rewriters/GetterRenamer.hpp
         Fission.Decompiler/include/Rewriters/IfChainSimplifier.hpp
+        Fission.Decompiler/include/Rewriters/PropertyRenamer.hpp
+        Fission.Decompiler/include/Rewriters/RequireRenamer.hpp
+        Fission.Decompiler/include/Rewriters/ReverseFieldRenamer.hpp
+        Fission.Decompiler/include/Rewriters/ScopeAwareRenamer.hpp
+        Fission.Decompiler/include/Rewriters/ScopeBlockIntroducer.hpp
+        Fission.Decompiler/include/Rewriters/SelfAssignmentEliminator.hpp
         Fission.Decompiler/include/Rewriters/ShortCircuitFolder.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/ASTNode.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/RootNode.hpp
@@ -279,7 +290,7 @@ add_library(Fission.Decompiler STATIC
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
-target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container)
+target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container Boost::unordered)
 
 add_executable(Fission.CLI
         Fission.CLI/src/main.cpp
@@ -325,6 +336,7 @@ if (BUILD_TESTING)
     add_executable(Fission.Tests
             Fission.Tests/TestLibassertHandler.cpp
             Fission.Tests/Decoding/BytecodeV6Decoding.cpp
+            Fission.Tests/Decoding/BytecodeV10V12Decoding.cpp
             Fission.Tests/CFG/CFGCoherence.cpp
             Fission.Tests/Decompiler/DecompilationRoundtrip.cpp
             Fission.Tests/Decompiler/LiftingSemantics.cpp
@@ -342,6 +354,9 @@ if (BUILD_TESTING)
 
     target_compile_options(Fission.Tests PRIVATE ${CXX_COMPILE_OPTIONS})
     target_link_options(Fission.Tests PRIVATE ${CXX_LINK_OPTIONS})
+
+    # File-based regressions run from arbitrary working directories.
+    target_compile_definitions(Fission.Tests PRIVATE FISSION_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
     list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
 

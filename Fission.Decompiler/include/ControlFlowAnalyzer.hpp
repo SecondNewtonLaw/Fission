@@ -8,19 +8,20 @@
 #include "BytecodeLifter.hpp"
 #include "Deserializer.hpp"
 
+#include <boost/unordered/unordered_flat_map.hpp>
+#include <cctype>
 #include <map>
 #include <queue>
 #include <sstream>
+#include <unordered_set>
 
 enum class BlockType {
     Standard,
 
-    // structures
     IfHeader,   // The start of an 'if' (has conditional branches).
     LoopHeader, // top of a loop (where the negative jump would land (must be determined using a LoopLatch block)).
     LoopLatch,  // bottom of a loop (negative jump).
 
-    // control flow
     Break,    // jumps out of the current loop context.
     Continue, // jumps to a LoopLatch/LoopHeader.
     Return,   // exits running procedure.
@@ -94,13 +95,6 @@ struct SSARef {
     uint8_t regIndex;
     int version;
 
-    bool operator<(const SSARef &other) const {
-        if (regIndex != other.regIndex) {
-            return regIndex < other.regIndex;
-        }
-        return version < other.version;
-    }
-
     bool operator==(const SSARef &other) const { return regIndex == other.regIndex && version == other.version; }
     SSARef() = default;
     SSARef(int32_t reg, int32_t ver) : regIndex(reg), version(ver) {}
@@ -108,12 +102,6 @@ struct SSARef {
 
 namespace std {
     template <> struct hash<SSARef> {
-        std::size_t operator()(SSARef &k) const {
-            std::size_t h1 = std::hash<uint8_t>{}(k.regIndex);
-            std::size_t h2 = std::hash<int32_t>{}(k.version);
-
-            return h1 ^ (h2 << 1);
-        }
         std::size_t operator()(const SSARef &k) const {
             std::size_t h1 = std::hash<uint8_t>{}(k.regIndex);
             std::size_t h2 = std::hash<int32_t>{}(k.version);
@@ -127,12 +115,12 @@ struct AnalyzedFunction {
     LiftedFunction *lpLiftedFunction; // not owned by structure.
     std::vector<BasicBlock> basicBlocks;
 
-    std::unordered_map<SSARef, LiftedInstruction *> definitionMap;
+    boost::unordered_flat_map<SSARef, LiftedInstruction *, std::hash<SSARef>> definitionMap;
     std::unordered_map<const LiftedInstruction *, std::vector<int32_t>> implicitUses;
 
     std::vector<AnalyzedFunction> innerFunctions;
 
-    std::map<SSARef, int32_t> useCounts;
+    boost::unordered_flat_map<SSARef, int32_t, std::hash<SSARef>> useCounts;
 
     [[nodiscard]] LiftedInstruction *GetDefinition(const LiftedOperand &operand) const {
         const auto ssaRef = SSARef{operand.value.reg, operand.ssaVersion};
@@ -165,11 +153,6 @@ struct AnalyzedFunction {
     }
 
     [[nodiscard]] bool IsSingleUse(const LiftedOperand &op) const { return GetUseCount(op) == 1; }
-
-    [[nodiscard]] bool IsOperation(const LiftedOperand &op, LiftedOperation targetOp) const {
-        const auto *def = GetDefinition(op);
-        return def && def->operation == targetOp;
-    }
 
     [[nodiscard]] bool IsSimpleOrConstant(const LiftedOperand &op) const {
         const auto *def = GetDefinition(op);
@@ -225,45 +208,71 @@ struct AnalyzedFunction {
 
     std::unordered_map<SSARef, std::string> variableNames;
     std::unordered_map<int32_t, std::string> upvalueNames;
-    // parent-forced upvalue names (LCT_UPVAL capture). separate from upvalueNames since PopulateNames() clears those.
+    // Parent-provided capture names survive PopulateNames.
     std::unordered_map<int32_t, std::string> upvalueNameOverrides;
 
     std::unordered_map<int, std::string> globalRegNames;
     std::unordered_map<SSARef, std::string> ssaOverrides;
 
-    // suffix so our own vN/argN don't shadow a captured upvalue's vN when rendered inline. set by parent; empty for root.
+    // Suffix own names that collide with lexically visible outer bindings.
     std::string nameSuffix;
-    // suffixed -> original, for the INFO note the lifter emits per renamed own-register name.
+    std::unordered_set<std::string> enclosingNames;
+    // Maps suffixed names to their original spelling for diagnostics.
     std::unordered_map<std::string, std::string> disambiguatedNames;
+
+    // Auto-generated register names use `v` followed by digits.
+    static bool IsAutoNameShaped(const std::string &s) {
+        if (s.size() < 2 || s[0] != 'v')
+            return false;
+        for (size_t i = 1; i < s.size(); ++i)
+            if (!std::isdigit(static_cast<unsigned char>(s[i])))
+                return false;
+        return true;
+    }
 
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
 
-    void SetVariableName(int32_t reg, int32_t version, const std::string &name) { variableNames[{static_cast<uint8_t>(reg), version}] = name; }
+    // Explicit names outrank automatic and parameter names for every register version.
+    void SetReceiverName(int32_t reg, const std::string &name) { receiverNameOverrides[static_cast<uint8_t>(reg)] = name; }
 
-    // suffix an auto name if it collides with a captured upvalue. explicit names don't go through here.
+    void SetVariableName(int32_t reg, int32_t version, const std::string &name) { variableNames[{static_cast<uint8_t>(reg), version}] = name; }
+    void ClearVariableName(int32_t reg, int32_t version) { variableNames.erase({static_cast<uint8_t>(reg), version}); }
+
+    // Explicit names bypass outer-scope collision suffixing.
     std::string DisambiguateOwnName(const std::string &name) {
         if (nameSuffix.empty())
             return name;
-        bool collides = false;
-        for (const auto &[idx, upName] : upvalueNameOverrides)
-            if (upName == name) {
-                collides = true;
-                break;
-            }
-        if (!collides)
+        for (const auto &[renamed, original] : disambiguatedNames)
+            if (original == name)
+                return renamed;
+
+        const auto occupied = [&](const std::string &candidate) {
+            if (enclosingNames.contains(candidate) || disambiguatedNames.contains(candidate))
+                return true;
+            for (const auto &[idx, upName] : upvalueNameOverrides)
+                if (upName == candidate)
+                    return true;
             for (const auto &[idx, upName] : upvalueNames)
-                if (upName == name) {
-                    collides = true;
-                    break;
-                }
-        if (!collides)
+                if (upName == candidate)
+                    return true;
+            return false;
+        };
+        if (!occupied(name))
             return name;
-        const std::string suffixed = name + nameSuffix;
+
+        std::string suffixed = name + nameSuffix;
+        for (size_t index = 2; occupied(suffixed); ++index)
+            suffixed = std::format("{}{}_{}", name, nameSuffix, index);
         disambiguatedNames[suffixed] = name; // recorded so the lifter can note the rename
         return suffixed;
     }
 
     std::string GetVarName(int32_t reg, int32_t version) {
+        // Parent-forced receiver names apply to every version and bypass suffixing.
+        if (!this->receiverNameOverrides.empty())
+            if (auto it = this->receiverNameOverrides.find(static_cast<uint8_t>(reg)); it != this->receiverNameOverrides.end())
+                return it->second;
+
         SSARef ref{static_cast<uint8_t>(reg), version};
         if (this->ssaOverrides.contains(ref))
             return this->ssaOverrides.at(ref);
@@ -274,11 +283,20 @@ struct AnalyzedFunction {
         if (variableNames.contains(ref))
             return variableNames.at(ref);
 
-        return DisambiguateOwnName(std::format("v{}", reg));
+        std::string base = std::format("v{}", reg);
+        // Prefix auto-names that would shadow same-shaped globals after recompilation.
+        if (!globalAutoNameCollisions.empty() && globalAutoNameCollisions.contains(base)) {
+            std::string prefixed = "_" + base;
+            while (globalAutoNameCollisions.contains(prefixed))
+                prefixed = "_" + prefixed;
+            prefixedLocalRenames[prefixed] = base;
+            return DisambiguateOwnName(prefixed);
+        }
+        return DisambiguateOwnName(base);
     }
 
     void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }
-    // set by parent for LCT_UPVAL captures; survives PopulateNames.
+    // Parent-provided LCT_UPVAL names survive PopulateNames.
     void SetUpvalueNameOverride(int32_t index, const std::string &name) { upvalueNameOverrides[index] = name; }
     std::string GetUpvalueName(int32_t index) {
         if (upvalueNameOverrides.contains(index))
@@ -290,16 +308,6 @@ struct AnalyzedFunction {
 
     void ClearVersionName(int32_t reg, int32_t ver) { ssaOverrides.erase({static_cast<uint8_t>(reg), ver}); }
 
-    void ClearAllVersionNames(int32_t reg) {
-        for (auto it = ssaOverrides.begin(); it != ssaOverrides.end();) {
-            if (it->first.regIndex == static_cast<uint8_t>(reg)) {
-                it = ssaOverrides.erase(it);
-            } else {
-                ++it;
-            }
-        }
-    }
-
     void PopulateNames() {
         auto lpDeserialized = this->lpLiftedFunction->lpDeserialized;
         this->upvalueNames.clear();
@@ -307,6 +315,29 @@ struct AnalyzedFunction {
         this->variableNames.clear();
         this->globalRegNames.clear();
         this->disambiguatedNames.clear();
+        this->prefixedLocalRenames.clear();
+
+        // Cache auto-shaped globals once; PopulateNames can run once per closure reference.
+        if (!this->globalCollisionsComputed) {
+            this->globalCollisionsComputed = true;
+            const auto &consts = lpDeserialized->constants;
+            auto addIfShaped = [&](int kidx) {
+                if (kidx < 0 || static_cast<size_t>(kidx) >= consts.size())
+                    return;
+                const auto &k = consts[static_cast<size_t>(kidx)];
+                if (k.kType != LUA_TSTRING)
+                    return;
+                const auto &s = std::get<std::string>(k.constantData);
+                if (IsAutoNameShaped(s))
+                    this->globalAutoNameCollisions.insert(s);
+            };
+            for (const auto &inst : this->lpLiftedFunction->instructions) {
+                if ((inst.operation == LiftedOperation::GETGLOBAL || inst.operation == LiftedOperation::SETGLOBAL) && inst.operands.size() >= 2)
+                    addIfShaped(inst.operands[1].value.imm.k);
+                else if (inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() >= 3)
+                    addIfShaped(static_cast<int>(inst.operands[2].value.imm.u >> 20) & 1023); // id0 = import root
+            }
+        }
 
         int32_t uIdx = 0;
         for (const auto &name : lpDeserialized->upvalueNames)
@@ -323,7 +354,15 @@ struct AnalyzedFunction {
         }
     }
 
-    std::unordered_map<SSARef, std::vector<LiftedInstruction *>> users;
+    boost::unordered_flat_map<SSARef, std::vector<LiftedInstruction *>, std::hash<SSARef>> users;
+
+    // Parent-forced register names apply to every version, including method receivers.
+    std::unordered_map<uint8_t, std::string> receiverNameOverrides{};
+
+    // Trailing defaults preserve existing positional aggregate initialization.
+    std::unordered_set<std::string> globalAutoNameCollisions{};
+    std::unordered_map<std::string, std::string> prefixedLocalRenames{};
+    bool globalCollisionsComputed{false}; // globalAutoNameCollisions is built once (immutable per function)
 };
 
 inline std::string BlockTypeToString(BlockType type) {

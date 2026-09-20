@@ -1,6 +1,3 @@
-//
-// Created by Pixeluted on 30/11/2025.
-//
 #include "DenominatorAnalysis.hpp"
 
 std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &func) {
@@ -90,8 +87,15 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
 
     auto link = [&](int v, int w) { ancestor[w] = v; };
 
+    // every index below is a DFS number or block index derived from the (possibly malformed) CFG;
+    // a wild jump target or an inconsistent pred/succ edge can leave a node unreachable (dfsNumber == -1)
+    // or a parent unset, so each array access is range-checked rather than trusting the graph shape.
+    const auto inRange = [&](int x) { return x >= 0 && x < Nmax; };
+
     for (int i = N - 1; i >= 1; i--) {
         int w = vertex[i];
+        if (!inRange(w))
+            continue;
         int wIdx = w;
 
         for (int32_t predId : blocks[wIdx].predecessors) {
@@ -100,32 +104,40 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
                 continue;
 
             int v = it->second;
-            if (dfsNumber[v] == -1)
-                continue; // unreachable
+            if (!inRange(v) || dfsNumber[v] == -1)
+                continue; // unreachable / out of range
 
             int u = eval(dfsNumber[v]);
+            if (!inRange(u))
+                continue;
             semi[i] = std::min(semi[i], semi[u]);
         }
 
-        bucket[semi[i]].push_back(i);
+        if (inRange(semi[i]))
+            bucket[semi[i]].push_back(i);
         int p = parent[wIdx];
+        if (!inRange(p) || dfsNumber[p] < 0)
+            continue; // no valid DFS-tree parent: nothing to link or flush
 
-        link(dfsNumber[p], i);
+        const int dp = dfsNumber[p];
+        link(dp, i);
 
-        for (int v : bucket[dfsNumber[p]]) {
+        for (int v : bucket[dp]) {
             int u = eval(v);
+            if (!inRange(u) || !inRange(v))
+                continue;
             if (semi[u] < semi[v])
                 idom[v] = u;
             else
-                idom[v] = dfsNumber[p];
+                idom[v] = dp;
         }
-        bucket[dfsNumber[p]].clear();
+        bucket[dp].clear();
     }
 
     idom[0] = -1;
 
     for (int i = 1; i < N; i++) {
-        if (idom[i] != semi[i])
+        if (idom[i] != semi[i] && idom[i] >= 0 && idom[i] < N)
             idom[i] = idom[idom[i]];
     }
 

@@ -1,9 +1,7 @@
-//
-// Created by Pixeluted on 29/11/2025.
-//
 #include "BytecodeLifter.hpp"
 
 #include "Deserializer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <libassert/assert.hpp>
 #include <sstream>
@@ -282,7 +280,10 @@ std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
     }
 }
 
-LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
+LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain, int depth) {
+    constexpr int kMaxFunctionNestingDepth = 100;
+    if (depth > kMaxFunctionNestingDepth)
+        throw Fission::DecompilerError("malformed bytecode: function nesting too deep (cycle/nesting too deep). Cowardly refusing to decompile!");
     DEBUG_ASSERT(function != nullptr);
     LiftedFunction liftedFunction{};
     liftedFunction.numparams = function->numparams;
@@ -297,9 +298,25 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             liftedFunction.name = std::format("f{}", function->bytecodeId);
     }
 
+    liftedFunction.instructions.reserve(function->instructions.size()); // on average, 1 Fission IR instruction = 1 Luau bytecode instruction
+
     for (size_t currentIndex = 0; currentIndex < function->instructions.size();) {
+        Fission::CheckDecompileDeadline();
         const auto &instruction = LuauInstruction{lpDecoder->DecodeInstruction(function->instructions.at(currentIndex).instruction)};
         const uint8_t opCode = (uint8_t)instruction.GetOpCode();
+
+        {
+            if (opCode >= LOP__COUNT)
+                throw Fission::DecompilerError("malformed bytecode: opcode is over LOP__COUNT! Cannot lift to Fission IR.");
+
+            const int jumpTarget = Luau::getJumpTarget(instruction.instruction, static_cast<uint32_t>(currentIndex));
+            if (jumpTarget != -1 && (jumpTarget < 0 || static_cast<size_t>(jumpTarget) >= function->instructions.size()))
+                throw Fission::DecompilerError(
+                    "malformed bytecode: instruction would jump too far ahead/back on the instruction stream. This could mean a jump is corrupted and control "
+                    "flow "
+                    "analysis would fail. Refusing to decompile."
+                );
+        }
 
         switch (opCode) {
         case LOP_NOP:
@@ -350,8 +367,6 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 instr.operands[1].value.imm.k = instruction.GetD();
             } else {
                 instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
-                liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
-                    "INFO: padding due to the original instruction requiring an auxiliary.";
             }
 
             std::stringstream finalComment;
@@ -368,8 +383,14 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 finalComment << "INFO: Loading Constant '" << std::get<LuauInteger>(k0.constantData) << "i'.";
                 break;
             case LUA_TVECTOR: {
-                auto vec = std::get<LuauVector>(k0.constantData);
-                finalComment << "INFO: Loads Vector3 with components; x = " << vec.x << " y = " << vec.y << " z = " << vec.z << " w = " << vec.w;
+                const auto &vec = std::get<LuauVectorConstant>(k0.constantData);
+                std::visit(
+                    [&](const auto &components) {
+                        finalComment << "INFO: Loads Vector3 with components; x = " << components[0] << " y = " << components[1] << " z = " << components[2]
+                                     << " w = " << components[3];
+                    },
+                    vec.components
+                );
                 break;
             }
             case LUA_TTABLE: {
@@ -384,6 +405,10 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             }
 
             instr.instructionRemarks = finalComment.str();
+            // emplace_back can invalidate instruction references.
+            if (opCode == LOP_LOADKX)
+                liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                    "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
         case LOP_MOVE: {
@@ -802,15 +827,13 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 ASSERT(false, "how?");
             }
 
-            if (instruction.GetD() == 1) {
-                auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
-                instr.instructionRemarks =
-                    "WARNING: Op Code simplified, ignored by interpreter (JUMPIFEQ/JUMPIFLE/JUMPIFLT/JUMPIFNOTEQ/JUMPIFNOTLE/JUMPIFNOTLT)";
-                liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
-                    "INFO: padding due to the original instruction requiring an auxiliary.";
-                break;
-            }
-
+            // D==1 means the branch jumps to the immediately-following instruction; a no-op branch
+            // (`if a < b then continue end` at a loop-body end, `if a < b then end`). The branch is dead,
+            // but unlike JUMPIF/JUMPIFNOT (a pure truthiness test) these comparison ops STILL evaluate
+            // `a <op> b` in the VM, which raises on incompatible types (`"" < f` -> "attempt to compare
+            // string < function"). NOPing them dropped that throw. Lift the comparison normally; its two
+            // targets resolve to the same next block, and the AST lifter renders `if <cond> then end`
+            // (IsTriviallyDeadIf keeps it; only pure-read conditions are dropped), preserving the effect.
             auto &instr = liftedFunction.instructions.emplace_back(liftedOpCode);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
@@ -1121,6 +1144,21 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 std::format("INFO: Perform FastCall of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
             break;
         }
+        case LOP_FASTPCALL: {
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::FASTPCALL);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[0].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.instructionRemarks = std::format(
+                "INFO: Perform fast protected {} with {} explicit arguments.", instr.operands[0].value.imm.n == 0 ? "pcall" : "xpcall",
+                instr.operands[1].value.imm.n
+            );
+            break;
+        }
         case LOP_COVERAGE: {
             auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP); // Unlikely to be seen in the wild, but we need it
             ins.instructionRemarks = "WARNING: Op Code simplified, ignored by interpreter (COVERAGE)";
@@ -1397,7 +1435,6 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
-#ifdef LOP_NEWCLASSMEMBER
         case LOP_NEWCLASSMEMBER: {
             // V10. A = class register, C = initial value register (currently always a function), AUX = constant string member name.
             auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWCLASSMEMBER);
@@ -1422,11 +1459,36 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
         }
-#endif
-        // LOP_CALLFB, LOP_CMPPROTO, LOP_NEWCLASSMEMBER are V10/V11 opcodes absent from the bundled
-        // Luau 0.718 Bytecode.h; enum entries and handlers kept commented for reference.
-        // case LOP_CALLFB: break;
-        // case LOP_CMPPROTO: break;
+        case LOP_CALLFB: {
+            // V11. Identical call semantics to LOP_CALL (A = callee register, B = arg count + 1, C = result
+            // count + 1); the AUX word carries a runtime feedback slot id that is irrelevant to
+            // decompilation. Downstream (CFA/SSA/AST) treats CALLFB exactly like CALL.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::CALLFB);
+            instr.operands.resize(3);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[2].type = LiftedOperandType::ImmediateInteger;
+            instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
+            instr.instructionRemarks = std::format("INFO: Calling function at R{} (with runtime feedback collection).", instr.operands[0].value.reg);
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_CMPPROTO: {
+            // V11 native-codegen closure-specialization guard: "if R(A) holds a closure of proto AUX, fall
+            // through; else jump to the generic path." It is never emitted by Luau::compile (only appears
+            // inside CodeGen's internal bytecode graph), and has no Luau source form. Rendering it as a
+            // branch would need a condition expression that does not exist, so we elide it: emit a NOP that
+            // follows the specialized (proto-matches) fallthrough. The jump to the generic deopt path is
+            // dropped; that path is semantically redundant with the specialized one.
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "WARNING: native-codegen proto guard (CMPPROTO) elided; following the specialized path.";
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
         case LOP_NATIVECALL: {
             auto &ins = liftedFunction.instructions.emplace_back(LiftedOperation::NOP);
             ins.instructionRemarks = "WARNING: Op Code simplified (NATIVECALL). Pseudo-instruction, never emitted by the bytecode compiler.";
@@ -1444,12 +1506,165 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         currentIndex += instruction.GetOpCodeSize();
     }
 
+    // every referenced register must address the stack; a register past maxstacksize (directly or via a
+    // call/return count) would index the per-register SSA arrays out of bounds later. drop the sample.
+    const long maxReg = function->maxstacksize; // arrays are sized maxstacksize+1
+    const auto requireReg = [&](long r) {
+        if (r < 0 || r > maxReg)
+            throw Fission::DecompilerError("malformed bytecode: register access outside the function's stack space");
+    };
+    for (const auto &inst : liftedFunction.instructions) {
+        // CAPTURE's source is mode-dependent (register for VAL/REF, upvalue index for UPVAL); validated in the switch.
+        if (inst.operation != LiftedOperation::CAPTURE)
+            for (const auto &op : inst.operands) {
+                if (op.type == LiftedOperandType::Register)
+                    requireReg(op.value.reg);
+                // ImmediateConstant operands aren't all pool indices (NEWCLOSURE proto, GETIMPORT id); checked at use.
+            }
+
+        // implicit register ranges, mirroring SSABuilder's rename (base + count/immediate). validate the max reached.
+        switch (inst.operation) {
+        case LiftedOperation::CALL:
+        case LiftedOperation::CALLFB: {
+            if (inst.operands.size() < 3)
+                break;
+            const long base = inst.operands[0].value.reg;
+            const long nparams = inst.operands[1].value.imm.n; // 0 == multret args (bounded by live regs)
+            if (nparams != 0)
+                requireReg(base + (nparams - 1)); // args occupy base+1..base+(nparams-1)
+            const long retCount = inst.operands[2].value.imm.n;
+            const long effRet = (retCount == 0) ? 1 : (retCount - 1); // retCount==1 => 0 results => no return regs
+            if (effRet > 0)
+                requireReg(base + effRet - 1); // returns land in base..base+effRet-1
+            break;
+        }
+        case LiftedOperation::NAMECALL: {
+            if (!inst.operands.empty())
+                requireReg(inst.operands[0].value.reg + 1); // implicit self at base+1
+            break;
+        }
+        case LiftedOperation::RETURN: {
+            if (inst.operands.size() < 2)
+                break;
+            const long base = inst.operands[0].value.reg;
+            const long count = inst.operands[1].value.imm.n - 1; // -1 (imm 0) == multret (bounded)
+            if (count > 0)
+                requireReg(base + count - 1);
+            break;
+        }
+        case LiftedOperation::SETLIST: {
+            if (inst.operands.size() < 3)
+                break;
+            const long base = inst.operands[1].value.reg;
+            const long count = inst.operands[2].value.imm.n;
+            const long eff = (count == 0) ? 1 : (count - 1);
+            if (eff > 0)
+                requireReg(base + eff - 1);
+            break;
+        }
+        case LiftedOperation::GETVARARGS: {
+            if (inst.operands.size() < 2)
+                break;
+            const long base = inst.operands[0].value.reg;
+            const long count = inst.operands[1].value.imm.n;
+            const long eff = (count == 0) ? 1 : (count - 1);
+            if (eff > 0)
+                requireReg(base + eff - 1);
+            break;
+        }
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT: {
+            if (!inst.operands.empty())
+                requireReg(inst.operands[0].value.reg + 2); // base, base+1, base+2
+            break;
+        }
+        case LiftedOperation::FORGLOOP: {
+            if (inst.operands.size() < 3)
+                break;
+            const long base = inst.operands[0].value.reg;
+            const long numVars = inst.operands[2].value.imm.n & 0xFF;
+            requireReg(base + 2);
+            if (numVars > 0)
+                requireReg(base + 3 + (numVars - 1)); // loop variables at base+3..
+            break;
+        }
+        case LiftedOperation::NEWCLOSURE: {
+            // operand[1] is a child-proto (subfunction) index; the AST lifter dereferences it unchecked.
+            if (inst.operands.size() > 1) {
+                const long idx = inst.operands[1].value.imm.k;
+                if (idx < 0 || static_cast<size_t>(idx) >= function->subfunctions.size())
+                    throw Fission::DecompilerError("malformed bytecode: NEWCLOSURE subfunction index out of range");
+            }
+            break;
+        }
+        case LiftedOperation::CAPTURE: {
+            // operand[0] = type (0=VAL, 1=REF, 2=UPVAL); only VAL/REF source is a register (UPVAL is an upvalue index).
+            if (inst.operands.size() >= 2 && inst.operands[0].value.imm.n != 2)
+                requireReg(inst.operands[1].value.reg);
+            break;
+        }
+        default:
+            break;
+        }
+    }
+
+    // Validate every lifted jump/branch target against the EXACT offset the control-flow analyzer will
+    // use (ControlFlowAnalyzer::GetJumpOffset), which reads the lifted operands rather than the raw
+    // instruction. The CFA does `lpTail + offset` and indexes the instruction stream by it; an offset
+    // landing outside the stream (corrupt jump displacement) would read out of bounds there. The lifted
+    // stream is 1:1 with the raw one, so a target is the instruction's own index plus that offset.
+    const long liftedCount = static_cast<long>(liftedFunction.instructions.size());
+    for (long i = 0; i < liftedCount; ++i) {
+        const auto &inst = liftedFunction.instructions[i];
+        const auto &ops = inst.operands;
+        long offset = 0;
+        bool isJump = true;
+        switch (inst.operation) {
+        case LiftedOperation::JUMP:
+            offset = ops.size() > 0 ? ops[0].value.imm.n : 0;
+            break;
+        case LiftedOperation::LOADNJUMP:
+            offset = ops.size() > 2 ? ops[2].value.imm.n : 0;
+            break;
+        case LiftedOperation::FORNPREP:
+        case LiftedOperation::FORNLOOP:
+        case LiftedOperation::FORGLOOP:
+        case LiftedOperation::JUMPXEQK:
+        case LiftedOperation::CMPPROTO:
+            offset = ops.size() > 1 ? ops[1].value.imm.n : 0;
+            break;
+        case LiftedOperation::FORGPREP:
+        case LiftedOperation::FORGPREP_INEXT:
+        case LiftedOperation::FORGPREP_NEXT:
+        case LiftedOperation::JUMPIF:
+        case LiftedOperation::JUMPIFNOT:
+        case LiftedOperation::JUMPIFEQ:
+        case LiftedOperation::JUMPIFNOTEQ:
+        case LiftedOperation::JUMPIFLE:
+        case LiftedOperation::JUMPIFNOTLE:
+        case LiftedOperation::JUMPIFLT:
+        case LiftedOperation::JUMPIFNOTLT:
+            offset = ops.size() > 1 ? ops[1].value.imm.n + 1 : 0;
+            break;
+        default:
+            isJump = false;
+            break;
+        }
+        if (isJump) {
+            const long target = i + offset;
+            if (target < 0 || target >= liftedCount)
+                throw Fission::DecompilerError("malformed bytecode: jump target outside the instruction stream");
+        }
+    }
+
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex++) {
         liftedFunction.instructions.at(currentIndex).instructionIndex = (int32_t)currentIndex;
     }
 
     for (const auto subFunction : function->subfunctions) {
-        liftedFunction.subfunctions.push_back(LiftFunctionBytecodeInternal(subFunction));
+        liftedFunction.subfunctions.push_back(LiftFunctionBytecodeInternal(subFunction, false, depth + 1));
     }
 
     return liftedFunction;
@@ -1517,6 +1732,8 @@ std::string_view OperationToString(LiftedOperation operation) {
         return "CAPTURE";
     case LiftedOperation::FASTCALL:
         return "FASTCALL";
+    case LiftedOperation::FASTPCALL:
+        return "FASTPCALL";
     case LiftedOperation::FASTCALL1:
         return "FASTCALL1";
     case LiftedOperation::FASTCALL2:

@@ -1,8 +1,8 @@
 //
 // Created by Dottik on 2/6/2026.
 //
+
 // Type- and name-inference tests (run with InferTypes | InferRobloxTypes).
-//
 
 #include "Decompiler.hpp"
 #include "Luau/Common.h"
@@ -40,9 +40,7 @@ namespace {
 
 } // namespace
 
-// A type annotation must never be a generated register name (`: v2`, `: uv_0`,
-// `: arg1`). `setmetatable(x, <auto-local>)` used to leak the metatable register
-// as the declared type, producing uncompilable Luau.
+// Generated register names cannot be type annotations. Auto-named metatables fall back to table.
 TEST_CASE("Types: setmetatable with an auto-named metatable falls back to table", "[Decompiler][Types]") {
     const auto out = DecompileTyped(R"(
         local function make(mt)
@@ -101,9 +99,7 @@ TEST_CASE("Types: surviving numeric local is annotated number", "[Decompiler][Ty
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(:\s*v\d+\b)")));
 }
 
-// =========================================================================
 // Name inference
-// =========================================================================
 
 // A multi-use `:WaitForChild("X")` / `:GetService("X")` result is named after
 // the child/service instead of `v1`.
