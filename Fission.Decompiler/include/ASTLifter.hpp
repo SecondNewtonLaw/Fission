@@ -114,7 +114,7 @@ class ASTLifter {
     std::shared_ptr<Expression> LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested);
     std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst);
     // Resolve SETLIST elements for folded and deferred constructor paths.
-    std::shared_ptr<Expression> LiftSetListElement(const LiftedInstruction &setList, size_t k);
+    std::shared_ptr<Expression> LiftSetListElement(const LiftedInstruction &setList, size_t k, bool forceComputed);
     // Identify calls that require truncation when inlined into a spread-tail position.
     bool IsMultretCall(const LiftedInstruction &callDef, int32_t callDefIndex) const;
     bool ShouldInline(const LiftedInstruction *inst);

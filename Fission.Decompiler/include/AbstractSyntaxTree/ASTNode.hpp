@@ -504,6 +504,7 @@ class CallExpressionNode : public Expression {
 
 class VarArgExpression : public Expression {
   public:
+    bool bAdjustToOne = false;
     VarArgExpression() { this->nodeKind = ASTNodeKind::VarArgExpression; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }

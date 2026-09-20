@@ -2687,7 +2687,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             const auto &versions = m_currentFunction->implicitUses.at(&inst);
             const int32_t aux = (inst.operands.size() > 3 && inst.operands[3].value.imm.n >= 1) ? inst.operands[3].value.imm.n : 1;
             for (size_t k = 0; k < versions.size(); ++k) {
-                auto elem = LiftSetListElement(inst, k);
+                auto elem = LiftSetListElement(inst, k, false);
                 auto idxExpr = std::make_shared<IndexExpressionNode>(
                     LiftExpression(inst.operands[0]), std::make_shared<NumberLiteralNode>(static_cast<double>(aux + static_cast<int32_t>(k)))
                 );
@@ -3916,7 +3916,6 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     // `(f())` parens; resolved by the IsMultretCall gate after the arg loop. Reset whenever the trailing
     // arg is a spread (multiret call / vararg), which already renders correctly.
     const LiftedInstruction *adjustArgCallDef = nullptr;
-    int32_t adjustArgCallIdx = -1;
 
     if (isNameCall)
         callee = LiftExpression(resolvedInst.operands[1], false);
@@ -3957,14 +3956,15 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
             }
             if (def && def->operation == LiftedOperation::GETVARARGS) {
                 isVararg = true;
-                args.push_back(std::make_shared<VarArgExpression>()); // var arg may be present in the middle of arguments, unfunny.
+                auto vararg = std::make_shared<VarArgExpression>();
+                vararg->bAdjustToOne = def->operands.size() > 1 && def->operands[1].value.imm.n == 2 && k + 1 == argVersions.size();
+                args.push_back(vararg);
                 adjustArgCallDef = nullptr;
                 continue;
             }
             args.push_back(LiftExpression(op, false));
             if (def && (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB || def->operation == LiftedOperation::NAMECALL)) {
                 adjustArgCallDef = def;
-                adjustArgCallIdx = def->instructionIndex;
             } else {
                 adjustArgCallDef = nullptr;
             }
@@ -3988,7 +3988,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     // (it did not take the spread path above). Bare `f(a, g())` re-spreads g's results, changing arity :
     // mark it to render `f(a, (g()))`. Single-return fast builtins never spread, so IsMultretCall skips
     // them (no redundant parens); a non-inlined multi-use call is a bare name here, so the cast no-ops.
-    if (adjustArgCallDef && !args.empty() && IsMultretCall(*adjustArgCallDef, adjustArgCallIdx)) {
+    if (adjustArgCallDef && !args.empty()) {
         if (auto c = std::dynamic_pointer_cast<CallExpressionNode>(args.back()))
             c->bAdjustToOne = true;
         else if (auto n = std::dynamic_pointer_cast<NameCallExpressionNode>(args.back()))
@@ -4029,7 +4029,7 @@ static std::shared_ptr<Expression> MakeTableKey(const std::string &keyStr) {
     return std::make_shared<StringLiteralNode>(keyStr);
 }
 
-std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstruction &setList, size_t k) {
+std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstruction &setList, size_t k, bool forceComputed) {
     if (!m_currentFunction->implicitUses.contains(&setList))
         return std::make_shared<NilLiteralNode>();
     const auto &versions = m_currentFunction->implicitUses.at(&setList);
@@ -4069,7 +4069,7 @@ std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstructio
             // population), so the plain singleUse heuristic misses it and it leaks as a
             // forward-referenced `local vN`. ShouldInline dedups those, so trust it here.
             const bool inlineTable = (lpDef->operation == LiftedOperation::NEWTABLE || lpDef->operation == LiftedOperation::DUPTABLE) && ShouldInline(lpDef);
-            if (singleUse || inlineTable) {
+            if ((singleUse && (forceComputed || ShouldInline(lpDef))) || inlineTable) {
                 expr = LiftExpression(itemOp, true);
                 this->m_processedInstructions.insert(lpDef->instructionIndex);
                 this->m_inlineConsumedDefs.insert(lpDef->instructionIndex);
@@ -4187,6 +4187,22 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 }
         foldableMemo[key] = ok;
         return ok;
+    };
+
+    std::unordered_set<SSARef, std::hash<SSARef>> diamondVisited;
+    std::function<bool(const LiftedOperand &)> dependsOnMaterializedDiamond = [&](const LiftedOperand &op) -> bool {
+        if (op.type != LiftedOperandType::Register || !diamondVisited.insert({static_cast<uint8_t>(op.value.reg), op.ssaVersion}).second)
+            return false;
+        const auto *def = m_currentFunction->GetDefinition(op);
+        if (!def)
+            return false;
+        if (m_diamondBoolRegs.contains(op.value.reg) && (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::LOADNJUMP) &&
+            def->operands.size() >= 2 && def->operands[1].type == LiftedOperandType::ImmediateBool)
+            return true;
+        for (size_t oi = 1; oi < def->operands.size(); ++oi)
+            if (dependsOnMaterializedDiamond(def->operands[oi]))
+                return true;
+        return false;
     };
 
     // True if a stored value reads the table register currently being constructed. Folding such a value
@@ -4394,28 +4410,17 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                         if (anyForwardRef)
                             break;
                     }
-                    // A materialised-comparison element (LOADB diamond) folds to a raw `true`/`false`
-                    // here and its comparison; which can throw; is dropped, reordering it after the
-                    // rest of the constructor. Decline to fold; the deferred `t[i] = <cond>` stores keep
-                    // source order. (Same reason as the keyed-store diamond guard in valueFoldable.)
                     {
                         bool anyDiamond = false;
                         const int startReg2 = candidate.operands[1].value.reg;
                         for (size_t k = 0; k < versions.size(); ++k) {
                             const int er = startReg2 + static_cast<int>(k);
-                            if (!m_diamondBoolRegs.contains(er))
-                                continue; // reg number never holds a diamond bool
-                            // m_diamondBoolRegs is keyed by register NUMBER only; register reuse means a
-                            // later diamond can share a number with THIS element. Confirm this element's
-                            // actual def (at its SSA version) is the bool LOAD/LOADNJUMP of a diamond,
-                            // not an unrelated value (e.g. a POW) that merely reuses the slot.
                             LiftedOperand eop{};
                             eop.type = LiftedOperandType::Register;
                             eop.value.reg = static_cast<uint8_t>(er);
                             eop.ssaVersion = versions[k];
-                            const auto *edef = m_currentFunction->GetDefinition(eop);
-                            if (edef && (edef->operation == LiftedOperation::LOAD || edef->operation == LiftedOperation::LOADNJUMP) &&
-                                edef->operands.size() >= 2 && edef->operands[1].type == LiftedOperandType::ImmediateBool) {
+                            diamondVisited.clear();
+                            if (dependsOnMaterializedDiamond(eop)) {
                                 anyDiamond = true;
                                 break;
                             }
@@ -4425,7 +4430,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                     }
 
                     for (size_t k = 0; k < versions.size(); k++)
-                        elements.push_back(LiftSetListElement(candidate, k));
+                        elements.push_back(LiftSetListElement(candidate, k, true));
 
                     // A fixed-count SETLIST (C != 0) truncated its last element to one value; a C == 0
                     // SETLIST already spreads its tail and needs no parens. If that last element is an
@@ -4550,7 +4555,42 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     if (!inst || inst->operands.size() < 1)
         return false;
 
+    for (size_t i = 1; i < inst->operands.size(); ++i) {
+        const auto &operand = inst->operands[i];
+        if (operand.type != LiftedOperandType::Register || !m_diamondBoolRegs.contains(operand.value.reg))
+            continue;
+        const auto *def = m_currentFunction->GetDefinition(operand);
+        if (def && (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::LOADNJUMP) && def->operands.size() >= 2 &&
+            def->operands[1].type == LiftedOperandType::ImmediateBool)
+            return false;
+    }
+
     bool singleUse = false;
+    const auto onlyUser = [&](const SSARef &ref) -> const LiftedInstruction * {
+        const auto it = m_currentFunction->users.find(ref);
+        if (it == m_currentFunction->users.end() || it->second.empty())
+            return nullptr;
+        const auto *first = it->second.front();
+        if (!std::all_of(it->second.begin(), it->second.end(), [&](const auto *user) { return user == first; }))
+            return nullptr;
+        if (it->second.size() == 1 || first->operation != LiftedOperation::SETLIST || !m_currentFunction->implicitUses.contains(first) ||
+            first->operands.size() < 2)
+            return it->second.size() == 1 ? first : nullptr;
+        const auto &versions = m_currentFunction->implicitUses.at(first);
+        const int32_t startReg = first->operands[1].value.reg;
+        for (size_t k = 0; k < versions.size(); ++k) {
+            LiftedOperand element{};
+            element.type = LiftedOperandType::Register;
+            element.value.reg = startReg + static_cast<int32_t>(k);
+            element.ssaVersion = versions[k];
+            const auto *def = m_currentFunction->GetDefinition(element);
+            if (def && m_diamondBoolRegs.contains(element.value.reg) &&
+                (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::LOADNJUMP) && def->operands.size() >= 2 &&
+                def->operands[1].type == LiftedOperandType::ImmediateBool)
+                return first;
+        }
+        return nullptr;
+    };
     if (inst->operands[0].type == LiftedOperandType::Register) {
         const SSARef resultRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
         const auto resultUsers = m_currentFunction->users.find(resultRef);
@@ -4754,8 +4794,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     if ((CanOperationRaise(inst->operation) || inst->operation == LiftedOperation::NOT) && !bareImport &&
         inst->operands[0].type == LiftedOperandType::Register && singleUse) {
         const SSARef ref{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
-        if (const auto uit = m_currentFunction->users.find(ref);
-            uit != m_currentFunction->users.end() && uit->second.size() == 1 && InliningReordersEffect(inst, uit->second.front()))
+        if (const auto *user = onlyUser(ref); user && InliningReordersEffect(inst, user))
             return false;
     }
 
@@ -4817,8 +4856,8 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                                  !(inst->operation == LiftedOperation::GETIMPORT && (inst->operands.size() < 3 || (inst->operands[2].value.imm.u >> 30) < 2));
         if (defCanRaise) {
             const SSARef ref{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
-            if (auto it = m_currentFunction->users.find(ref); it != m_currentFunction->users.end() && it->second.size() == 1)
-                if (InliningReordersEffect(inst, it->second.front()))
+            if (const auto *user = onlyUser(ref); user)
+                if (InliningReordersEffect(inst, user))
                     return false;
         }
         return true;
@@ -4894,25 +4933,40 @@ bool ASTLifter::StaysAsStatement(const LiftedInstruction *e) {
 bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
     if (e->operands.empty() || e->operands[0].type != LiftedOperandType::Register)
         return false;
-    const SSARef ref{e->operands[0].value.reg, e->operands[0].ssaVersion};
-    const auto it = m_currentFunction->users.find(ref);
-    if (it == m_currentFunction->users.end() || it->second.empty())
+    if (e->operation == LiftedOperation::NAMECALL || e->operation == LiftedOperation::NAMECALLUDATA) {
+        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+        for (int32_t i = e->instructionIndex + 1; i < static_cast<int32_t>(instructions.size()); ++i) {
+            if (instructions[i].operation == LiftedOperation::NOP)
+                continue;
+            return (instructions[i].operation == LiftedOperation::CALL || instructions[i].operation == LiftedOperation::CALLFB) &&
+                   IsConstructorElement(&instructions[i]);
+        }
         return false;
-    for (const auto *u : it->second) {
-        switch (u->operation) {
-        case LiftedOperation::SETLIST:
-            break;
-        case LiftedOperation::SETTABLE:
-        case LiftedOperation::SETTABLEKS:
-        case LiftedOperation::SETTABLEN:
-            if (!StoreTargetsFreshTable(u))
-                return false;
-            break;
-        default:
+    }
+
+    std::vector<SSARef> refs;
+    if (const auto defs = m_defsByInstruction.find(e); defs != m_defsByInstruction.end())
+        refs = defs->second;
+    else
+        refs.push_back({e->operands[0].value.reg, e->operands[0].ssaVersion});
+
+    bool found = false;
+    for (const auto &ref : refs) {
+        const auto users = m_currentFunction->users.find(ref);
+        if (users == m_currentFunction->users.end() || users->second.empty())
+            continue;
+        found = true;
+        for (const auto *user : users->second) {
+            if (user->operation == LiftedOperation::SETLIST)
+                continue;
+            if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
+                 user->operation == LiftedOperation::SETTABLEN) &&
+                StoreTargetsFreshTable(user))
+                continue;
             return false;
         }
     }
-    return true;
+    return found;
 }
 
 // True if a SET* store writes into a register defined by NEWTABLE; i.e. it is filling a table
@@ -4988,6 +5042,8 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         default:
             break;
         }
+        if (CanOperationRaise(insts[k].operation) && !IsConstructorElement(&insts[k]))
+            return true;
         if (StaysAsStatement(&insts[k]))
             return true;
     }

@@ -123,7 +123,39 @@ TEST_CASE("Reconstruction preserves first error across expression boundaries", "
         "local v0 = -(if 44 then 28i else 116i) obj(v0)", "repeat for i = function() end, (if tostring then t.field else table:get(table)) do end until obj()",
         "local v = not (3 ~= (true ~= -62i)) / 54 local function f() return (0)[0] end print(f()) v()",
         "(string[tonumber])[if print(true) then select else print]() for k,v in t() do end",
-        "local function f() end local v = ({})[f:run(f)][{#next}] if v then print(next) end"
+        "local function f() end local v = ({})[f:run(f)][{#next}] if v then print(next) end",
+        R"LUA(local v0 = {
+    (0 <= true)[{ true, nil, true, "x" }],
+    ["x"] = nil,
+    - - -nil,
+    function() end,
+})LUA",
+        R"LUA(local v0 = {
+    - -pairs(false, 100i),
+    (0).value <= true,
+    ["field"] = function() end,
+    ["a-b"] = game,
+})LUA",
+        "tonumber += (... + print[ipairs()])",
+        R"LUA(local v0, v1, v2 = print, ..., print(next)
+local v3 = v1
+local v4 = select:run(v0.field, v2.field / true)
+return "hello", pairs())LUA",
+        R"LUA(local v1 = -{ v0, ["x\n]"] = pairs, "hello", true }
+local v2 = if (not (0).x)[{ next, v1 }] then -v0() else {})LUA",
+        R"LUA(local v0 = {
+    (65i)[27i].value,
+    false .. 0 < string("hello"),
+    ["field"] = false,
+})LUA",
+        R"LUA(repeat
+    repeat
+        repeat
+        until false * 0
+        local v0 = function() end
+        v0 += "key"
+    until next[ipairs[not print]]
+until nil)LUA"
     );
     EnableLuauFFlagsOnce();
     Decompiler decompiler;
@@ -1325,6 +1357,38 @@ return join("-", two()), join("-", (two()))
     CHECK(CountOccurrences(result.decompilationOutput, "join(\"-\", two())") == 1);
 }
 
+TEST_CASE("fixed vararg passed to a rebound fast builtin stays one argument", "[Decompiler][Roundtrip][AdjustToOne]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+_G.typeof = function(...) return select("#", ...) end
+local function probe(...) return typeof((...)) end
+print(probe(1, 2, 3))
+)LUA";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile("")});
+    INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+}
+
+TEST_CASE("fixed nested fast builtin result stays one final argument", "[Decompiler][Roundtrip][AdjustToOne]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+math.floor = function() end
+math.max = function(...) return select("#", ...) end
+print(math.max(0, (math.floor(1))))
+)LUA";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile("")});
+    INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+}
+
 TEST_CASE("truncated multiret call in last table element keeps its adjust-to-one parens", "[Decompiler][Roundtrip][AdjustToOne]") {
     EnableLuauFFlagsOnce();
     // `{pair(), pair()}` spreads the tail -> length 3; `{pair(), (pair())}` truncates it -> length 2.
@@ -1394,11 +1458,8 @@ return count((table.unpack(t))), count(table.unpack(t))
     CHECK(CountOccurrences(result.decompilationOutput, "count(table.unpack(") == 1);
 }
 
-TEST_CASE("builtin multret-ness comes from Luau result count, not a hardcoded list", "[Decompiler][Roundtrip][AdjustToOne]") {
+TEST_CASE("fixed builtin calls preserve one result when fallback can be rebound", "[Decompiler][Roundtrip][AdjustToOne]") {
     EnableLuauFFlagsOnce();
-    // The discriminator asks Luau's getBuiltinInfo(bfid).results, not an enumerated allowlist. math.modf
-    // has results==2 (multret) so a truncated `(math.modf(x))` must keep its parens; math.floor has
-    // results==1 (single) so `math.floor(x)` must stay bare. This pins the "results != 1" rule directly.
     const std::string source = R"LUA(
 local function id(x) return x end
 return id((math.modf(3.5))), id((math.floor(3.5)))
@@ -1411,11 +1472,8 @@ return id((math.modf(3.5))), id((math.floor(3.5)))
     std::string err;
     CHECK(Recompiles(result.decompilationOutput, &err));
     INFO("recompile error: " << err);
-    // id's own `(` sits before each callee, so match the paren shape: modf keeps the adjust-to-one paren
-    // on top of it -> `((math.modf`; floor has only id's paren -> `(math.floor` but never `((math.floor`.
-    CHECK(CountOccurrences(result.decompilationOutput, "((math.modf(") == 1);  // results==2 -> parens kept
-    CHECK(CountOccurrences(result.decompilationOutput, "((math.floor(") == 0); // results==1 -> no parens
-    CHECK(CountOccurrences(result.decompilationOutput, "(math.floor(") == 1);  // present, but bare (single paren)
+    CHECK(CountOccurrences(result.decompilationOutput, "((math.modf(") == 1);
+    CHECK(CountOccurrences(result.decompilationOutput, "((math.floor(") == 1);
 }
 
 // True if the output contains an assignment onto a field of a freshly-built anonymous table literal,

@@ -701,6 +701,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         for (uint32_t succ : block.successors) {
             if (succ == block.dwBlockId || dominates(succ, block.dwBlockId)) {
                 auto &successor = blocks.at(succ);
+                const bool innermostLatch = !successor.loopLatch || block.lpTail->instructionIndex < blocks[*successor.loopLatch].lpTail->instructionIndex;
                 // A separate back-edge into a for header belongs to an enclosing infinite while loop.
                 if ((successor.dwBlockFlags & kForLoopMask) != 0)
                     continue;
@@ -727,7 +728,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         }
                     }
 
-                    successor.loopLatch = block.dwBlockId;
+                    if (innermostLatch)
+                        successor.loopLatch = block.dwBlockId;
                     block.loopHeader = successor.dwBlockId;
                     if (isRepeatUntil) {
                         block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
@@ -774,12 +776,15 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         successor.loopExit = block.ifStatementFalse.value();
                     } else {
                         // Condition stored in the header; its non-latch successor is the exit.
+                        size_t backEdges = 0;
+                        for (uint32_t pred : successor.predecessors)
+                            backEdges += pred < blocks.size() && blocks[pred].bType == BlockType::LoopLatch;
                         for (auto headerSucc : successor.successors) {
                             if (headerSucc != block.dwBlockId) {
-                                // Compound conditions can route the apparent exit back into the body.
-                                if (blocks.at(headerSucc).bType == BlockType::Return) {
+                                if (backEdges > 1 || blocks.at(headerSucc).bType == BlockType::Return) {
                                     block.loopExit = headerSucc;
-                                    successor.loopExit = headerSucc;
+                                    if (innermostLatch)
+                                        successor.loopExit = headerSucc;
                                 }
                                 break;
                             }

@@ -56,7 +56,7 @@ class SourceGenerator : public Visitor {
     static bool IsRightAssociative(const std::string &op) { return op == ".." || op == "^"; }
 
     // Treat concatenation chains as associative for rendering.
-    static bool IsAssociative(const std::string &op) { return op == "or" || op == "and" || op == "+" || op == "*" || op == ".."; }
+    static bool IsAssociative(const std::string &op) { return op == "or" || op == "and" || op == ".."; }
 
     // Emit a child under a temporary minimum precedence.
     template <typename Node> void EmitWithPrecedence(int minPrec, Node *child) {
@@ -987,8 +987,11 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(VarArgExpression *lpNode) override {
-        (void)lpNode;
+        if (lpNode->bAdjustToOne)
+            buffer << "(";
         buffer << "..."; /* legitimately. */
+        if (lpNode->bAdjustToOne)
+            buffer << ")";
     }
 
     void Visit(TableBinaryExpressionNode *lpNode) override {
