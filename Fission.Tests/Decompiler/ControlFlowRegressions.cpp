@@ -1884,9 +1884,7 @@ TEST_CASE("Scope: self-contained redefinition is split into do-blocks", "[Decomp
     CHECK(b0->body.size() == 2); // the decl + its use
 }
 
-// A local still live past the redefinition point keeps the source flat. Wrapping would require
-// hoisting an unrelated binding outside its original region.
-TEST_CASE("Scope: a local live across the redefinition keeps the statement list flat", "[Decompiler][Scope][Regression]") {
+TEST_CASE("Scope: crossing local moves with the phase that consumes it", "[Decompiler][Scope][Regression]") {
     std::vector<std::shared_ptr<Statement>> stmts;
     stmts.push_back(LocalDecl("v0", "x"));   // local v0 = x
     stmts.push_back(LocalDecl("keep", "a")); // local keep = a   (escapes the first phase)
@@ -1897,12 +1895,84 @@ TEST_CASE("Scope: a local live across the redefinition keeps the statement list 
 
     ScopeBlockIntroducer{}.Run(stmts);
 
-    REQUIRE(stmts.size() == 6);
-    for (const auto &statement : stmts)
-        CHECK_FALSE(IsDoBlock(statement));
-    auto keep = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[1]);
+    REQUIRE(stmts.size() == 2);
+    CHECK_FALSE(IsDoBlock(stmts[0]));
+    CHECK(IsDoBlock(stmts[1]));
+    auto second = std::dynamic_pointer_cast<BlockStatementNode>(stmts[1]);
+    REQUIRE(second);
+    auto keep = std::dynamic_pointer_cast<VariableDeclarationNode>(second->body[0]);
     REQUIRE(keep);
     CHECK(keep->value != nullptr);
+}
+
+TEST_CASE("Scope: crossing result does not exhaust registers across reused temporaries", "[Decompiler][Scope][Regression]") {
+    const auto assign = [](const std::string &left, const std::string &right) {
+        return std::make_shared<AssignmentStatementNode>(
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
+        );
+    };
+    std::vector<std::shared_ptr<Statement>> stmts;
+    stmts.push_back(LocalDecl("result", "seed"));
+    for (size_t i = 0; i < 205; ++i) {
+        stmts.push_back(LocalDecl("v1", "source"));
+        stmts.push_back(assign("resultSink", "result"));
+        stmts.push_back(assign("valueSink", "v1"));
+    }
+
+    ScopeBlockIntroducer{}.Run(stmts);
+
+    RootNode root{stmts};
+    SourceGenerator generator{};
+    const std::string source = generator.GenerateSource(&root);
+    INFO("rendered source:\n" << source);
+    CHECK(Recompiles(source));
+}
+
+TEST_CASE("Scope: phase boundary keeps a producer with its redeclared consumer", "[Decompiler][Scope][Regression]") {
+    const auto assign = [](const std::string &left, const std::string &right) {
+        return std::make_shared<AssignmentStatementNode>(
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
+        );
+    };
+    std::vector<std::shared_ptr<Statement>> stmts{LocalDecl("persistent", "seed"), LocalDecl("v2", "seed")};
+    for (size_t i = 0; i < 205; ++i) {
+        stmts.push_back(LocalDecl("v3", "source"));
+        stmts.push_back(LocalDecl("v2", "v3"));
+        stmts.push_back(assign("persistent", "v2"));
+    }
+
+    ScopeBlockIntroducer{}.Run(stmts);
+
+    RootNode root{stmts};
+    SourceGenerator generator{};
+    const std::string source = generator.GenerateSource(&root);
+    INFO("rendered source:\n" << source);
+    CHECK(Recompiles(source));
+}
+
+TEST_CASE("Scope: crossing redeclarations reuse the outer binding", "[Decompiler][Scope][Regression]") {
+    const auto assign = [](const std::string &left, const std::string &right) {
+        return std::make_shared<AssignmentStatementNode>(
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
+            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
+        );
+    };
+    std::vector<std::shared_ptr<Statement>> stmts{LocalDecl("persistent", "seed"), LocalDecl("v0", "seed"), LocalDecl("v1", "seed")};
+    for (size_t i = 0; i < 205; ++i) {
+        stmts.push_back(LocalDecl("v0", "source"));
+        stmts.push_back(LocalDecl("v1", "other"));
+        stmts.push_back(assign("persistent", "v0"));
+    }
+
+    ScopeBlockIntroducer{}.Run(stmts);
+
+    RootNode root{stmts};
+    SourceGenerator generator{};
+    const std::string source = generator.GenerateSource(&root);
+    INFO("rendered source:\n" << source);
+    CHECK(Recompiles(source));
 }
 
 // End-to-end: with the pass on, a real decompile of register-reuse-shaped code recompiles.
@@ -1924,7 +1994,7 @@ TEST_CASE("Scope: pass keeps decompiled output recompilable", "[Decompiler][Scop
     CHECK(Recompiles(out));
 }
 
-TEST_CASE("Scope: module initializer with crossing locals stays flat", "[Decompiler][Scope][Regression]") {
+TEST_CASE("Scope: module initializer keeps crossing locals outside later scopes", "[Decompiler][Scope][Regression]") {
     const auto out = DecompileOrFail(R"(
         local service = game:GetService("ReplicatedStorage")
         local cache = require("../Internal/Cache")
@@ -1952,7 +2022,10 @@ TEST_CASE("Scope: module initializer with crossing locals stays flat", "[Decompi
 
     INFO("decompile:\n" << out);
     CHECK(out.starts_with("--[["));
-    CHECK_FALSE(ContainsRegex(out, std::regex(R"((?:^|\n)\s*do\s*(?:\n|$))")));
+    const auto firstScope = out.find("\ndo\n");
+    REQUIRE(firstScope != std::string::npos);
+    CHECK(out.find("local cache") < firstScope);
+    CHECK(out.find("local lookups") < firstScope);
     CHECK(Recompiles(out));
 }
 

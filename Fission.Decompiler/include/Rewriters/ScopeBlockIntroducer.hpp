@@ -19,10 +19,7 @@ class ScopeBlockIntroducer {
     }
 
   private:
-    // Process one statement list: recurse into every child block first (so nested lists are already
-    // scoped and their refs known), compute each statement's referenced-name set, cut at redefinition
-    // boundaries, wrap scoping phases in do-blocks (hoisting crossing locals), then union all refs
-    // into `refsOut` for the caller's liveness.
+    // Scope each child list before splitting this list at local redefinitions.
     void ProcessList(std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> &refsOut) {
         const size_t n = stmts.size();
         if (n == 0)
@@ -93,6 +90,19 @@ class ScopeBlockIntroducer {
             return;
         }
 
+        const auto originalCuts = cuts;
+        for (size_t s = 0; s < cuts.size(); ++s) {
+            const size_t previous = s == 0 ? 0 : originalCuts[s - 1];
+            const size_t next = s + 1 < originalCuts.size() ? originalCuts[s + 1] : n;
+            for (size_t i = previous; i < originalCuts[s]; ++i) {
+                const auto use = lifeLastUse.find(i);
+                if (!declName[i].empty() && use != lifeLastUse.end() && use->second >= originalCuts[s] && use->second < next)
+                    cuts[s] = (std::min)(cuts[s], i);
+            }
+        }
+        std::sort(cuts.begin(), cuts.end());
+        cuts.erase(std::unique(cuts.begin(), cuts.end()), cuts.end());
+
         std::vector<size_t> bounds;
         bounds.reserve(cuts.size() + 2);
         bounds.push_back(0);
@@ -121,6 +131,7 @@ class ScopeBlockIntroducer {
         // A segment becomes a do-block iff it has >=1 non-crossing local decl (a genuinely scoped
         // temp); wrapping a segment of only escapers would add noise without scoping anything.
         std::vector<bool> wrapped(segCount, false);
+        std::vector<bool> mixed(segCount, false);
         bool anyWrap = false;
         for (size_t s = 0; s < segCount; ++s) {
             for (size_t i = bounds[s]; i < bounds[s + 1]; ++i)
@@ -135,15 +146,49 @@ class ScopeBlockIntroducer {
             return;
         }
 
-        // Keep flat shadowing when a synthetic scope would force unrelated declarations outward.
+        std::unordered_map<std::string, size_t> firstDeclaration;
+        for (size_t i = 0; i < n; ++i)
+            if (!declName[i].empty() && !firstDeclaration.contains(declName[i]))
+                firstDeclaration[declName[i]] = i;
+
         for (size_t s = 0; s < segCount; ++s) {
-            if (!wrapped[s])
+            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
+                if (declName[i].empty() || !crossing[i] || firstDeclaration[declName[i]] == i || !CanDemoteLocal(stmts[i]))
+                    continue;
+                DemoteLocal(stmts[i]);
+                declName[i].clear();
+                crossing[i] = false;
+            }
+            bool hasLocal = false;
+            bool hasCrossing = false;
+            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
+                hasLocal |= !declName[i].empty();
+                hasCrossing |= !declName[i].empty() && crossing[i];
+            }
+            wrapped[s] = hasLocal && !hasCrossing;
+            mixed[s] = hasLocal && hasCrossing;
+            if (wrapped[s])
+                anyWrap = true;
+        }
+
+        std::vector<std::vector<std::pair<size_t, size_t>>> partial(segCount);
+        for (size_t s = 0; s < segCount; ++s) {
+            if (!mixed[s])
                 continue;
-            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i)
-                if (!declName[i].empty() && crossing[i]) {
-                    bubble();
-                    return;
-                }
+            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
+                if (declName[i].empty() || crossing[i])
+                    continue;
+                const auto use = lifeLastUse.find(i);
+                const size_t end = (use == lifeLastUse.end() ? i : use->second) + 1;
+                bool containsCrossing = false;
+                for (size_t j = i; j < end; ++j)
+                    if (!declName[j].empty() && crossing[j]) {
+                        containsCrossing = true;
+                        break;
+                    }
+                if (!containsCrossing)
+                    partial[s].emplace_back(i, end);
+            }
         }
 
         std::vector<std::shared_ptr<Statement>> rebuilt;
@@ -165,6 +210,25 @@ class ScopeBlockIntroducer {
                     block->bEmitAsDoBlock = true;
                     block->body.assign(seg.begin() + lead, seg.end());
                     rebuilt.push_back(block);
+                }
+            } else if (!partial[s].empty()) {
+                size_t i = bounds[s];
+                size_t range = 0;
+                while (i < bounds[s + 1]) {
+                    while (range < partial[s].size() && partial[s][range].second <= i)
+                        ++range;
+                    if (range >= partial[s].size() || partial[s][range].first != i) {
+                        rebuilt.push_back(stmts[i++]);
+                        continue;
+                    }
+                    size_t end = partial[s][range].second;
+                    while (++range < partial[s].size() && partial[s][range].first < end)
+                        end = (std::max)(end, partial[s][range].second);
+                    auto block = std::make_shared<BlockStatementNode>();
+                    block->bEmitAsDoBlock = true;
+                    block->body.assign(stmts.begin() + i, stmts.begin() + end);
+                    rebuilt.push_back(block);
+                    i = end;
                 }
             } else {
                 rebuilt.insert(rebuilt.end(), seg.begin(), seg.end());
@@ -197,6 +261,29 @@ class ScopeBlockIntroducer {
                 return SingleRetName(nc->rets, multi);
         }
         return "";
+    }
+
+    static bool CanDemoteLocal(const std::shared_ptr<Statement> &stmt) {
+        if (std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
+            return true;
+        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt))
+            return fn->bIsLocalDeclaration && !fn->bAnonymousInline;
+        return LocalDeclCall(stmt) != nullptr;
+    }
+
+    static void DemoteLocal(std::shared_ptr<Statement> &stmt) {
+        if (auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
+            stmt = std::make_shared<AssignmentStatementNode>(declaration->identifier, declaration->value);
+            return;
+        }
+        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+            fn->bIsLocalDeclaration = false;
+            return;
+        }
+        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(LocalDeclCall(stmt)))
+            call->bIsLocalDeclaration = false;
+        else if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(LocalDeclCall(stmt)))
+            nameCall->bIsLocalDeclaration = false;
     }
 
     // The underlying Call/NameCall of a call-result local declaration (`local rets = f()`), whether it
