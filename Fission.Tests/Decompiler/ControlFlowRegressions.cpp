@@ -339,7 +339,7 @@ TEST_CASE("Regress: continue inside numeric for preserves loop body", "[Decompil
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "for "));
     // Accumulation must survive (as vN += i_3 after var rename).
-    const bool hasPlus = Contains(out, "+=") || Contains(out, " = ") && Contains(out, "+");
+    const bool hasPlus = Contains(out, "+=") || (Contains(out, " = ") && Contains(out, "+"));
     CHECK(hasPlus);
 }
 
