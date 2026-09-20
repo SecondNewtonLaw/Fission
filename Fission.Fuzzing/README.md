@@ -12,7 +12,7 @@ cmake --build cmake-build-release --target Fission.Fuzzing
 Flags: `--count N`, `--seed S`, `--out DIR` (default: this folder), `--max-corpus N`,
 `--threads N`, `--sugar-only`, `--check-sugar SOURCE OUTPUT`, `--minimize-file PATH`,
 `--minimize-budget N`, `--mutate`, `--deser`, `--file PATH`, `--sem-file PATH`, `--deser-file PATH`,
-`--roblox-file PATH`, and `--repro-mutate PATH SEED`. Exit code is nonzero when any crash,
+`--roblox-file PATH`, `--roblox-compare PATH`, `--roblox-corpus DIR`, `--corpus-start N`, `--corpus-limit N`, and `--repro-mutate PATH SEED`. Exit code is nonzero when any crash,
 invalid output, generator failure, or semantic divergence surfaces.
 
 ## Two generator front-ends (alternated per sample)

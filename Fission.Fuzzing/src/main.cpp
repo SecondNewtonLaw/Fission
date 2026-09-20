@@ -13,9 +13,11 @@
 #include <fstream>
 #include <map>
 #include <mutex>
+#include <set>
 #include <sstream>
 #include <string>
 #include <thread>
+#include <tuple>
 #include <vector>
 
 #ifdef _WIN32
@@ -74,6 +76,85 @@ namespace {
         std::stringstream ss;
         ss << in.rdbuf();
         return ss.str();
+    }
+
+    uint64_t HashBytes(const std::string &bytes) {
+        uint64_t hash = 1469598103934665603ull;
+        for (const unsigned char byte : bytes) {
+            hash ^= byte;
+            hash *= 1099511628211ull;
+        }
+        return hash;
+    }
+
+    struct LiftedIR {
+        std::vector<LiftedOperation> operations;
+        std::string signature;
+    };
+
+    std::optional<LiftedIR> LiftBytecodeIR(const std::string &bytecode, Fission::InstructionDecoder &decoder) {
+        try {
+            Deserializer deserializer{};
+            auto deserialized = deserializer.Deserialize(bytecode);
+            if (!deserialized || deserialized->functions.empty())
+                return std::nullopt;
+            BytecodeLifter lifter{&decoder};
+            const auto lifted = lifter.LiftDeserializedBytecode(*deserialized);
+            LiftedIR ir;
+            std::ostringstream signature;
+            std::function<void(const LiftedFunction &)> walk = [&](const LiftedFunction &function) {
+                signature << "F " << static_cast<unsigned>(function.numparams) << ' ' << function.subfunctions.size() << '\n';
+                for (const auto &instruction : function.instructions) {
+                    ir.operations.push_back(instruction.operation);
+                    signature << static_cast<uint32_t>(instruction.operation);
+                    for (const auto &operand : instruction.operands) {
+                        signature << ' ' << static_cast<unsigned>(operand.type) << ':';
+                        switch (operand.type) {
+                        case LiftedOperandType::Register:
+                            signature << static_cast<unsigned>(operand.value.reg) << ':' << operand.ssaVersion;
+                            break;
+                        case LiftedOperandType::ImmediateNil:
+                            signature << '0';
+                            break;
+                        case LiftedOperandType::ImmediateInteger:
+                            signature << operand.value.imm.n;
+                            break;
+                        case LiftedOperandType::ImmediateBool:
+                            signature << operand.value.imm.b;
+                            break;
+                        case LiftedOperandType::ImmediateConstant:
+                            signature << operand.value.imm.k;
+                            break;
+                        case LiftedOperandType::ImmediateAux:
+                            signature << operand.value.imm.u;
+                            break;
+                        }
+                    }
+                    if (instruction.instructionRemarks)
+                        signature << ' ' << instruction.instructionRemarks->size() << ':' << *instruction.instructionRemarks;
+                    signature << '\n';
+                }
+                for (const auto &child : function.subfunctions)
+                    walk(child);
+                signature << "E\n";
+            };
+            walk(lifted);
+            ir.signature = signature.str();
+            return ir;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
+    std::tuple<size_t, int, int, int> DescribeMismatch(const std::vector<LiftedOperation> &original, const std::vector<LiftedOperation> &roundtrip) {
+        const size_t common = (std::min)(original.size(), roundtrip.size());
+        size_t index = 0;
+        while (index < common && original[index] == roundtrip[index])
+            ++index;
+        const int originalOperation = index < original.size() ? static_cast<int>(original[index]) : -1;
+        const int roundtripOperation = index < roundtrip.size() ? static_cast<int>(roundtrip[index]) : -1;
+        const int lengthOrder = original.size() < roundtrip.size() ? -1 : original.size() > roundtrip.size() ? 1 : 0;
+        return {index, originalOperation, roundtripOperation, lengthOrder};
     }
 
     bool MinimizeFinding(const std::string &source, const fs::path &prefix, int budget) {
@@ -207,6 +288,10 @@ int main(int argc, char **argv) {
     std::string singleFile; // --file <path>: decompile one source through the raw pipeline (crash repro)
     std::string deserFile;  // --deser-file <path>: re-run one raw bytecode sample (crash breadcrumb)
     std::string robloxFile; // --roblox-file <path>: decompile a binary Roblox-bytecode sample (regress guard)
+    std::string robloxCompare;
+    std::string robloxCorpus;
+    int corpusStart = 0;
+    int corpusLimit = 0;
     std::string mutateFile; // --repro-mutate <path> <seed>: compile src, flip bytes by seed, decompile (single-shot)
     std::string semFile;    // --sem-file <path>: decompile one source, run both in the Luau VM, diff traces
     uint32_t mutateSeed = 0;
@@ -240,6 +325,14 @@ int main(int argc, char **argv) {
             deserFile = argv[++i];
         else if (a == "--roblox-file" && i + 1 < argc)
             robloxFile = argv[++i];
+        else if (a == "--roblox-compare" && i + 1 < argc)
+            robloxCompare = argv[++i];
+        else if (a == "--roblox-corpus" && i + 1 < argc)
+            robloxCorpus = argv[++i];
+        else if (a == "--corpus-start" && i + 1 < argc)
+            corpusStart = (std::max)(0, std::atoi(argv[++i]));
+        else if (a == "--corpus-limit" && i + 1 < argc)
+            corpusLimit = (std::max)(0, std::atoi(argv[++i]));
         else if (a == "--sem-file" && i + 1 < argc)
             semFile = argv[++i];
         else if (a == "--repro-mutate" && i + 2 < argc) {
@@ -290,6 +383,161 @@ int main(int argc, char **argv) {
         const bool shrunk = MinimizeFinding(ReadBin(minimizeFile), prefix, minimizeBudget);
         std::fprintf(stderr, "[minimize] %s: %s\n", shrunk ? "reduced" : "not reduced", prefix.string().c_str());
         return shrunk ? 0 : 1;
+    }
+
+    if (!robloxCompare.empty()) {
+        const auto bytecode = ReadBin(robloxCompare);
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileRobloxBytecode(bytecode, static_cast<DecompilerFlags>(0));
+        if (result.resultCode != DecompileResult::Success) {
+            std::fprintf(stderr, "[roblox-compare] decompile failed: %d\n", static_cast<int>(result.resultCode));
+            return 2;
+        }
+        std::fputs("SOURCE_BEGIN\n", stdout);
+        std::fputs(result.decompilationOutput.c_str(), stdout);
+        std::fputs("\nSOURCE_END\n", stdout);
+        std::string recompiled;
+        if (!fuzz::LuauCompiles(result.decompilationOutput, &recompiled)) {
+            std::fprintf(stderr, "[roblox-compare] recompile failed: %s\n", recompiled.empty() ? "(empty)" : recompiled.substr(1).c_str());
+            return 2;
+        }
+        Fission::RobloxClientDecoder robloxDecoder{};
+        Fission::InstructionDecoder vanillaDecoder{};
+        const auto original = LiftBytecodeIR(bytecode, robloxDecoder);
+        const auto roundtrip = LiftBytecodeIR(recompiled, vanillaDecoder);
+        if (!original || !roundtrip) {
+            std::fprintf(stderr, "[roblox-compare] IR lift failed\n");
+            return 2;
+        }
+        const auto secondGeneration = fuzz::FullDecompile(result.decompilationOutput);
+        std::string secondGenerationBytecode;
+        fuzz::SemVerdict semantic{};
+        if (secondGeneration.code == DecompileResult::Success && fuzz::LuauCompiles(secondGeneration.output, &secondGenerationBytecode)) {
+            const auto preludes = fuzz::CompilePreludes([](const std::string &source, std::string *output) { return fuzz::LuauCompiles(source, output); });
+            if (!preludes.empty())
+                semantic = fuzz::CompareSemantics(recompiled, secondGenerationBytecode, preludes);
+        }
+        const char *semanticStatus = semantic.kind == fuzz::SemVerdict::Kind::Match     ? "MATCH"
+                                     : semantic.kind == fuzz::SemVerdict::Kind::Diverge ? "DIVERGE"
+                                                                                        : "UNRUNNABLE";
+        std::fprintf(stderr, "SEMANTIC_SOURCE_ROUNDTRIP=%s\n", semanticStatus);
+        if (semantic.kind == fuzz::SemVerdict::Kind::Diverge) {
+            std::fprintf(
+                stderr, "SEMANTIC_FIXTURE=%zu\nORIGINAL_TRACE_BEGIN\n%sORIGINAL_TRACE_END\nROUNDTRIP_TRACE_BEGIN\n%sROUNDTRIP_TRACE_END\n", semantic.fixture,
+                semantic.original.trace.c_str(), semantic.decompiled.trace.c_str()
+            );
+        }
+        std::fputs("ORIGINAL_IR_BEGIN\n", stdout);
+        std::fputs(original->signature.c_str(), stdout);
+        std::fputs("ORIGINAL_IR_END\nROUNDTRIP_IR_BEGIN\n", stdout);
+        std::fputs(roundtrip->signature.c_str(), stdout);
+        std::fputs("ROUNDTRIP_IR_END\n", stdout);
+        std::fprintf(
+            stderr, "[roblox-compare] original=%zu roundtrip=%zu equal=%s\n", original->operations.size(), roundtrip->operations.size(),
+            original->signature == roundtrip->signature ? "yes" : "no"
+        );
+        return original->signature == roundtrip->signature ? 0 : 1;
+    }
+
+    if (!robloxCorpus.empty()) {
+        std::vector<fs::path> paths;
+        std::error_code error;
+        for (fs::recursive_directory_iterator it(robloxCorpus, error), end; it != end; it.increment(error)) {
+            if (error) {
+                error.clear();
+                continue;
+            }
+            if (it->is_regular_file() && it->path().extension() == ".lbc")
+                paths.push_back(it->path());
+        }
+        std::ranges::sort(paths);
+        paths.erase(paths.begin(), paths.begin() + (std::min)(paths.size(), static_cast<size_t>(corpusStart)));
+        if (corpusLimit > 0 && paths.size() > static_cast<size_t>(corpusLimit))
+            paths.resize(static_cast<size_t>(corpusLimit));
+
+        std::set<std::pair<uint64_t, size_t>> seen;
+        std::set<std::tuple<int, int, int>> mismatchSignatures;
+        std::mutex stateMutex;
+        std::atomic<size_t> next{0};
+        size_t checked = 0, completed = 0, duplicates = 0, matches = 0, findings = 0, reported = 0;
+        const auto worker = [&] {
+            while (true) {
+                const size_t index = next.fetch_add(1, std::memory_order_relaxed);
+                if (index >= paths.size())
+                    return;
+                const auto &path = paths[index];
+                const auto bytecode = ReadBin(path);
+                const auto hash = HashBytes(bytecode);
+                {
+                    const std::scoped_lock lock{stateMutex};
+                    if (!seen.emplace(hash, bytecode.size()).second) {
+                        ++duplicates;
+                        continue;
+                    }
+                    ++checked;
+                }
+
+                Decompiler decompiler{};
+                decompiler.SetDecompileBudget(std::chrono::seconds(30));
+                const auto result = decompiler.DecompileRobloxBytecode(bytecode, static_cast<DecompilerFlags>(0));
+                std::string line;
+                bool match = false;
+                std::optional<std::tuple<int, int, int>> mismatchSignature;
+                if (result.resultCode != DecompileResult::Success) {
+                    line = std::format("DECOMPILE\t{:016x}\t{}\n", hash, path.string());
+                } else {
+                    std::string recompiled;
+                    if (!fuzz::LuauCompiles(result.decompilationOutput, &recompiled)) {
+                        line = std::format("RECOMPILE\t{:016x}\t{}\n", hash, path.string());
+                    } else {
+                        Fission::RobloxClientDecoder robloxDecoder{};
+                        Fission::InstructionDecoder vanillaDecoder{};
+                        const auto original = LiftBytecodeIR(bytecode, robloxDecoder);
+                        const auto roundtrip = LiftBytecodeIR(recompiled, vanillaDecoder);
+                        if (!original || !roundtrip) {
+                            line = std::format("IR_LIFT\t{:016x}\t{}\n", hash, path.string());
+                        } else if (original->signature != roundtrip->signature) {
+                            const auto [first, originalOperation, roundtripOperation, lengthOrder] =
+                                DescribeMismatch(original->operations, roundtrip->operations);
+                            mismatchSignature = std::tuple{originalOperation, roundtripOperation, lengthOrder};
+                            line = std::format(
+                                "IR_MISMATCH\t{:016x}\t{}\t{}\t{}\t{}\t{}\t{}\n", hash, first, originalOperation, roundtripOperation,
+                                original->operations.size(), roundtrip->operations.size(), path.string()
+                            );
+                        } else {
+                            match = true;
+                        }
+                    }
+                }
+
+                const std::scoped_lock lock{stateMutex};
+                ++completed;
+                if (match) {
+                    ++matches;
+                } else {
+                    ++findings;
+                    if (!mismatchSignature || mismatchSignatures.insert(*mismatchSignature).second) {
+                        std::fputs(line.c_str(), stdout);
+                        ++reported;
+                    }
+                }
+                if (completed % 100 == 0)
+                    std::fprintf(
+                        stderr, "[roblox-corpus] checked=%zu duplicate=%zu match=%zu finding=%zu reported=%zu\n", checked, duplicates, matches, findings,
+                        reported
+                    );
+            }
+        };
+        std::vector<std::thread> workers;
+        workers.reserve(static_cast<size_t>(threads));
+        for (int i = 0; i < threads; ++i)
+            workers.emplace_back(worker);
+        for (auto &workerThread : workers)
+            workerThread.join();
+        std::fprintf(
+            stderr, "[roblox-corpus] checked=%zu duplicate=%zu match=%zu finding=%zu reported=%zu\n", checked, duplicates, matches, findings, reported
+        );
+        return findings == 0 ? 0 : 1;
     }
 
     // --roblox-file: decompile a binary Roblox-bytecode sample through the public boundary with a budget.
