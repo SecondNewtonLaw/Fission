@@ -6,7 +6,7 @@ find_program(CCACHE_EXECUTABLE
         "$ENV{ProgramFiles}/ccache"
         "C:/ProgramData/chocolatey/bin" # Chocolatey
 
-        # macOS/ Linux
+        # macOS and Linux
         "/usr/local/bin"
         "/usr/bin"
         "/opt/homebrew/bin" # homebrew on apple
@@ -25,7 +25,7 @@ if (CCACHE_EXECUTABLE)
             message(WARNING "ccache with the Visual Studio generator may not be fully supported. Consider using the Ninja generator (-G Ninja).")
         endif ()
 
-        # MSVC requires ccache version 4.6 or newer; better results are produced with embedded dbg info.
+        # MSVC requires ccache 4.6 or newer and works best with embedded debug information.
         set(CMAKE_MSVC_DEBUG_INFORMATION_FORMAT "Embedded" CACHE STRING "MSVC debug information format")
     endif()
 

@@ -21,7 +21,7 @@ option(ENABLE_ASAN "Enable AddressSanitizer." OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer." OFF)
 
 if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
-    # Be lenient in C for dependency pointer types and function declarations.
+    # Third-party C sources still use legacy declarations and pointer conversions.
     add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-error=incompatible-pointer-types>)
     add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-implicit-function-declaration>)
     add_compile_options($<$<COMPILE_LANGUAGE:C>:-Wno-deprecated-declarations>)
@@ -60,7 +60,6 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
         )
     endif ()
 elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-#msvc flags.
     if (ENABLE_UBSAN)
         message(FATAL_ERROR "The Undefined Behaviour Sanitiser is not available on MSVC front-end compilers!")
     endif ()
@@ -100,8 +99,7 @@ CPMAddPackage(
         NAME libassert
         GITHUB_REPOSITORY jeremy-rifkin/libassert
         GIT_TAG v2.2.0
-        # libassert v2.2.0 is missing <algorithm> in src/paths.cpp on newer toolchains.
-        # Keep this idempotent patch until the dependency release includes that header.
+        # libassert v2.2.0 needs <algorithm> in src/paths.cpp on newer toolchains.
         PATCH_COMMAND ${CMAKE_COMMAND}
             -D "SOURCE_DIR=<SOURCE_DIR>"
             -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/patches/libassert-add-algorithm-include.cmake"
@@ -147,7 +145,6 @@ set_target_properties(
 )
 
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
-#gnu flags.
     set(CXX_COMPILE_OPTIONS -Werror -Wall -Wextra -Wpedantic -pedantic -funroll-loops -fstack-protector-strong -fstack-protector-all)
     set(CXX_LINK_OPTIONS)
     append_supported_cxx_compile_options(CXX_COMPILE_OPTIONS -ftree-vectorize)
@@ -208,7 +205,6 @@ if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     endif ()
 
 elseif (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "MSVC")
-#msvc flags.
     set(CXX_COMPILE_OPTIONS /arch:AVX2 /WX /W4 /permissive- /Zc:preprocessor /Ob3 /O2 /Ot
             /wd4127 #[==[ conditional expression is constant ]==]
             /wd4068 #[==[ unknown pragma '...' ]==]
