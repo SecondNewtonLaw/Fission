@@ -302,13 +302,16 @@ target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
 
-add_executable(Fission.Server
-        Fission.Server/src/main.cpp
+add_library(Fission.Server STATIC
+    Fission.Server/src/Server.cpp
+    Fission.Server/include/Server.hpp
 )
-target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast)
+target_include_directories(Fission.Server PUBLIC Fission.Server/include)
+# Consumers of Fission.Server also compile Boost.Asio headers.
+target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast Boost::json)
 if (WIN32)
-    target_link_libraries(Fission.Server PRIVATE ws2_32)
-    target_compile_definitions(Fission.Server PRIVATE _WIN32_WINNT=0x0601)
+    target_link_libraries(Fission.Server PUBLIC ws2_32)
+    target_compile_definitions(Fission.Server PUBLIC _WIN32_WINNT=0x0601)
 endif ()
 target_compile_options(Fission.Server PRIVATE ${CXX_COMPILE_OPTIONS})
 if (CMAKE_CXX_COMPILER_ID MATCHES "Clang")
@@ -325,6 +328,14 @@ elseif (CMAKE_CXX_COMPILER_ID STREQUAL "MSVC")
     target_compile_options(Fission.Server PRIVATE /wd5311)
 endif ()
 target_link_options(Fission.Server PRIVATE ${CXX_LINK_OPTIONS})
+
+add_executable(Fission.Server.CLI
+    Fission.Server/CLI/main.cpp
+)
+set_target_properties(Fission.Server.CLI PROPERTIES OUTPUT_NAME Fission.Server)
+target_link_libraries(Fission.Server.CLI PUBLIC Fission.Server)
+target_compile_options(Fission.Server.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
+target_link_options(Fission.Server.CLI PRIVATE ${CXX_LINK_OPTIONS})
 
 if (BUILD_TESTING)
     CPMAddPackage(
@@ -343,11 +354,17 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/ControlFlowRegressions.cpp
             Fission.Tests/Decompiler/ComplexControlFlow.cpp
             Fission.Tests/Decompiler/TypeInference.cpp
+            Fission.Tests/Decompiler/IREquivalence.cpp
+            Fission.Tests/Decompiler/ClassDeclarations.cpp
+            Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
+            Fission.Tests/SSA/SSAInvariants.cpp
+            Fission.Tests/Server/ServerBehaviour.cpp
     )
 
     target_link_libraries(Fission.Tests PRIVATE
             Fission.Common
             Fission.Decompiler
+            Fission.Server
             Catch2::Catch2WithMain
             Catch2
     )

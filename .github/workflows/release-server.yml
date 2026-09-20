@@ -41,7 +41,7 @@ jobs:
           - os: ubuntu-24.04
             artifact: fission-server-linux-x86_64
             artifact_filename: fission-server-linux-x86_64
-            configure_args: -G Ninja -DCMAKE_BUILD_TYPE=Release
+            configure_args: -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER=clang -DCMAKE_CXX_COMPILER=clang++
             binary_path: build/Fission.Server
             install_deps: sudo apt-get update && sudo apt-get install -y ninja-build
             setup_windows_toolchain: false
@@ -90,7 +90,23 @@ jobs:
         run: cmake -S . -B build -DBUILD_TESTING=OFF -DUSE_CCACHE=OFF ${{ matrix.configure_args }}
 
       - name: Build
-        run: cmake --build build --config Release --target Fission.Server --parallel
+        run: cmake --build build --config Release --target Fission.Server.CLI --parallel
+
+      - name: Smoke test Linux server
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          ./build/Fission.Server --port 18080 >server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18080/health | grep --quiet '"ok":true'; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat server.log
+          exit 1
 
       - name: Package artifact
         shell: bash
