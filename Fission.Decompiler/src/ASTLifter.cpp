@@ -1319,6 +1319,59 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                    return instruction.operation == LiftedOperation::RETURN || instruction.operation == LiftedOperation::NOP;
                });
     };
+    const auto reachesContinuationOrReturns = [&](uint32_t start, uint32_t continuation) {
+        const auto &blocks = m_currentFunction->basicBlocks;
+        boost::unordered_flat_set<uint32_t> seen;
+        std::vector<uint32_t> pending{start};
+        bool reachesContinuation = false;
+        bool reachesReturn = false;
+        bool hasEffect = false;
+        while (!pending.empty()) {
+            const uint32_t id = pending.back();
+            pending.pop_back();
+            if (id == continuation) {
+                reachesContinuation = true;
+                continue;
+            }
+            if (id >= blocks.size())
+                return false;
+            if (!seen.insert(id).second)
+                continue;
+            const auto &candidate = blocks[id];
+            if (candidate.successors.empty()) {
+                if (candidate.bType != BlockType::Return || candidate.bTerminator != BlockTerminator::Return)
+                    return false;
+                reachesReturn = true;
+                continue;
+            }
+            if (candidate.lpHead && candidate.lpTail)
+                for (auto *instruction = candidate.lpHead; instruction <= candidate.lpTail; ++instruction)
+                    switch (instruction->operation) {
+                    case LiftedOperation::CALL:
+                    case LiftedOperation::CALLFB:
+                    case LiftedOperation::NAMECALL:
+                    case LiftedOperation::NAMECALLUDATA:
+                    case LiftedOperation::SETGLOBAL:
+                    case LiftedOperation::SETUPVAL:
+                    case LiftedOperation::SETTABLE:
+                    case LiftedOperation::SETTABLEKS:
+                    case LiftedOperation::SETTABLEN:
+                    case LiftedOperation::SETUDATAKS:
+                        hasEffect = true;
+                        break;
+                    default:
+                        break;
+                    }
+            for (const uint32_t successor : candidate.successors) {
+                if (successor >= blocks.size())
+                    return false;
+                if (successor <= id)
+                    return false;
+                pending.push_back(successor);
+            }
+        }
+        return reachesContinuation && reachesReturn && hasEffect;
+    };
 
     // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
     // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
@@ -1426,10 +1479,18 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     mergeIdx = stopBlockId;
 
                 if (mergeIdx == InvalidBlockId) {
-                    bool trueIsReturn = (m_currentFunction->basicBlocks[trueIdx].bType == BlockType::Return);
-                    bool falseIsReturn = (m_currentFunction->basicBlocks[falseIdx].bType == BlockType::Return);
+                    const auto terminalReturn = [&](uint32_t id) {
+                        const auto &candidate = m_currentFunction->basicBlocks[id];
+                        return candidate.bType == BlockType::Return && candidate.bTerminator == BlockTerminator::Return && candidate.successors.empty();
+                    };
+                    const bool trueIsReturn = terminalReturn(trueIdx);
+                    const bool falseIsReturn = terminalReturn(falseIdx);
 
-                    if (trueIsReturn && !falseIsReturn) {
+                    if (reachesContinuationOrReturns(trueIdx, falseIdx)) {
+                        mergeIdx = falseIdx;
+                    } else if (reachesContinuationOrReturns(falseIdx, trueIdx)) {
+                        mergeIdx = trueIdx;
+                    } else if (trueIsReturn && !falseIsReturn) {
                         mergeIdx = falseIdx;
                     } else if (!trueIsReturn && falseIsReturn) {
                         mergeIdx = trueIdx;
@@ -2508,6 +2569,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
     if (!block.lpHead)
         return statements;
 
+    const auto activeLocalName = [&](const LiftedInstruction &instruction, const LiftedOperand &target) -> std::optional<std::string> {
+        for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
+            if (local.reg == target.value.reg && local.startpc <= instruction.instructionIndex && instruction.instructionIndex < local.endpc &&
+                !local.varname.empty())
+                return local.varname;
+        return std::nullopt;
+    };
+
     for (int i = block.lpHead->instructionIndex; i <= block.lpTail->instructionIndex; ++i) {
         if (m_processedInstructions.contains(i))
             continue;
@@ -2940,11 +3009,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 break;
             }
 
-            // A closure that is a branch value merging into a named local (phi-consumed) assigns to that
-            // local -- `v0 = function ... end` -- never a `local function anon_N`, which would drop the
-            // merge target. With the anon pin skipped above, ResolveVariableName falls back to the
-            // register's name (`v0`), matching the sibling branch and the phi.
-            if (m_definedRegisters.contains(saveWhere.value.reg) || m_currentFunction->IsConsumedByPhi(saveWhere)) {
+            // Preserve phi targets and assignments to active debug locals.
+            const auto localName = activeLocalName(inst, saveWhere);
+            if (m_currentFunction->IsConsumedByPhi(saveWhere) || (m_definedRegisters.contains(saveWhere.value.reg) && localName)) {
+                if (localName)
+                    m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 statements.push_back(
@@ -3160,9 +3229,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 break;
             }
 
-            // Phi-consumed branch value (`local v = if c then <closure> else e`) assigns to the merged
-            // local, not a `local function anon_N` that drops it. See DUPCLOSURE.
-            if (m_definedRegisters.contains(saveWhere.value.reg) || m_currentFunction->IsConsumedByPhi(saveWhere)) {
+            // Preserve phi targets and assignments to active debug locals.
+            const auto localName = activeLocalName(inst, saveWhere);
+            if (m_currentFunction->IsConsumedByPhi(saveWhere) || (m_definedRegisters.contains(saveWhere.value.reg) && localName)) {
+                if (localName)
+                    m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 statements.push_back(

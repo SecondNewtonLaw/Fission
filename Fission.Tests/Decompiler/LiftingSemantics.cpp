@@ -90,6 +90,29 @@ namespace {
         return output;
     }
 
+    std::string DecompileItemSpawnOrFail() {
+        std::ifstream fixture{FISSION_SOURCE_DIR "/Samples/EncodedRoblox/ITEM_SPAWN_GUARDS.txt", std::ios::binary};
+        REQUIRE(fixture);
+        std::stringstream encoded;
+        encoded << fixture.rdbuf();
+
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileRobloxBytecode(DecodeBase64(encoded.str()), static_cast<DecompilerFlags>(0));
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO("decompile:\n" << result.decompilationOutput);
+        INFO("IR:\n" << result.irOutput);
+        return result.decompilationOutput;
+    }
+
+    size_t LineIndentContaining(const std::string &source, const std::string_view needle) {
+        const auto position = source.find(needle);
+        if (position == std::string::npos)
+            return std::string::npos;
+        const auto newline = source.rfind('\n', position);
+        const auto lineStart = newline == std::string::npos ? 0 : newline + 1;
+        return source.find_first_not_of(' ', lineStart) - lineStart;
+    }
+
     // Recompile the decompiled source; proves the output is valid Luau (the byte-0 sentinel is the
     // Luau compiler's error marker).
     bool CompilesOk(const std::string &source) {
@@ -1563,6 +1586,18 @@ TEST_CASE("Lift: captured anonymous closure keeps one binding", "[Decompiler][Cl
     )");
 }
 
+TEST_CASE("Lift: reassigned captured closure keeps original binding", "[Decompiler][ClosureBinding][Regression]") {
+    const std::string source = R"(
+        local function f() return 1 end
+        local function read() return f end
+        f = function() return 2 end
+        return read()()
+    )";
+    const auto out = DecompileOrFail(source);
+    INFO(out);
+    CheckSameTrace(source, out);
+}
+
 TEST_CASE("Lift: `if` condition has no redundant outer parentheses around a bare comparison", "[Decompiler][Parens]") {
     const auto out = DecompileOrFail(R"(
         return function(a, b)
@@ -1713,6 +1748,48 @@ TEST_CASE("Lift: FastWait keeps short-circuit duration separate from timer", "[D
     CHECK_FALSE(Contains(function, "v2 + (v2 or"));
     CHECK_FALSE(Contains(function, "\n    do\n"));
     CHECK_FALSE(Contains(result.decompilationOutput, ": table"));
+}
+
+TEST_CASE("Lift: ItemSpawn successful guards continue to later checks", "[Decompiler][ControlFlow][Regression]") {
+    const auto out = DecompileItemSpawnOrFail();
+    const auto tickStart = out.find("local serverTimeNow");
+    const auto tickEnd = out.find("Triggered:Connect", tickStart);
+    REQUIRE(tickStart != std::string::npos);
+    REQUIRE(tickEnd != std::string::npos);
+    const auto tick = out.substr(tickStart, tickEnd - tickStart);
+
+    const auto weatherIndent = LineIndentContaining(tick, "RequiredWeather");
+    const auto oreIndent = LineIndentContaining(tick, "RequiredOre");
+    const auto eventIndent = LineIndentContaining(tick, "RequiredEvent");
+    const auto limitIndent = LineIndentContaining(tick, "LimitedAmount");
+    REQUIRE(weatherIndent != std::string::npos);
+    REQUIRE(oreIndent != std::string::npos);
+    REQUIRE(eventIndent != std::string::npos);
+    REQUIRE(limitIndent != std::string::npos);
+    CHECK_FALSE(std::regex_search(tick, std::regex(R"(\belseif[^\n]*RequiredOre)")));
+    CHECK(oreIndent == weatherIndent);
+    CHECK(eventIndent == weatherIndent);
+    CHECK(limitIndent == weatherIndent);
+}
+
+TEST_CASE("Lift: ItemSpawn active weather still invokes collection", "[Decompiler][ControlFlow][Regression]") {
+    const auto out = DecompileItemSpawnOrFail();
+    const auto promptStart = out.find("Triggered:Connect");
+    const auto promptEnd = out.find("SetState(false, true)", promptStart);
+    REQUIRE(promptStart != std::string::npos);
+    REQUIRE(promptEnd != std::string::npos);
+    const auto prompt = out.substr(promptStart, promptEnd - promptStart);
+
+    const auto weatherIndent = LineIndentContaining(prompt, "RequiredWeather");
+    const auto invokeIndent = LineIndentContaining(prompt, "InvokeServer");
+    REQUIRE(weatherIndent != std::string::npos);
+    REQUIRE(invokeIndent != std::string::npos);
+    CHECK(invokeIndent == weatherIndent);
+}
+
+TEST_CASE("Lift: ItemSpawn method closures remain local", "[Decompiler][Closure][Regression]") {
+    const auto out = DecompileItemSpawnOrFail();
+    CHECK_FALSE(std::regex_search(out, std::regex(R"((^|\n)(Construct|Start|Stop)\s*=\s*function)")));
 }
 
 TEST_CASE("Lift: rename comments only describe surviving suffixed locals", "[Decompiler][AutoName][Regression]") {
