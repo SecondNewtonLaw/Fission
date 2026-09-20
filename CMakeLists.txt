@@ -7,7 +7,7 @@ include(CTest)
 set(CMAKE_CXX_STANDARD 23)
 option(USE_CCACHE "Use ccache as the compiler launcher when available." ON)
 
-option(ALLOW_NON_STANDARD_MATH "Enable non-standard fast-math optimizations." ON)
+option(ALLOW_NON_STANDARD_MATH "Enable non-standard fast-math optimizations." OFF)
 option(DEBUG_INFORMATION_EXTENSIVE "Emit extensive debug information." ON)
 option(DEBUG_NO_INLINING "Disable function inlining for Debug builds." ON)
 option(USE_LTO "Enable link-time optimization." OFF)
