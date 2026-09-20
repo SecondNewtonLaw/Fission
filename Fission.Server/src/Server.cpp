@@ -1,8 +1,11 @@
 #include "Server.hpp"
 #include "Decompiler.hpp"
 
+#ifdef __clang__
 #pragma clang diagnostic push
+#if __has_warning("-Wc2y-extensions")
 #pragma clang diagnostic ignored "-Wc2y-extensions"
+#endif
 #pragma clang diagnostic ignored "-Wlanguage-extension-token"
 #pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
 #pragma clang diagnostic ignored "-Wnested-anon-types"
@@ -14,6 +17,7 @@
 #include <boost/beast.hpp>
 #include <boost/json.hpp>
 #pragma clang diagnostic pop
+#endif
 
 #include <array>
 #include <chrono>
