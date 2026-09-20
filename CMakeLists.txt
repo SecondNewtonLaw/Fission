@@ -337,6 +337,26 @@ target_link_libraries(Fission.Server.CLI PUBLIC Fission.Server)
 target_compile_options(Fission.Server.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Server.CLI PRIVATE ${CXX_LINK_OPTIONS})
 
+# Random-source and bytecode mutation harness.
+option(BUILD_FUZZING "Build the Fission.Fuzzing harness" ON)
+if (BUILD_FUZZING)
+    add_executable(Fission.Fuzzing
+            Fission.Fuzzing/src/main.cpp
+            Fission.Fuzzing/src/LuauAstGenerator.cpp
+            Fission.Fuzzing/src/FissionAstGenerator.cpp
+            Fission.Fuzzing/include/LuauAstGenerator.hpp
+            Fission.Fuzzing/include/FissionAstGenerator.hpp
+            Fission.Fuzzing/include/FuzzOracle.hpp
+            Fission.Fuzzing/include/SemanticOracle.hpp
+    )
+    target_include_directories(Fission.Fuzzing PRIVATE Fission.Fuzzing/include)
+    # This Luau version has no transpiler; the harness prints generated AST nodes directly.
+    target_link_libraries(Fission.Fuzzing PRIVATE Fission.Decompiler)
+    target_compile_options(Fission.Fuzzing PRIVATE ${CXX_COMPILE_OPTIONS})
+    target_link_options(Fission.Fuzzing PRIVATE ${CXX_LINK_OPTIONS})
+    target_compile_definitions(Fission.Fuzzing PRIVATE FISSION_FUZZING_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/Fission.Fuzzing")
+endif()
+
 if (BUILD_TESTING)
     CPMAddPackage(
             NAME Catch2

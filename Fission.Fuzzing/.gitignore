@@ -1,0 +1,4 @@
+# fuzzer scratch output; the committed corpus/ seed is exercised by the Catch2 [Fuzz][Corpus] test.
+crashes/
+_current_sample.lua
+run/

@@ -1,0 +1,72 @@
+name: Fuzz
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fuzz-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  fuzz:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ninja-build
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DBUILD_TESTING=ON
+          -DBUILD_FUZZING=ON
+          -DUSE_CCACHE=OFF
+
+      - name: Build tests and fuzz harness
+        run: cmake --build build --target Fission.Tests Fission.Fuzzing --parallel 2
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Generate fuzz seeds
+        id: seeds
+        shell: bash
+        run: |
+          ast_seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+          bytecode_seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+          while [[ "$bytecode_seed" == "$ast_seed" ]]; do
+            bytecode_seed=$(od -An -N4 -tu4 /dev/urandom | tr -d ' ')
+          done
+          echo "ast=$ast_seed" >> "$GITHUB_OUTPUT"
+          echo "bytecode=$bytecode_seed" >> "$GITHUB_OUTPUT"
+          printf '### Fuzz seeds\n- AST: `%s`\n- Bytecode: `%s`\n' "$ast_seed" "$bytecode_seed" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: AST fuzz
+        run: ./build/Fission.Fuzzing --count 1000 --seed ${{ steps.seeds.outputs.ast }} --threads 1 --max-corpus 0 --minimize-budget 0 --out fuzz-output/ast
+
+      - name: Bytecode fuzz
+        run: ./build/Fission.Fuzzing --deser --count 5000 --seed ${{ steps.seeds.outputs.bytecode }} --out fuzz-output/bytecode
+
+      - name: Upload fuzz findings
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuzz-findings
+          path: fuzz-output
+          if-no-files-found: ignore
