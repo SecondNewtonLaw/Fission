@@ -20,7 +20,10 @@
 
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
+#include "Luau/Allocator.h"
+#include "Luau/Ast.h"
 #include "Luau/Compiler.h"
+#include "Luau/Parser.h"
 #pragma clang diagnostic pop
 
 #include <cstdint>
@@ -29,8 +32,10 @@
 #include <map>
 #include <optional>
 #include <regex>
+#include <set>
 #include <sstream>
 #include <string>
+#include <string_view>
 #include <vector>
 
 namespace fuzz {
@@ -153,75 +158,157 @@ namespace fuzz {
         return r;
     }
 
-    // Detect malformed source involving generated register names.
-    inline std::vector<std::string> Lines(const std::string &source) {
-        std::vector<std::string> lines;
-        std::istringstream in(source);
-        std::string line;
-        while (std::getline(in, line))
-            lines.push_back(line);
-        return lines;
+    struct GeneratedNames {
+        struct Site {
+            Luau::Position position;
+            size_t scope = static_cast<size_t>(-1);
+        };
+
+        std::set<std::string> locals;
+        std::set<std::string> globals;
+        std::map<std::string, std::vector<Site>> localSites;
+        std::map<std::string, std::vector<Site>> globalSites;
+        std::vector<Luau::Location> scopes;
+    };
+
+    inline bool IsGeneratedName(std::string_view name) {
+        if (name.size() < 2 || name[0] != 'v')
+            return false;
+        size_t i = 1;
+        while (i < name.size() && name[i] >= '0' && name[i] <= '9')
+            ++i;
+        if (i == 1 || i == name.size())
+            return i == name.size();
+        if (name[i++] != '_' || i == name.size())
+            return false;
+        return std::all_of(name.begin() + static_cast<std::ptrdiff_t>(i), name.end(), [](char c) { return c >= '0' && c <= '9'; });
     }
 
-    inline bool UsesGeneratedLocalBeforeDeclared(const std::string &source) {
-        const auto lines = Lines(source);
-        const std::regex declRe(R"(\blocal\s+(v\d+)\b)");
-        std::map<std::string, size_t> firstDecl;
-        for (size_t i = 0; i < lines.size(); ++i)
-            for (auto it = std::sregex_iterator(lines[i].begin(), lines[i].end(), declRe); it != std::sregex_iterator(); ++it) {
-                const std::string name = (*it)[1];
-                if (!firstDecl.count(name))
-                    firstDecl[name] = i;
+    inline std::optional<GeneratedNames> FindGeneratedNames(const std::string &source) {
+        Luau::Allocator allocator;
+        Luau::AstNameTable names{allocator};
+        auto parsed = Luau::Parser::parse(source.data(), source.size(), names, allocator);
+        if (!parsed.errors.empty() || !parsed.root)
+            return std::nullopt;
+
+        struct Visitor final : Luau::AstVisitor {
+            GeneratedNames result;
+
+            void AddLocal(const Luau::AstLocal *local) {
+                if (local && IsGeneratedName(local->name.value)) {
+                    result.locals.emplace(local->name.value);
+                    result.localSites[local->name.value].push_back({local->location.begin});
+                }
             }
-        for (const auto &[name, declIdx] : firstDecl) {
-            const std::regex useRe("\\b" + name + "\\b");
-            for (size_t i = 0; i < declIdx; ++i)
-                if (std::regex_search(lines[i], useRe))
+
+            bool visit(Luau::AstStatBlock *node) override {
+                result.scopes.push_back(node->location);
+                return true;
+            }
+
+            bool visit(Luau::AstStatIf *node) override {
+                AddLocal(node->conditionLocal);
+                return true;
+            }
+
+            bool visit(Luau::AstStatLocal *node) override {
+                for (const auto *local : node->vars)
+                    AddLocal(local);
+                return true;
+            }
+
+            bool visit(Luau::AstStatLocalFunction *node) override {
+                AddLocal(node->name);
+                return true;
+            }
+
+            bool visit(Luau::AstStatFor *node) override {
+                AddLocal(node->var);
+                return true;
+            }
+
+            bool visit(Luau::AstStatForIn *node) override {
+                for (const auto *local : node->vars)
+                    AddLocal(local);
+                return true;
+            }
+
+            bool visit(Luau::AstExprGlobal *node) override {
+                if (IsGeneratedName(node->name.value)) {
+                    result.globals.emplace(node->name.value);
+                    result.globalSites[node->name.value].push_back({node->location.begin});
+                }
+                return true;
+            }
+        } visitor;
+
+        parsed.root->visit(&visitor);
+
+        const auto scopeFor = [&](const Luau::Position position) {
+            size_t result = static_cast<size_t>(-1);
+            for (size_t i = 0; i < visitor.result.scopes.size(); ++i) {
+                const auto &scope = visitor.result.scopes[i];
+                if (position < scope.begin || scope.end < position)
+                    continue;
+                if (result == static_cast<size_t>(-1) ||
+                    (scope.begin >= visitor.result.scopes[result].begin && scope.end <= visitor.result.scopes[result].end))
+                    result = i;
+            }
+            return result;
+        };
+        for (auto &entry : visitor.result.localSites)
+            for (auto &site : entry.second)
+                site.scope = scopeFor(site.position);
+        for (auto &entry : visitor.result.globalSites)
+            for (auto &site : entry.second)
+                site.scope = scopeFor(site.position);
+        return visitor.result;
+    }
+
+    inline bool HasSameScopeGlobalBeforeLocal(const GeneratedNames &names, const std::string &name) {
+        const auto globals = names.globalSites.find(name);
+        const auto locals = names.localSites.find(name);
+        if (globals == names.globalSites.end() || locals == names.localSites.end())
+            return false;
+        for (const auto &global : globals->second)
+            for (const auto &local : locals->second)
+                if (global.scope == local.scope && global.position < local.position)
                     return true;
+        return false;
+    }
+
+    inline bool UsesGeneratedLocalBeforeDeclared(const std::string &source, const std::string *original = nullptr) {
+        const auto names = FindGeneratedNames(source);
+        if (!names)
+            return false;
+        const auto originalNames = original ? FindGeneratedNames(*original) : std::nullopt;
+        for (const auto &name : names->globals) {
+            if (!originalNames) {
+                if (HasSameScopeGlobalBeforeLocal(*names, name))
+                    return true;
+            } else {
+                const bool outputForward = HasSameScopeGlobalBeforeLocal(*names, name);
+                const bool originalForward = HasSameScopeGlobalBeforeLocal(*originalNames, name);
+                if (!originalNames->globals.contains(name) || (outputForward && !originalForward))
+                    return true;
+            }
         }
         return false;
     }
 
-    // Sub-classify a forward-ref output for per-milestone attribution of the DeclarationHoister work.
-    // "NO_DECL"       ; a `vN` is used but never has a `local vN` anywhere (pure bare-assign leak).
-    // "USE_BEFORE_DECL":  a `vN` has a `local vN`, but a use precedes it (decl placed too deep/late).
-    // "PHANTOM_VARARG"; a `pairs(..., vN)`-style multret-tail arg naming an undeclared vN (separate root).
-    // Returns the dominant tag (checked in that priority). Heuristic, mirrors scratchpad classify_fwd2.
-    inline std::string ClassifyForwardRef(const std::string &source) {
-        const auto lines = Lines(source);
-        const std::regex declRe(R"(\blocal\s+(v\d+)\b)");
-        const std::regex varargArgRe(R"(\.\.\.\s*,\s*(v\d+))");
-        std::map<std::string, size_t> firstDecl, firstUse;
-        for (size_t i = 0; i < lines.size(); ++i) {
-            for (auto it = std::sregex_iterator(lines[i].begin(), lines[i].end(), declRe); it != std::sregex_iterator(); ++it)
-                if (!firstDecl.count((*it)[1]))
-                    firstDecl[(*it)[1]] = i;
+    inline std::string ClassifyForwardRef(const std::string &source, const std::string *original = nullptr) {
+        const auto names = FindGeneratedNames(source);
+        if (!names)
+            return "OTHER";
+        const auto originalNames = original ? FindGeneratedNames(*original) : std::nullopt;
+        for (const auto &name : names->globals) {
+            const bool outputForward = HasSameScopeGlobalBeforeLocal(*names, name);
+            const bool originalForward = originalNames && HasSameScopeGlobalBeforeLocal(*originalNames, name);
+            if (outputForward && !originalForward)
+                return "USE_BEFORE_DECL";
+            if (!names->locals.contains(name) || (originalNames && !originalNames->globals.contains(name)))
+                return "NO_DECL";
         }
-        // phantom-vararg: an undeclared vN appearing as a `..., vN` trailing call arg
-        for (const auto &ln : lines)
-            for (auto it = std::sregex_iterator(ln.begin(), ln.end(), varargArgRe); it != std::sregex_iterator(); ++it)
-                if (!firstDecl.count((*it)[1]))
-                    return "PHANTOM_VARARG";
-        // collect first use of every vN (any token), then compare against its decl
-        const std::regex vnRe(R"(\b(v\d+)\b)");
-        for (size_t i = 0; i < lines.size(); ++i)
-            for (auto it = std::sregex_iterator(lines[i].begin(), lines[i].end(), vnRe); it != std::sregex_iterator(); ++it) {
-                const std::string n = (*it)[1];
-                if (!firstUse.count(n))
-                    firstUse[n] = i;
-            }
-        bool anyUseBeforeDecl = false, anyNoDecl = false;
-        for (const auto &[n, useIdx] : firstUse) {
-            const auto d = firstDecl.find(n);
-            if (d == firstDecl.end())
-                anyNoDecl = true;
-            else if (useIdx < d->second)
-                anyUseBeforeDecl = true;
-        }
-        if (anyNoDecl)
-            return "NO_DECL";
-        if (anyUseBeforeDecl)
-            return "USE_BEFORE_DECL";
         return "OTHER";
     }
 

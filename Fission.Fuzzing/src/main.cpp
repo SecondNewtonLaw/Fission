@@ -489,6 +489,8 @@ int main(int argc, char **argv) {
                     std::string recompiled;
                     if (!fuzz::LuauCompiles(result.decompilationOutput, &recompiled)) {
                         line = std::format("RECOMPILE\t{:016x}\t{}\n", hash, path.string());
+                    } else if (fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput)) {
+                        line = std::format("FORWARD_REF\t{:016x}\t{}\n", hash, path.string());
                     } else {
                         Fission::RobloxClientDecoder robloxDecoder{};
                         Fission::InstructionDecoder vanillaDecoder{};
@@ -1011,12 +1013,12 @@ int main(int argc, char **argv) {
                   : v.kind == fuzz::SemVerdict::Kind::Diverge ? ":diverge"
                                                               : ":unchecked")]++;
 
-            if (fuzz::UsesGeneratedLocalBeforeDeclared(dec.output)) {
+            if (fuzz::UsesGeneratedLocalBeforeDeclared(dec.output, &source)) {
                 // Name matching can flag unrelated scopes; the VM verdict determines divergence.
                 const std::string b = irSame ? "FORWARDREF_IR_STABLE" : "FORWARDREF_IR_DIVERGE";
                 c.buckets[b]++;
                 if (!irSame)
-                    c.buckets["  fwd:" + fuzz::ClassifyForwardRef(dec.output)]++; // per-shape attribution
+                    c.buckets["  fwd:" + fuzz::ClassifyForwardRef(dec.output, &source)]++;
                 const char *semKind = v.kind == fuzz::SemVerdict::Kind::Match ? "MATCH" : v.kind == fuzz::SemVerdict::Kind::Diverge ? "DIVERGE" : "UNCHECKED";
                 c.buckets[std::string("  fwd-sem:") + semKind]++;
                 if (v.kind == fuzz::SemVerdict::Kind::Diverge)
