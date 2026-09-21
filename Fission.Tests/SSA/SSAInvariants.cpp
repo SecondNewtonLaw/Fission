@@ -456,3 +456,60 @@ TEST_CASE("SSA: broad IR opcode coverage is sound", "[SSA][Invariant][Coverage]"
     // boolean materialization / and-or chains
     CheckSSA("local function f(a, b, c) return a and b or c, a or b and c end return f");
 }
+
+TEST_CASE("SSA: FASTCALL2 and CAPTURE access modes are explicit", "[SSA][Invariant][Access]") {
+    LiftedInstruction fastcall{LiftedOperation::FASTCALL2, 0};
+    fastcall.operands.resize(4);
+    fastcall.operands[0].type = LiftedOperandType::ImmediateInteger;
+    fastcall.operands[1].type = LiftedOperandType::Register;
+    fastcall.operands[2].type = LiftedOperandType::ImmediateInteger;
+    fastcall.operands[3].type = LiftedOperandType::Register;
+    CHECK(SSABuilder::GetRegisterAccess(fastcall, 1) == AccessType::Read);
+    CHECK(SSABuilder::GetRegisterAccess(fastcall, 3) == AccessType::Read);
+
+    LiftedInstruction capture{LiftedOperation::CAPTURE, 0};
+    capture.operands.resize(2);
+    capture.operands[0].type = LiftedOperandType::ImmediateInteger;
+    capture.operands[1].type = LiftedOperandType::Register;
+    for (int mode = 0; mode <= 1; ++mode) {
+        capture.operands[0].value.imm.n = mode;
+        CHECK(SSABuilder::GetRegisterAccess(capture, 1) == AccessType::Read);
+    }
+    capture.operands[0].value.imm.n = 2;
+    CHECK(SSABuilder::GetRegisterAccess(capture, 1) == AccessType::NoAccess);
+}
+
+TEST_CASE("CFG: coincident branch targets create one edge", "[SSA][Invariant][CFG]") {
+    const auto reg = [](uint8_t value) {
+        LiftedOperand operand{};
+        operand.type = LiftedOperandType::Register;
+        operand.value.reg = value;
+        return operand;
+    };
+    const auto imm = [](int32_t value) {
+        LiftedOperand operand{};
+        operand.type = LiftedOperandType::ImmediateInteger;
+        operand.value.imm.n = value;
+        return operand;
+    };
+    LiftedFunction lifted{};
+    lifted.instructions = {
+        {LiftedOperation::LOAD, 0, {reg(0), imm(1)}},
+        {LiftedOperation::JUMPIF, 1, {reg(0), imm(0)}},
+        {LiftedOperation::LOAD, 2, {reg(1), imm(7)}},
+        {LiftedOperation::RETURN, 3, {reg(1), imm(2)}},
+    };
+    ControlFlowAnalyzer cfa{};
+    auto analyzed = cfa.DetermineBasicBlocks(&lifted);
+
+    bool sawBranch = false;
+    for (const auto &block : analyzed.basicBlocks) {
+        if (block.lpTail && block.lpTail->operation == LiftedOperation::JUMPIF) {
+            sawBranch = true;
+            CHECK(block.successors.size() == 1);
+        }
+        CHECK(std::set<uint32_t>(block.successors.begin(), block.successors.end()).size() == block.successors.size());
+        CHECK(std::set<uint32_t>(block.predecessors.begin(), block.predecessors.end()).size() == block.predecessors.size());
+    }
+    REQUIRE(sawBranch);
+}

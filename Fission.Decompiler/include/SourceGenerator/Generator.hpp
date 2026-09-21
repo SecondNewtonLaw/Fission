@@ -8,6 +8,7 @@
 #include "AbstractSyntaxTree/Visitor.hpp"
 #include "SafetyGuard.hpp"
 
+#include <cmath>
 #include <cstdint>
 #include <format>
 #include <sstream>
@@ -276,7 +277,13 @@ class SourceGenerator : public Visitor {
         buffer << this->GetIndentation();
         if (lpNode->bExported)
             buffer << "export ";
+        if (lpNode->bOpen)
+            buffer << "open ";
         buffer << "class " << lpNode->className;
+        if (lpNode->superclass) {
+            buffer << " extends ";
+            EmitPrefix(lpNode->superclass);
+        }
         this->NextLine();
 
         this->IncreaseIndentation();
@@ -696,7 +703,12 @@ class SourceGenerator : public Visitor {
     void Visit(NumberLiteralNode *lpNode) override {
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        buffer << std::format("{}", lpNode->value);
+        if (std::isnan(lpNode->value))
+            buffer << "(0 / 0)";
+        else if (std::isinf(lpNode->value))
+            buffer << (std::signbit(lpNode->value) ? "(-1 / 0)" : "(1 / 0)");
+        else
+            buffer << std::format("{}", lpNode->value);
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }

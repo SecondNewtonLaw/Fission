@@ -15,7 +15,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         return std::nullopt;
     }
 
-    if (result.bytecodeVersion < LBC_VERSION_MIN || result.bytecodeVersion > LBC_VERSION_MAX)
+    if ((result.bytecodeVersion < LBC_VERSION_MIN || result.bytecodeVersion > LBC_VERSION_MAX) && result.bytecodeVersion != LBC_VERSION_CLASSES)
         return std::nullopt; // deserializer does not support this bytecode version.
 
     if (result.bytecodeVersion >= 4) {

@@ -217,6 +217,40 @@ namespace {
         return bb.getBytecode();
     }
 
+    std::string BuildNewClassBytecode() {
+        EnableLuauFFlagsOnce();
+        Luau::FValue<bool> *classesFlag = nullptr;
+        for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+            if (std::strcmp(flag->name, "DebugLuauUserDefinedClasses") == 0)
+                classesFlag = flag;
+        REQUIRE(classesFlag != nullptr);
+        const bool previousClassesFlag = classesFlag->value;
+        classesFlag->value = true;
+        Luau::CompileOptions opts{};
+        opts.optimizationLevel = 1;
+        opts.debugLevel = 2;
+        const std::string bytecode = Luau::compile(
+            R"(
+open class Animal
+    public species: string
+    function live(self)
+        return "I am alive"
+    end
+end
+
+export class Cat extends Animal
+    public breed: string
+    function describe(self)
+        return self.breed
+    end
+end
+)",
+            opts
+        );
+        classesFlag->value = previousClassesFlag;
+        return bytecode;
+    }
+
     // Decompile identity-decoder bytecode with AST capture on, returning the whole result (astJson populated).
     DecompilationResult DecompileVanillaWithCaptures(const std::string &bytecode) {
         Decompiler decompiler{};
@@ -330,6 +364,18 @@ TEST_CASE("Class: method receiver is `self` in both the signature and the body",
     // no residual raw-register receiver leaked into the body (the desync symptom).
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(\barg0\b)")));
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(\bv0\b)")));
+}
+
+TEST_CASE("Class: NEWCLASS opcode decompiles compiler-emitted classes", "[Decompiler][Class]") {
+    const auto out = DecompileVanillaOrFail(BuildNewClassBytecode());
+    INFO("decompile:\n" << out);
+    CHECK(ContainsRegex(out, std::regex(R"(open\s+class\s+Animal)")));
+    CHECK(ContainsRegex(out, std::regex(R"(class\s+Cat\s+extends\s+Animal)")));
+    CHECK(ContainsRegex(out, std::regex(R"(public\s+species)")));
+    CHECK(ContainsRegex(out, std::regex(R"(public\s+breed)")));
+    CHECK(ContainsRegex(out, std::regex(R"(function\s+live\s*\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(function\s+describe\s*\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(export\s+class\s+Cat\s+extends\s+Animal)")));
 }
 
 // The reconstructed class must serialize through the AST-JSON path: a ClassDeclaration node with its name,

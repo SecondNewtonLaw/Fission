@@ -90,6 +90,7 @@ enum class LiftedOperation : uint32_t {
     NEWCLASSMEMBER,
     CALLFB,
     CMPPROTO,
+    NEWCLASS,
 
     PHI // phi node on SSA.
 };

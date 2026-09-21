@@ -7,6 +7,7 @@
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
+#include "Rewriters/DeclarationHoister.hpp"
 #include "Rewriters/IfChainSimplifier.hpp"
 #include "Rewriters/LoopVariableRenamer.hpp"
 #include <catch2/catch_test_macros.hpp>
@@ -134,6 +135,21 @@ namespace {
         REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
         CHECK(optimized.status == original.status);
         CHECK(optimized.trace == original.trace);
+    }
+
+    void CheckSameTraceWithPrelude(const std::string &source, const std::string &preludeSource) {
+        Luau::CompileOptions opts{};
+        opts.optimizationLevel = 1;
+        opts.debugLevel = 2;
+        const auto output = DecompileOrFail(source, opts.optimizationLevel);
+        const auto prelude = Luau::compile(preludeSource, opts);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(source, opts), prelude);
+        const auto decompiled = fuzz::RunLuauTrace(Luau::compile(output, opts), prelude);
+        INFO("decompiled output:\n" << output);
+        INFO("original: " << original.trace << " decompiled: " << decompiled.trace);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+        CHECK(decompiled.status == original.status);
+        CHECK(decompiled.trace == original.trace);
     }
 
     size_t CountOccurrences(const std::string &haystack, const std::string &needle) {
@@ -1052,6 +1068,180 @@ TEST_CASE("Lift: CMPPROTO is elided without crashing or corrupting surrounding c
     CHECK(CompilesOk(out));           // the output is valid Luau
 }
 
+TEST_CASE("Lift: userdata field opcodes preserve source semantics", "[Decompiler][Userdata]") {
+    EnableLuauFFlagsOnce();
+    const std::string field = "value";
+    const auto fieldRef = Luau::BytecodeBuilder::StringRef{field.data(), field.size()};
+    const auto hash = static_cast<uint8_t>(Luau::BytecodeBuilder::getStringHash(fieldRef));
+
+    SECTION("field read") {
+        Luau::BytecodeBuilder bb{};
+        const uint32_t main = bb.beginFunction(1, false);
+        const int32_t key = bb.addConstantString(fieldRef);
+        bb.emitABC(LOP_GETUDATAKS, 1, 0, hash);
+        bb.emitAux(static_cast<uint32_t>(key));
+        bb.emitABC(LOP_RETURN, 1, 2, 0);
+        bb.endFunction(2, 0);
+        bb.setMainFunction(main);
+        bb.finalize();
+
+        const auto out = DecompileVanillaOrFail(bb.getBytecode());
+        INFO("decompile:\n" << out);
+        CHECK(Contains(out, "arg0.value"));
+        CHECK(CompilesOk(out));
+    }
+
+    SECTION("field write") {
+        Luau::BytecodeBuilder bb{};
+        const uint32_t main = bb.beginFunction(2, false);
+        const int32_t key = bb.addConstantString(fieldRef);
+        bb.emitABC(LOP_SETUDATAKS, 1, 0, hash);
+        bb.emitAux(static_cast<uint32_t>(key));
+        bb.emitABC(LOP_RETURN, 0, 1, 0);
+        bb.endFunction(2, 0);
+        bb.setMainFunction(main);
+        bb.finalize();
+
+        const auto out = DecompileVanillaOrFail(bb.getBytecode());
+        INFO("decompile:\n" << out);
+        CHECK(Contains(out, "arg0.value = arg1"));
+        CHECK(CompilesOk(out));
+    }
+
+    SECTION("method call") {
+        Luau::BytecodeBuilder bb{};
+        const uint32_t main = bb.beginFunction(1, false);
+        const int32_t key = bb.addConstantString(fieldRef);
+        bb.emitABC(LOP_NAMECALLUDATA, 1, 0, hash);
+        bb.emitAux(static_cast<uint32_t>(key));
+        bb.emitABC(LOP_CALL, 1, 2, 2);
+        bb.emitABC(LOP_RETURN, 1, 2, 0);
+        bb.endFunction(3, 0);
+        bb.setMainFunction(main);
+        bb.finalize();
+
+        const auto out = DecompileVanillaOrFail(bb.getBytecode());
+        INFO("decompile:\n" << out);
+        CHECK(Contains(out, "arg0:value()"));
+        CHECK(CompilesOk(out));
+    }
+}
+
+TEST_CASE("Lift: nested local does not capture later global read", "[Decompiler][DeclarationHoister][Semantic]") {
+    CheckSameTraceWithPrelude(
+        R"LUA(
+local function read()
+    do
+        local v0 = 7
+        print(v0)
+    end
+    return v0
+end
+return read()
+)LUA",
+        "v0 = 99"
+    );
+}
+
+TEST_CASE("Lift: loop binding does not capture later global read", "[Decompiler][DeclarationHoister][Semantic]") {
+    CheckSameTraceWithPrelude(
+        R"LUA(
+local function read()
+    for v0 = 1, 2 do
+        print(v0)
+        v0 += 1
+    end
+    return v0
+end
+return read()
+)LUA",
+        "v0 = 99"
+    );
+}
+
+TEST_CASE("DeclarationHoister: loop binding only covers its body", "[Decompiler][DeclarationHoister][Rewriter]") {
+    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+    const auto makeLoop = [&] {
+        auto loop = std::make_shared<ForNumericNode>();
+        loop->loopVariable = identifier("v0");
+        loop->startVariable = std::make_shared<NumberLiteralNode>(1);
+        loop->maxIncreased = std::make_shared<NumberLiteralNode>(2);
+        loop->increaseBy = std::make_shared<NumberLiteralNode>(1);
+        loop->lpLoopBody = std::make_shared<BlockStatementNode>();
+        loop->lpLoopBody->body.push_back(
+            std::make_shared<AssignmentStatementNode>(identifier("v0"), std::make_shared<NumberLiteralNode>(3))
+        );
+        return loop;
+    };
+
+    SECTION("later read remains global") {
+        auto loop = makeLoop();
+        std::vector<std::shared_ptr<Statement>> statements{
+            loop, std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v0")})
+        };
+
+        DeclarationHoister{}.Run(statements);
+
+        CHECK(statements.size() == 2);
+        CHECK(statements.front() == loop);
+    }
+
+    SECTION("later orphan assignment still gets a local") {
+        auto loop = makeLoop();
+        std::vector<std::shared_ptr<Statement>> statements{
+            loop, std::make_shared<AssignmentStatementNode>(identifier("v0"), std::make_shared<NumberLiteralNode>(4)),
+            std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v0")})
+        };
+
+        DeclarationHoister{}.Run(statements);
+
+        REQUIRE(statements.size() == 4);
+        const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statements.front());
+        REQUIRE(declaration);
+        const auto declarationIdentifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(declaration->identifier);
+        REQUIRE(declarationIdentifier);
+        CHECK(declarationIdentifier->identifier->name == "v0");
+        CHECK(statements[1] == loop);
+    }
+}
+
+TEST_CASE("DeclarationHoister: disjoint locals cover their own uses", "[Decompiler][DeclarationHoister][Rewriter]") {
+    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+    auto branch = std::make_shared<IfStatementNode>();
+    branch->condition = identifier("flag");
+    branch->thenBranch = std::make_shared<BlockStatementNode>();
+    branch->thenBranch->body = {
+        std::make_shared<VariableDeclarationNode>(identifier("v1"), std::make_shared<NumberLiteralNode>(1)),
+        std::make_shared<ExpressionStatementNode>(identifier("v1"))
+    };
+    auto laterDeclaration = std::make_shared<VariableDeclarationNode>(identifier("v1"), std::make_shared<NumberLiteralNode>(2));
+    std::vector<std::shared_ptr<Statement>> statements{
+        branch, laterDeclaration, std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v1")})
+    };
+
+    DeclarationHoister{}.Run(statements);
+
+    CHECK(statements.size() == 3);
+    CHECK(statements.front() == branch);
+    CHECK(statements[1] == laterDeclaration);
+}
+
+TEST_CASE("Lift: local initializer reads outer binding", "[Decompiler][DeclarationHoister][Semantic]") {
+    CheckSameTraceWithPrelude(
+        R"LUA(
+local function read()
+    do
+        local v0 = v0 + 1
+        print(v0)
+    end
+    return v0
+end
+return read()
+)LUA",
+        "v0 = 41"
+    );
+}
+
 // Inline anonymous closures
 
 TEST_CASE("Lift: single-use closure passed as call argument is inlined", "[Decompiler][InlineAnon]") {
@@ -1523,6 +1713,34 @@ TEST_CASE("Lift: parallel swap preserves saved value", "[Decompiler][Assignment]
     };
     checkBehavior(pairSwap, "return: 6\t5\n");
     checkBehavior("local first, second = 5, 6\nfirst, second = second, first\nreturn first, second\n", "return: 6\t5\n");
+}
+
+TEST_CASE("Lift: generated-name shadowing preserves global bindings", "[Decompiler][DeclarationHoister][Semantic]") {
+    Luau::CompileOptions opts{};
+    opts.optimizationLevel = 1;
+    opts.debugLevel = 2;
+    const auto check = [&](const std::string &source, const std::string &preludeSource, const std::string &localName, const std::string &globalName,
+                           const std::string &expected) {
+        const auto output = DecompileOrFail(source, opts.optimizationLevel);
+        INFO("decompiled output:\n" << output);
+        CHECK(std::regex_search(output, std::regex("local\\s+" + localName + R"(\b)")));
+        CHECK_FALSE(std::regex_search(output, std::regex("local\\s+" + globalName + R"(\b)")));
+
+        const auto prelude = Luau::compile(preludeSource, opts);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(source, opts), prelude);
+        const auto decompiled = fuzz::RunLuauTrace(Luau::compile(output, opts), prelude);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+        CHECK(original.trace == expected);
+        CHECK(decompiled.status == original.status);
+        CHECK(decompiled.trace == original.trace);
+    };
+
+    check("local x if flag then x = 1 else x = 2 end sink = x return v0, x", "v0 = 9 flag = true", "_v0", "v0", "return: 9\t1\n");
+    check(
+        "local outer = { keep } local function f() local x if flag then x = 1 else x = 2 end sink = x return v0_0, x end "
+        "sinkOuter = outer local a, b = f() return a, b, outer[1]",
+        "v0_0 = 9 flag = true keep = 77", "_v0_0", "v0_0", "return: 9\t1\t77\n"
+    );
 }
 
 TEST_CASE("Lift: loop variable naming preserves outer header bindings", "[Decompiler][LoopBinding]") {

@@ -559,6 +559,15 @@ TEST_CASE("Regress: reused-register nested table keeps a sound declaration order
     CHECK(LuauCompiles(out));
 }
 
+TEST_CASE("Regress: escaping reused local is not hidden in a synthetic do block", "[Decompiler][Regression][Scope]") {
+    DecompileResult code{};
+    const std::string out = Decompile("local v0 = next[true] local v0 = v0:set(\"key\", false) return v0.field", code);
+    INFO(out);
+    REQUIRE(code == DecompileResult::Success);
+    CHECK(LuauCompiles(out));
+    CHECK_FALSE(std::regex_search(out, std::regex(R"(\bdo\s*\n\s*local\s+v0\b)")));
+}
+
 // Fuzz regressions
 
 TEST_CASE("Regress: double unary minus does not collapse into a comment", "[Decompiler][Regression][Fuzz]") {

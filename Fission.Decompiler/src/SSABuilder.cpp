@@ -20,7 +20,8 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
                     LiftedOperation::JUMPIFNOT,      LiftedOperation::JUMPIFEQ,    LiftedOperation::JUMPIFLE,      LiftedOperation::JUMPIFLT,
                     LiftedOperation::JUMPIFNOTEQ,    LiftedOperation::JUMPIFNOTLE, LiftedOperation::JUMPIFNOTLT,   LiftedOperation::JUMPXEQK,
                     LiftedOperation::CAPTURE,        LiftedOperation::FASTCALL,    LiftedOperation::FASTPCALL,     LiftedOperation::FASTCALL1,
-                    LiftedOperation::FASTCALL2K,     LiftedOperation::FORGLOOP,    LiftedOperation::FORGPREP_NEXT, LiftedOperation::FORGPREP,
+                    LiftedOperation::FASTCALL2,      LiftedOperation::FASTCALL2K,  LiftedOperation::FORGLOOP,      LiftedOperation::FORGPREP_NEXT,
+                    LiftedOperation::FORGPREP,
                     LiftedOperation::FORGPREP_INEXT, LiftedOperation::FORNPREP,    LiftedOperation::FASTCALL3,     LiftedOperation::SETUDATAKS,
                     LiftedOperation::NEWCLASSMEMBER, LiftedOperation::CMPPROTO}) {
         set(op, AccessType::Read);
@@ -35,7 +36,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
           LiftedOperation::ANDK,       LiftedOperation::ORK,          LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
           LiftedOperation::NEWTABLE,   LiftedOperation::DUPTABLE,     LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
           LiftedOperation::CONCAT,     LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP,
-          LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA}) {
+          LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA, LiftedOperation::NEWCLASS}) {
         set(op, AccessType::Write);
     }
 
@@ -48,6 +49,9 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
 }();
 
 AccessType SSABuilder::GetRegisterAccess(const LiftedInstruction &op, size_t operandIndex) {
+    if (op.operation == LiftedOperation::CAPTURE && operandIndex == 1 && op.operands.size() > 1 && op.operands[0].value.imm.n == 2)
+        return AccessType::NoAccess;
+
     const AccessType baseType = kOpcodeAccessTable[static_cast<size_t>(op.operation)];
 
     if (baseType == AccessType::Write) {
@@ -267,11 +271,15 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 int effectiveCount = (count == -1) ? VariadicTailCount(*func, *inst, base) : count;
                 for (int k = 0; k < effectiveCount; ++k)
                     markRead(base + k);
-            } else if (inst->operation == LiftedOperation::SETLIST && inst->operands.size() > 2) { // TODO: Handle vararg SETLIST properly.
+            } else if (inst->operation == LiftedOperation::SETLIST && inst->operands.size() > 2) {
                 int base = inst->operands[1].value.reg;
                 int count = inst->operands[2].value.imm.n;
-                int effectiveCount = (count > 0) ? (count - 1) : 1; // assume base is read, as we may use it.
+                int effectiveCount = (count == 0) ? VariadicTailCount(*func, *inst, base) : (count - 1);
                 for (int k = 0; k < effectiveCount; ++k)
+                    markRead(base + k);
+            } else if (inst->operation == LiftedOperation::FORNPREP && !inst->operands.empty()) {
+                const int base = inst->operands[0].value.reg;
+                for (int k = 0; k < 3; ++k)
                     markRead(base + k);
             }
 

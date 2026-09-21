@@ -254,7 +254,12 @@ class AstJsonSerializer : public Visitor {
         }
         methods += "]";
         Obj(lpNode, "ClassDeclaration",
-            {{"name", Quote(lpNode->className)}, {"exported", Bool(lpNode->bExported)}, {"properties", props}, {"methods", methods}});
+            {{"name", Quote(lpNode->className)},
+             {"exported", Bool(lpNode->bExported)},
+             {"open", Bool(lpNode->bOpen)},
+             {"superclass", Render(lpNode->superclass)},
+             {"properties", props},
+             {"methods", methods}});
     }
 
     void Visit(CallExpressionNode *lpNode) override {

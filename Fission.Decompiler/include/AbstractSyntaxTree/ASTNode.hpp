@@ -434,6 +434,8 @@ class FunctionDeclarationNode : public Expression {
 class ClassDeclarationNode : public Statement {
   public:
     std::string className;
+    std::shared_ptr<Expression> superclass;
+    bool bOpen = false;
     bool bExported = false;
     std::vector<std::string> propertyNames{};
     std::vector<std::shared_ptr<FunctionDeclarationNode>> methods{};

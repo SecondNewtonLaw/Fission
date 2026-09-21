@@ -4,6 +4,7 @@
 
 // Complex control-flow stress tests (deep if/elseif chains, nested loops, break/continue).
 
+#include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
@@ -362,11 +363,8 @@ TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Loop]
     CHECK(CountWord(out, "break") == 1);
 }
 
-// repeat-until with an if/break inside the body. A `repeat ... until` with a
-// mid-body break is rendered as the equivalent `while true do ... if c break end`;
-// the `break` must keep its position so `step` does not run on that iteration.
 TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const std::string source = R"(
         local function f()
             local x = 0
             repeat
@@ -378,15 +376,25 @@ TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow]
             until x >= 10
             return x
         end
-        return f
-    )");
+        return f()
+    )";
+    const auto out = DecompileOrFail(source);
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(while|repeat)")));
     CHECK(CountSubstr(out, "step(") == 1);
-    // The `x == 5` break must appear BEFORE `step`, so step is skipped on break.
-    CHECK(ContainsRegex(out, std::regex(R"(==\s*5[\s\S]*break[\s\S]*step\()")));
-    // Both the mid-break and the loop's exit test survive as breaks.
-    CHECK(CountWord(out, "break") == 2);
+    const bool emittedRepeat = ContainsRegex(
+        out,
+        std::regex(R"(repeat[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*until\s+\(10\s*<=\s*v\d+\))")
+    );
+    const bool emittedWhile = ContainsRegex(
+        out,
+        std::regex(R"(while\s+true[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*if\s+10\s*<=\s*v\d+\s+then\s+break)")
+    );
+    CHECK((emittedRepeat || emittedWhile));
+    CHECK(CountWord(out, "break") == (emittedRepeat ? 1 : 2));
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("step = function() end")});
+    INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
+    CHECK(verdict.original.trace == "return: 5\n");
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
 }
 
 // while containing a nested repeat-until.

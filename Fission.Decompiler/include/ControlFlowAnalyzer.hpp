@@ -189,6 +189,7 @@ struct AnalyzedFunction {
         case LiftedOperation::SETUPVAL:
         case LiftedOperation::NEWCLOSURE:     // captures upvalues (side effect-ish)
         case LiftedOperation::DUPCLOSURE:     // may create and capture.
+        case LiftedOperation::NEWCLASS:       // WIP class reification writes the target register.
         case LiftedOperation::NEWCLASSMEMBER: // V10. Mutates the class register.
             return true;
         default:
@@ -220,13 +221,20 @@ struct AnalyzedFunction {
     // Maps suffixed names to their original spelling for diagnostics.
     std::unordered_map<std::string, std::string> disambiguatedNames;
 
-    // Auto-generated register names use `v` followed by digits.
     static bool IsAutoNameShaped(const std::string &s) {
-        if (s.size() < 2 || s[0] != 'v')
+        size_t i = 0;
+        while (i < s.size() && s[i] == '_')
+            ++i;
+        if (i >= s.size() || s[i++] != 'v' || i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i])))
             return false;
-        for (size_t i = 1; i < s.size(); ++i)
-            if (!std::isdigit(static_cast<unsigned char>(s[i])))
+        while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+            ++i;
+        while (i < s.size()) {
+            if (s[i++] != '_' || i >= s.size() || !std::isdigit(static_cast<unsigned char>(s[i])))
                 return false;
+            while (i < s.size() && std::isdigit(static_cast<unsigned char>(s[i])))
+                ++i;
+        }
         return true;
     }
 
@@ -284,15 +292,15 @@ struct AnalyzedFunction {
             return variableNames.at(ref);
 
         std::string base = std::format("v{}", reg);
-        // Prefix auto-names that would shadow same-shaped globals after recompilation.
-        if (!globalAutoNameCollisions.empty() && globalAutoNameCollisions.contains(base)) {
-            std::string prefixed = "_" + base;
-            while (globalAutoNameCollisions.contains(prefixed))
-                prefixed = "_" + prefixed;
-            prefixedLocalRenames[prefixed] = base;
-            return DisambiguateOwnName(prefixed);
+        std::string name = DisambiguateOwnName(base);
+        if (globalAutoNameCollisions.contains(name)) {
+            const std::string collided = name;
+            do {
+                name = DisambiguateOwnName("_" + name);
+            } while (globalAutoNameCollisions.contains(name));
+            prefixedLocalRenames[name] = collided;
         }
-        return DisambiguateOwnName(base);
+        return name;
     }
 
     void SetUpvalueName(int32_t index, const std::string &name) { upvalueNames[index] = name; }

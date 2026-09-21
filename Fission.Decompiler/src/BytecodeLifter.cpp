@@ -1366,7 +1366,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
 
         case LOP_GETUDATAKS: {
             // Mirror of GETTABLEKS for atom-based userdata field access. AUX low 16 bits = constant string index.
-            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETUDATAKS);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::GETTABLEKS);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -1390,7 +1390,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_SETUDATAKS: {
             // Mirror of SETTABLEKS for atom-based userdata field write. AUX low 16 bits = constant string index.
-            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETUDATAKS);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::SETTABLEKS);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -1414,7 +1414,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         }
         case LOP_NAMECALLUDATA: {
             // Mirror of NAMECALL for atom-based userdata method dispatch.
-            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NAMECALLUDATA);
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NAMECALL);
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
@@ -1455,6 +1455,35 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 finalComment << "WARNING: NEWCLASSMEMBER with non-string member name.";
             }
             instr.instructionRemarks = finalComment.str();
+            liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
+                "INFO: padding due to the original instruction requiring an auxiliary.";
+            break;
+        }
+        case LOP_NEWCLASS: {
+            // V100: A = class, B = superclass or 0xFF, C bit 0 = open, AUX = class shape.
+            auto &instr = liftedFunction.instructions.emplace_back(LiftedOperation::NEWCLASS);
+            instr.operands.resize(4);
+            instr.operands[0].type = LiftedOperandType::Register;
+            instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
+            const auto super = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            if (super == 0xFF) {
+                instr.operands[1].type = LiftedOperandType::ImmediateNil;
+            } else {
+                instr.operands[1].type = LiftedOperandType::Register;
+                instr.operands[1].value.reg = super;
+            }
+            instr.operands[2].type = LiftedOperandType::ImmediateBool;
+            instr.operands[2].value.imm.b = (instruction.GetABCOperand(LuauInstruction::LuauOperand::C) & 1u) != 0;
+            instr.operands[3].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[3].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+
+            const auto &shape = function->constants.at(instr.operands[3].value.imm.k);
+            if (!shape.IsClassShape())
+                throw Fission::DecompilerError("malformed NEWCLASS: AUX is not a class-shape constant");
+            instr.instructionRemarks = std::format(
+                "INFO: Reify class '{}'{}.", std::get<LuauClassShape>(shape.constantData).className,
+                instr.operands[2].value.imm.b ? " (open)" : ""
+            );
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
@@ -1834,6 +1863,8 @@ std::string_view OperationToString(LiftedOperation operation) {
         return "CALLFB";
     case LiftedOperation::CMPPROTO:
         return "CMPPROTO";
+    case LiftedOperation::NEWCLASS:
+        return "NEWCLASS";
     case LiftedOperation::PHI:
         return "PHI";
     default:

@@ -252,8 +252,12 @@ class DeadLocalEliminator : public ASTRewriter {
             return MentionsExpression(fg->generator, name) || MentionsExpression(fg->state, name) || MentionsExpression(fg->index, name) ||
                    MentionsBlock(fg->body, name);
         }
-        if (auto fd = std::dynamic_pointer_cast<FunctionDeclarationNode>(s))
+        if (auto fd = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
+            const size_t receiverEnd = fd->functionName.find_first_of(".:");
+            if (receiverEnd != std::string::npos && fd->functionName.substr(0, receiverEnd) == name)
+                return true;
             return fd->lpFunctionBody && MentionsBlock(fd->lpFunctionBody, name);
+        }
         if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s))
             return MentionsBlock(blk, name);
         if (auto e = std::dynamic_pointer_cast<Expression>(s))

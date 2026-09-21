@@ -203,9 +203,12 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
             int32_t targetBlockId = GetBlockIdAtInstruction(targetInst, leaderToBlockId);
             ASSERT(targetBlockId != -1, "bad parsing or invalid bytecode");
 
-            currentBlock.successors.push_back(targetBlockId);
+            if (std::ranges::find(currentBlock.successors, targetBlockId) == currentBlock.successors.end())
+                currentBlock.successors.push_back(targetBlockId);
 
-            blocks[targetBlockId].predecessors.push_back(currentBlock.dwBlockId);
+            auto &predecessors = blocks[targetBlockId].predecessors;
+            if (std::ranges::find(predecessors, currentBlock.dwBlockId) == predecessors.end())
+                predecessors.push_back(currentBlock.dwBlockId);
         }
     }
     if (!blocks.empty() && blocks.back().bTerminator == BlockTerminator::Fallthrough) {
@@ -509,6 +512,30 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return false;
     };
 
+    auto reachesBefore = [&](uint32_t start, uint32_t target, uint32_t stop) {
+        if (start >= blocks.size() || target >= blocks.size())
+            return false;
+        std::vector<bool> seen(blocks.size());
+        std::queue<uint32_t> pending;
+        pending.push(start);
+        seen[start] = true;
+        while (!pending.empty()) {
+            Fission::CheckDecompileDeadline();
+            const uint32_t current = pending.front();
+            pending.pop();
+            if (current == target)
+                return true;
+            if (current == stop)
+                continue;
+            for (const uint32_t next : blocks[current].successors)
+                if (next < blocks.size() && !seen[next]) {
+                    seen[next] = true;
+                    pending.push(next);
+                }
+        }
+        return false;
+    };
+
     // A break can bypass an otherwise predecessor-free back-edge in `while true`.
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Continue)
@@ -551,9 +578,18 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         header.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
         blk.bType = BlockType::LoopLatch;
 
-        if (header.ifStatementFalse.has_value()) {
-            blk.loopExit = header.ifStatementFalse.value();
-            header.loopExit = header.ifStatementFalse.value();
+        std::optional<uint32_t> loopExit;
+        for (const uint32_t succ : header.successors) {
+            if (!reachesBefore(succ, blk.dwBlockId, header.dwBlockId)) {
+                loopExit = succ;
+                break;
+            }
+        }
+        if (!loopExit.has_value() && header.ifStatementFalse.has_value())
+            loopExit = header.ifStatementFalse.value();
+        if (loopExit.has_value()) {
+            blk.loopExit = loopExit.value();
+            header.loopExit = loopExit.value();
         }
     }
 
@@ -717,6 +753,51 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
                 auto targetInstruction = block.lpTail + GetJumpOffset(block.lpTail);
                 if (block.lpTail->operation == LiftedOperation::JUMP) {
+                    BasicBlock *conditionalLatch = nullptr;
+                    uint32_t conditionalExit = 0;
+                    bool cleanBridge = true;
+                    for (auto *instruction = block.lpHead; instruction && instruction < block.lpTail; ++instruction)
+                        if (instruction->operation != LiftedOperation::NOP && instruction->operation != LiftedOperation::PHI) {
+                            cleanBridge = false;
+                            break;
+                        }
+                    for (const uint32_t predId : block.predecessors) {
+                        if (!cleanBridge || block.predecessors.size() != 1)
+                            break;
+                        if (predId >= blocks.size())
+                            continue;
+                        auto &pred = blocks[predId];
+                        if (pred.bTerminator != BlockTerminator::Conditional || pred.successors.size() != 2 || pred.loopLatch.has_value() ||
+                            !dominates(successor.dwBlockId, predId))
+                            continue;
+                        const auto back = std::find(pred.successors.begin(), pred.successors.end(), block.dwBlockId);
+                        if (back == pred.successors.end())
+                            continue;
+                        const uint32_t other = pred.successors[0] == block.dwBlockId ? pred.successors[1] : pred.successors[0];
+                        if (reachesBefore(other, block.dwBlockId, successor.dwBlockId))
+                            continue;
+                        conditionalLatch = &pred;
+                        conditionalExit = other;
+                        break;
+                    }
+
+                    if (conditionalLatch) {
+                        successor.dwBlockFlags &= ~static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                        successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                        successor.loopLatch = conditionalLatch->dwBlockId;
+                        successor.loopExit = conditionalExit;
+                        conditionalLatch->bType = BlockType::LoopLatch;
+                        conditionalLatch->dwBlockFlags &= ~static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                        conditionalLatch->dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                        conditionalLatch->loopHeader = successor.dwBlockId;
+                        conditionalLatch->loopExit = conditionalExit;
+                        block.dwBlockFlags &= ~(static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
+                                                static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop));
+                        block.loopExit.reset();
+                        block.bType = BlockType::Continue;
+                        continue;
+                    }
+
                     // A conditional header that jumps straight to the latch is a repeat-until body.
                     bool isRepeatUntil = false;
                     if (successor.bTerminator == BlockTerminator::Conditional) {
@@ -810,15 +891,33 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     if ((successor.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop)
                         continue;
 
-                    if (!successor.ifStatementFalse || dominates(successor.ifStatementFalse.value(), block.dwBlockId)) {
-                        block.loopExit = successor.ifStatementTrue.value();
-                        successor.loopExit = successor.ifStatementTrue.value();
-                    } else {
-                        block.loopExit = successor.ifStatementFalse.value();
-                        successor.loopExit = successor.ifStatementFalse.value();
-                    }
+                    std::optional<uint32_t> loopExit;
+                    for (const uint32_t succId : successor.successors)
+                        if (!reachesBefore(succId, block.dwBlockId, successor.dwBlockId)) {
+                            loopExit = succId;
+                            break;
+                        }
+                    if (!loopExit.has_value())
+                        loopExit = successor.ifStatementFalse.value_or(successor.ifStatementTrue.value());
+                    block.loopExit = loopExit.value();
+                    successor.loopExit = loopExit.value();
                 }
             }
+        }
+    }
+
+    for (BasicBlock &header : blocks) {
+        if (header.bType != BlockType::LoopHeader ||
+            (header.dwBlockFlags & static_cast<uint32_t>(LoopBlockFlags::WhileLoop)) == 0 || !header.loopLatch || !header.loopExit)
+            continue;
+        if (*header.loopExit >= blocks.size() || blocks[*header.loopExit].bType != BlockType::LoopHeader)
+            continue;
+        for (const uint32_t succ : header.successors) {
+            if (succ == *header.loopExit)
+                continue;
+            header.loopExit = succ;
+            blocks[*header.loopLatch].loopExit = succ;
+            break;
         }
     }
 

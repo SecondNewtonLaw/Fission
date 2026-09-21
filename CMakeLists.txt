@@ -369,12 +369,14 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/DecompilationRoundtrip.cpp
             Fission.Tests/Decompiler/LiftingSemantics.cpp
             Fission.Tests/Decompiler/ControlFlowRegressions.cpp
+            Fission.Tests/Decompiler/ControlFlowRewriterRegressions.cpp
             Fission.Tests/Decompiler/ComplexControlFlow.cpp
             Fission.Tests/Decompiler/TypeInference.cpp
             Fission.Tests/Decompiler/IREquivalence.cpp
             Fission.Tests/Decompiler/ClassDeclarations.cpp
             Fission.Tests/Decompiler/ScopeCaptureRegressions.cpp
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
+            Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
     )

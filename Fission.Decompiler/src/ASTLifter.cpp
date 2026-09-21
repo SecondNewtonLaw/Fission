@@ -834,6 +834,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_processedInstructions.clear();
     this->m_inlineConsumedDefs.clear();
     this->m_phiConsumers.clear();
+    this->m_deferToConditionInline.clear();
     this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
     this->m_mergeCache.clear();       // keyed by this function's block ids
     this->m_valueArmDuplications = 0;
@@ -979,6 +980,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         std::ranges::sort(definitions, [](const auto &left, const auto &right) { return left.second->instructionIndex < right.second->instructionIndex; });
         for (size_t i = 0; i + 1 < definitions.size(); ++i) {
             const auto [ref, definition] = definitions[i];
+            if (definition->operation == LiftedOperation::NAMECALL || definition->operation == LiftedOperation::NAMECALLUDATA)
+                continue;
             if (analyzedFunction.ssaOverrides.contains(ref) || analyzedFunction.variableNames.contains(ref))
                 continue;
             auto current = ref;
@@ -1102,6 +1105,52 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         ast.statements = LiftControlFlow(0, InvalidBlockId, visited).Run();
         // nested blocks fold via CreateBlock; the top-level body comes straight from LiftControlFlow, so fold it too.
         FoldShortCircuitChain(ast.statements);
+
+        // `export class C` is lowered as `local t = {}; t.C = C; return table.freeze(t)`.
+        // The class declaration already carries the source-level export, so discard only this compiler scaffold.
+        std::unordered_set<std::string> exportedClasses;
+        for (const auto &statement : ast.statements)
+            if (auto classNode = std::dynamic_pointer_cast<ClassDeclarationNode>(statement); classNode && classNode->bExported)
+                exportedClasses.insert(classNode->className);
+        std::unordered_set<std::string> exportTables;
+        for (const auto &statement : ast.statements) {
+            auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statement);
+            if (!assignment)
+                continue;
+            auto member = std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left);
+            auto table = member ? std::dynamic_pointer_cast<IdentifierExpressionNode>(member->table) : nullptr;
+            auto key = member ? std::dynamic_pointer_cast<StringLiteralNode>(member->key) : nullptr;
+            auto value = std::dynamic_pointer_cast<IdentifierExpressionNode>(assignment->right);
+            if (table && table->identifier && key && value && value->identifier && exportedClasses.contains(key->value) &&
+                value->identifier->name == key->value)
+                exportTables.insert(table->identifier->name);
+        }
+        if (!exportTables.empty()) {
+            std::erase_if(ast.statements, [&](const auto &statement) {
+                if (auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statement)) {
+                    auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(declaration->identifier);
+                    auto table = std::dynamic_pointer_cast<TableLiteralNode>(declaration->value);
+                    return identifier && identifier->identifier && table && table->expressions.empty() && exportTables.contains(identifier->identifier->name);
+                }
+                if (auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statement)) {
+                    auto member = std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left);
+                    auto table = member ? std::dynamic_pointer_cast<IdentifierExpressionNode>(member->table) : nullptr;
+                    return table && table->identifier && exportTables.contains(table->identifier->name);
+                }
+                if (auto result = std::dynamic_pointer_cast<ReturnStatementNode>(statement); result && result->returnValues.size() == 1) {
+                    auto call = std::dynamic_pointer_cast<CallExpressionNode>(result->returnValues.front());
+                    auto freeze = call ? std::dynamic_pointer_cast<MemberExpressionNode>(call->callee) : nullptr;
+                    auto table = freeze ? std::dynamic_pointer_cast<IdentifierExpressionNode>(freeze->table) : nullptr;
+                    auto key = freeze ? std::dynamic_pointer_cast<StringLiteralNode>(freeze->key) : nullptr;
+                    return table && table->identifier && key && key->value == "freeze" && call->arguments.size() == 1 &&
+                           std::dynamic_pointer_cast<IdentifierExpressionNode>(call->arguments.front()) &&
+                           std::dynamic_pointer_cast<IdentifierExpressionNode>(call->arguments.front())->identifier &&
+                           (exportTables.contains(table->identifier->name) || !exportedClasses.empty());
+                }
+                return false;
+            });
+        }
+
         std::string ttinfo = "Unavailable";
 
         if (analyzedFunction.lpLiftedFunction->lpDeserialized->typeinfo.size() != 0) {
@@ -1427,6 +1476,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
         const auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
+        if (block.bType == BlockType::Return && block.predecessors.size() > 1 && currentBlockId != stopBlockId)
+            for (auto *instruction = block.lpHead; instruction && instruction <= block.lpTail; ++instruction)
+                if (instruction->operation == LiftedOperation::CALL || instruction->operation == LiftedOperation::CALLFB ||
+                    instruction->operation == LiftedOperation::NAMECALL || instruction->operation == LiftedOperation::NAMECALLUDATA)
+                    m_processedInstructions.erase(instruction->instructionIndex);
+
         // repeat-until headers are lifted inside the repeat path itself; pre-lifting here is
         // discarded there but still poisons m_definedRegisters, turning the re-lifted body decls
         // into bare (global) assignments.
@@ -1658,6 +1713,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     } else {
                         ifStmt->condition = (trueCond);
                         ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
+                        m_definedRegisters = definedBeforeBranches;
                         elseStmts = co_await LiftControlFlow(falseIdx, mergeIdx, visitedCopy);
                     }
                     if (!elseStmts.empty()) {
@@ -1758,36 +1814,110 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     bool condInLatch = latch.lpTail && latch.lpTail->operation != LiftedOperation::JUMP;
 
                     if (condInLatch) {
-                        // pre-lift was skipped for repeat headers; lift the header (= first body block)
-                        // before the condition, preserving the original pre-lift-then-cond order.
-                        stmts = LiftBlockInstructions(block);
+                        m_deferToConditionInline.clear();
+                        std::vector<std::pair<LiftedOperand, const LiftedInstruction *>> pendingConditionDefs;
+                        for (const auto &conditionOperand : latch.lpTail->operands)
+                            pendingConditionDefs.emplace_back(conditionOperand, latch.lpTail);
 
-                        // Pattern 1: the until condition is the latch's conditional terminator (JUMPIF).
-                        repeatNode->condition = InvertCondition(LiftCondition(latch.lpTail));
+                        while (!pendingConditionDefs.empty()) {
+                            const auto [conditionOperand, expectedUser] = pendingConditionDefs.back();
+                            pendingConditionDefs.pop_back();
+                            if (conditionOperand.type != LiftedOperandType::Register)
+                                continue;
 
-                        // The body spans the header (already lifted into `stmts`) plus any intermediate blocks
-                        // down to the latch. Lift them via LiftControlFlow; without this a nested loop in the
-                        // body (e.g. `repeat for ... do break end continue until c`) is dropped entirely and its
-                        // inner `break` leaks to the enclosing scope (`break` outside a loop). The latch holds
-                        // only the condition here, so its successor that is neither latch nor exit is the body.
-                        uint32_t bodyStart = InvalidBlockId;
-                        for (auto s : block.successors) {
-                            if (s != latchIdx && s != exitIdx) {
-                                bodyStart = s;
-                                break;
+                            const auto *conditionDef = m_currentFunction->GetDefinition(conditionOperand);
+                            if (!conditionDef || m_currentFunction->GetBlockId(conditionDef) != static_cast<int>(latch.dwBlockId))
+                                continue;
+
+                            const SSARef conditionRef{static_cast<uint8_t>(conditionOperand.value.reg), conditionOperand.ssaVersion};
+                            const auto users = m_currentFunction->users.find(conditionRef);
+                            if (users == m_currentFunction->users.end() || users->second.size() != 1 || users->second.front() != expectedUser)
+                                continue;
+                            if (!m_deferToConditionInline.insert(conditionDef).second)
+                                continue;
+
+                            for (size_t operandIndex = 1; operandIndex < conditionDef->operands.size(); ++operandIndex)
+                                pendingConditionDefs.emplace_back(conditionDef->operands[operandIndex], conditionDef);
+
+                            if ((conditionDef->operation == LiftedOperation::CALL || conditionDef->operation == LiftedOperation::CALLFB) &&
+                                !conditionDef->operands.empty() && m_currentFunction->implicitUses.contains(conditionDef)) {
+                                const auto &versions = m_currentFunction->implicitUses.at(conditionDef);
+                                const int32_t baseRegister = conditionDef->operands[0].value.reg + 1;
+                                for (size_t argumentIndex = 0; argumentIndex < versions.size(); ++argumentIndex) {
+                                    LiftedOperand argument{};
+                                    argument.type = LiftedOperandType::Register;
+                                    argument.value.reg = baseRegister + static_cast<int32_t>(argumentIndex);
+                                    argument.ssaVersion = versions[argumentIndex];
+                                    pendingConditionDefs.emplace_back(argument, conditionDef);
+                                }
+
+                                const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+                                const auto instructionIndex = conditionDef->instructionIndex;
+                                if (instructionIndex >= 2 && instructions[instructionIndex - 2].operation == LiftedOperation::NAMECALL &&
+                                    instructions[instructionIndex - 2].operands.size() > 1 &&
+                                    instructions[instructionIndex - 2].operands[0].value.reg == conditionDef->operands[0].value.reg &&
+                                    m_currentFunction->GetBlockId(&instructions[instructionIndex - 2]) == static_cast<int>(latch.dwBlockId))
+                                    m_deferToConditionInline.insert(&instructions[instructionIndex - 2]);
                             }
                         }
-                        boost::unordered_flat_set<uint32_t> bodyVisited = loopVisited;
-                        bodyVisited.insert(latchIdx);
-                        bodyVisited.insert(exitIdx);
+
                         std::vector<std::shared_ptr<Statement>> bodyStmts;
-                        if (bodyStart != InvalidBlockId)
-                            bodyStmts = co_await LiftControlFlow(bodyStart, latchIdx, bodyVisited);
-                        bodyStmts.insert(bodyStmts.begin(), stmts.begin(), stmts.end()); // header first
+                        if (block.bTerminator == BlockTerminator::Conditional && latchIdx != currentBlockId) {
+                            auto &headerBlock = m_currentFunction->basicBlocks[currentBlockId];
+                            constexpr uint32_t kAllLoopFlags = static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
+                                                               static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
+                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
+                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed) |
+                                                               static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                            const uint32_t savedFlags = headerBlock.dwBlockFlags;
+                            const auto savedLatch = headerBlock.loopLatch;
+                            const auto savedHeader = headerBlock.loopHeader;
+                            const BlockType savedType = headerBlock.bType;
+                            headerBlock.dwBlockFlags &= ~kAllLoopFlags;
+                            headerBlock.loopLatch.reset();
+                            headerBlock.loopHeader.reset();
+                            headerBlock.bType = BlockType::IfHeader;
+
+                            boost::unordered_flat_set<uint32_t> bodyVisited = loopVisited;
+                            bodyVisited.erase(currentBlockId);
+                            bodyVisited.insert(latchIdx);
+                            bodyVisited.insert(exitIdx);
+                            m_loopExitStack.push_back(exitIdx);
+                            bodyStmts = co_await LiftControlFlow(currentBlockId, latchIdx, bodyVisited);
+                            m_loopExitStack.pop_back();
+
+                            headerBlock.dwBlockFlags = savedFlags;
+                            headerBlock.loopLatch = savedLatch;
+                            headerBlock.loopHeader = savedHeader;
+                            headerBlock.bType = savedType;
+                        } else {
+                            stmts = LiftBlockInstructions(block);
+                            uint32_t bodyStart = InvalidBlockId;
+                            for (auto s : block.successors)
+                                if (s != latchIdx && s != exitIdx) {
+                                    bodyStart = s;
+                                    break;
+                                }
+                            boost::unordered_flat_set<uint32_t> bodyVisited = loopVisited;
+                            bodyVisited.insert(latchIdx);
+                            bodyVisited.insert(exitIdx);
+                            if (bodyStart != InvalidBlockId) {
+                                m_loopExitStack.push_back(exitIdx);
+                                bodyStmts = co_await LiftControlFlow(bodyStart, latchIdx, bodyVisited);
+                                m_loopExitStack.pop_back();
+                            }
+                            bodyStmts.insert(bodyStmts.begin(), stmts.begin(), stmts.end());
+                        }
                         if (latchIdx != currentBlockId) {
                             auto latchStmts = LiftBlockInstructions(latch);
                             bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
                         }
+                        auto condition = LiftCondition(latch.lpTail);
+                        m_deferToConditionInline.clear();
+                        if (!latch.ifStatementTrue.has_value() || latch.ifStatementTrue.value() != exitIdx)
+                            condition = InvertCondition(condition);
+                        repeatNode->condition = condition;
                         repeatNode->body = CreateBlock(bodyStmts);
                     } else {
                         // Pattern 2: latch is plain JUMP back to header. exit cond is in the header
@@ -1989,6 +2119,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     }
 
                     int baseReg = block.lpTail->operands[0].value.reg;
+                    const int32_t loopVariableReg = baseReg + 2;
+                    const bool loopVariableWasDefined = m_definedRegisters.contains(loopVariableReg);
+                    const std::string startValueName = m_currentFunction->GetVarName(loopVariableReg, startVer);
                     // name the loop var once up-front so body/header/SSA map agree. LiftExpression would
                     // resolve it to the inlined LOADN constant -> broken `for 1 = 1, ..., 1 do` (InfiniteYield).
                     const std::string loopVarName = std::format("i_{}", baseReg + 2);
@@ -2002,12 +2135,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             const bool hasBreakTarget = (exitIdx != InvalidBlockId && exitIdx != latchIdx && exitIdx != bodyIdx);
                             if (hasBreakTarget)
                                 m_loopExitStack.push_back(exitIdx);
+                            const auto definedBeforeLoopBody = m_definedRegisters;
                             forNode->lpLoopBody = CreateBlock(
                                 co_await LiftControlFlow(
                                     bodyIdx, *block.loopLatch,
                                     loopVisited /* this likely we have to replace with visited, as we will else be accidentally traversing again */
                                 )
                             );
+                            m_definedRegisters = definedBeforeLoopBody;
                             if (hasBreakTarget)
                                 m_loopExitStack.pop_back();
 
@@ -2022,6 +2157,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 forNode->loopVariable =
                                     std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(resolved.empty() ? loopVarName : resolved));
                             }
+                            m_currentFunction->SetVariableName(loopVariableReg, startVer, startValueName);
 
                             this->m_currentFunction->ClearVersionName(
                                 baseReg, block.lpTail->operands[0].ssaVersion
@@ -2162,20 +2298,17 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 if (safe)
                                     m_processedInstructions.insert(rootDef->instructionIndex);
                             }
-                            const bool aliasesLoopVariable = reg == baseReg + 2 && effectiveVer == startVer;
-                            if (aliasesLoopVariable)
-                                m_currentFunction->ClearVariableName(reg, effectiveVer);
-                            auto value = LiftExpression(lop, true);
-                            if (aliasesLoopVariable)
-                                m_currentFunction->SetVariableName(reg, effectiveVer, loopVarName);
-                            return value;
+                            return LiftExpression(lop, true);
                         };
 
                         forNode->startVariable = liftLoopValue(baseReg + 2, startVer);
                         forNode->maxIncreased = liftLoopValue(baseReg, limitVer);
                         forNode->increaseBy = liftLoopValue(baseReg + 1, stepVer);
                     }
+                    nodes.insert(nodes.end(), stmts.begin(), stmts.end());
                     nodes.push_back(forNode);
+                    if (!loopVariableWasDefined)
+                        m_definedRegisters.erase(loopVariableReg);
                 } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
                     auto whileNode = std::make_shared<WhileStatementNode>();
 
@@ -2403,6 +2536,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         throw Fission::DecompilerError("malformed bytecode: generic-for without a well-formed FORGPREP/FORGLOOP pair");
                     int baseReg = block.lpTail->operands[0].value.reg;
                     int numVars = latchTail->operands[2].value.imm.n & 0xFF;
+                    boost::unordered_flat_set<int32_t> definedLoopVariables;
+                    for (int i = 0; i < numVars; ++i)
+                        if (m_definedRegisters.contains(baseReg + 3 + i))
+                            definedLoopVariables.insert(baseReg + 3 + i);
 
                     {
                         LiftedOperand op;
@@ -2421,7 +2558,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         const bool hasBreakTarget = (exitIdx != InvalidBlockId && exitIdx != block.loopLatch.value_or(InvalidBlockId) && exitIdx != bodyIdx);
                         if (hasBreakTarget)
                             m_loopExitStack.push_back(exitIdx);
+                        const auto definedBeforeLoopBody = m_definedRegisters;
                         forNode->body = CreateBlock(co_await LiftControlFlow(bodyIdx, *block.loopLatch, loopVisited));
+                        m_definedRegisters = definedBeforeLoopBody;
                         if (hasBreakTarget)
                             m_loopExitStack.pop_back();
 
@@ -2485,21 +2624,23 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     }
                     nodes.insert(nodes.end(), stmts.begin(), stmts.end());
                     nodes.push_back(forNode);
+                    for (int i = 0; i < numVars; ++i)
+                        if (!definedLoopVariables.contains(baseReg + 3 + i))
+                            m_definedRegisters.erase(baseReg + 3 + i);
                 }
 
-                // A chosen "exit" whose own successor is the loop's latch (or header) is actually inside the
-                // loop body, not after it; e.g. a degenerate `for ... do break end` whose break lands back at
-                // an infinite `repeat ... until false`'s latch. Re-emitting it as the post-loop block leaks an
-                // orphan `break` to the enclosing scope. Such a loop has no real exit (it is infinite), so
-                // nothing follows it.
-                bool exitInBody = false;
-                if (exitIdx != InvalidBlockId && exitIdx < m_currentFunction->basicBlocks.size() && block.loopLatch.has_value()) {
-                    for (uint32_t s : m_currentFunction->basicBlocks[exitIdx].successors)
-                        if (s == block.loopLatch.value() || s == currentBlockId) {
-                            exitInBody = true;
-                            break;
-                        }
-                }
+            // A chosen "exit" with no path beyond the loop is actually inside the loop body.
+            bool exitInBody = false;
+            if (exitIdx != InvalidBlockId && exitIdx < m_currentFunction->basicBlocks.size() && block.loopLatch.has_value()) {
+                bool hasLoopBack = false;
+                bool hasPostLoopPath = false;
+                for (uint32_t s : m_currentFunction->basicBlocks[exitIdx].successors)
+                    if (s == block.loopLatch.value() || s == currentBlockId)
+                        hasLoopBack = true;
+                    else
+                        hasPostLoopPath = true;
+                exitInBody = hasLoopBack && !hasPostLoopPath;
+            }
                 nextBlockId = exitInBody ? InvalidBlockId : exitIdx;
             }
 
@@ -2583,6 +2724,26 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
         const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
 
+        if (inst.operation == LiftedOperation::NEWCLASS && inst.operands.size() >= 4) {
+            const auto &shapeConst = ConstantAt(inst.operands[3].value.imm.k);
+            if (!shapeConst.IsClassShape())
+                throw Fission::DecompilerError("malformed NEWCLASS: AUX is not a class-shape constant");
+            const auto &shape = std::get<LuauClassShape>(shapeConst.constantData);
+            auto classNode =
+                std::make_shared<ClassDeclarationNode>(shape.className, shape.propertyNames, std::vector<std::shared_ptr<FunctionDeclarationNode>>{});
+            classNode->bOpen = inst.operands[2].type == LiftedOperandType::ImmediateBool && inst.operands[2].value.imm.b;
+            if (inst.operands[1].type == LiftedOperandType::Register)
+                classNode->superclass = LiftExpression(inst.operands[1]);
+
+            const SSARef classRef{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
+            m_pendingClasses[classRef] = classNode;
+            if (!shape.className.empty())
+                m_currentFunction->SetVariableName(classRef.regIndex, classRef.version, shape.className);
+            statements.push_back(classNode);
+            m_processedInstructions.insert(i);
+            continue;
+        }
+
         // V10 class declaration: a LOAD of a class-shape constant is the class value. Park an initially
         // method-less `class Name ... end` (name + property names from the shape); each NEWCLASSMEMBER on
         // this register then appends its method (see the NEWCLASSMEMBER case). Bind the class register to
@@ -2605,6 +2766,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             }
         }
 
+        if (m_deferToConditionInline.contains(&inst) && inst.operation != LiftedOperation::NEWCLOSURE && inst.operation != LiftedOperation::DUPCLOSURE)
+            continue;
+
         // Normally an inlinable def is skipped (materialized at its use). Under forceDefinitions it is
         // emitted so header defs survive; except a def deferred to its terminator condition, which the
         // condition inlines once (see the repeat-until Pattern 2 lift); force-emitting it too would run
@@ -2614,7 +2778,30 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
         switch (inst.operation) {
         case LiftedOperation::GETVARARGS: {
-            break; // not handled here.
+            auto defs = m_defsByInstruction[&inst];
+            std::ranges::sort(defs, {}, &SSARef::regIndex);
+            const int32_t baseReg = inst.operands[0].value.reg;
+            for (const auto &ref : defs) {
+                LiftedOperand output{};
+                output.type = LiftedOperandType::Register;
+                output.value.reg = ref.regIndex;
+                output.ssaVersion = ref.version;
+
+                const bool isDefined = m_definedRegisters.contains(ref.regIndex);
+                auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output)));
+                std::shared_ptr<Expression> value = std::make_shared<VarArgExpression>();
+                if (ref.regIndex != baseReg) {
+                    auto values = std::make_shared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
+                    value = std::make_shared<IndexExpressionNode>(values, std::make_shared<NumberLiteralNode>(ref.regIndex - baseReg + 1));
+                }
+
+                if (isDefined)
+                    statements.push_back(std::make_shared<AssignmentStatementNode>(target, value));
+                else
+                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, value));
+            }
+            m_processedInstructions.insert(inst.instructionIndex);
+            break;
         }
         case LiftedOperation::SETGLOBAL: {
             const auto &k = ConstantAt(inst.operands[1].value.imm.k);
@@ -2629,6 +2816,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         }
         case LiftedOperation::SETTABLEKS: {
             const auto &k = ConstantAt(inst.operands[2].value.imm.k);
+            if (inst.operands[0].type == LiftedOperandType::Register && k.kType == LUA_TSTRING) {
+                const SSARef classRef{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
+                if (auto pc = m_pendingClasses.find(classRef); pc != m_pendingClasses.end() && std::get<std::string>(k.constantData) == pc->second->className)
+                    pc->second->bExported = true;
+            }
             auto memExpr = std::make_shared<MemberExpressionNode>(LiftExpression(inst.operands[1]), std::get<std::string>(k.constantData));
             statements.push_back(std::make_shared<AssignmentStatementNode>(memExpr, LiftExpression(inst.operands[0])));
             break;
@@ -2686,12 +2878,43 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 break;
             const auto &versions = m_currentFunction->implicitUses.at(&inst);
             const int32_t aux = (inst.operands.size() > 3 && inst.operands[3].value.imm.n >= 1) ? inst.operands[3].value.imm.n : 1;
+            bool firstElementCanMoveBeforeBlockDefs = false;
+            if (!versions.empty()) {
+                const auto *tableDef = m_currentFunction->GetDefinition(inst.operands[0]);
+                LiftedOperand firstElement{};
+                firstElement.type = LiftedOperandType::Register;
+                firstElement.value.reg = inst.operands[1].value.reg;
+                firstElement.ssaVersion = versions.front();
+                const auto *elementDef = m_currentFunction->GetDefinition(firstElement);
+                if (tableDef && elementDef && m_currentFunction->GetBlockId(tableDef) != static_cast<int>(block.dwBlockId) &&
+                    (elementDef->operation == LiftedOperation::GETTABLE || elementDef->operation == LiftedOperation::GETTABLEKS ||
+                     elementDef->operation == LiftedOperation::GETTABLEN) &&
+                    elementDef->operands.size() > 1 && elementDef->operands[1].type == LiftedOperandType::Register) {
+                    const auto *baseDef = m_currentFunction->GetDefinition(elementDef->operands[1]);
+                    firstElementCanMoveBeforeBlockDefs =
+                        baseDef && (baseDef->operation == LiftedOperation::GETGLOBAL || baseDef->operation == LiftedOperation::GETIMPORT ||
+                                    baseDef->operation == LiftedOperation::GETUPVAL);
+                }
+            }
             for (size_t k = 0; k < versions.size(); ++k) {
+                if (k == 0) {
+                    LiftedOperand first{};
+                    first.type = LiftedOperandType::Register;
+                    first.value.reg = inst.operands[1].value.reg;
+                    first.ssaVersion = versions.front();
+                    if (const auto *firstDef = m_currentFunction->GetDefinition(first);
+                        firstDef && m_inlineConsumedDefs.contains(firstDef->instructionIndex))
+                        continue;
+                }
                 auto elem = LiftSetListElement(inst, k, false);
                 auto idxExpr = std::make_shared<IndexExpressionNode>(
                     LiftExpression(inst.operands[0]), std::make_shared<NumberLiteralNode>(static_cast<double>(aux + static_cast<int32_t>(k)))
                 );
-                statements.push_back(std::make_shared<AssignmentStatementNode>(idxExpr, elem));
+                auto assignment = std::make_shared<AssignmentStatementNode>(idxExpr, elem);
+                if (k == 0 && firstElementCanMoveBeforeBlockDefs)
+                    statements.insert(statements.begin(), assignment);
+                else
+                    statements.push_back(assignment);
             }
             break;
         }
@@ -2761,10 +2984,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         case LiftedOperation::CALLFB:
         case LiftedOperation::NAMECALL: {
             auto callExpr = LiftCall(inst, i, false);
+            const auto &resultInst = inst.operation == LiftedOperation::NAMECALL ? m_currentFunction->lpLiftedFunction->instructions[i + 2] : inst;
 
             std::vector<std::shared_ptr<Expression>> lhs;
             std::vector<SSARef> defs;
-            if (const auto it = m_defsByInstruction.find(&inst); it != m_defsByInstruction.end())
+            if (const auto it = m_defsByInstruction.find(&resultInst); it != m_defsByInstruction.end())
                 defs = it->second;
             std::ranges::sort(defs, [](auto &a, auto &b) { return a.regIndex < b.regIndex; });
 
@@ -2777,13 +3001,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                         const auto &methodName = identExpr->identifier->name;
                         // `:FindFirstChild`/`:GetService`/`:WaitForChild` name their result after the child.
                         if (methodName == "FindFirstChild" || methodName == "GetService" || methodName == "WaitForChild") {
-                            if (!m_currentFunction->implicitUses.contains(&inst))
+                            if (!m_currentFunction->implicitUses.contains(&resultInst))
                                 continue;
-                            const auto &argVersions = m_currentFunction->implicitUses.at(&inst);
+                            const auto &argVersions = m_currentFunction->implicitUses.at(&resultInst);
                             if (argVersions.size() == 2) {
                                 LiftedOperand op;
                                 op.type = LiftedOperandType::Register;
-                                op.value.reg = inst.operands[0].value.reg + 1 + 1 /* arg1 */;
+                                op.value.reg = resultInst.operands[0].value.reg + 1 + 1 /* arg1 */;
                                 op.ssaVersion = argVersions[1];
                                 auto expr = LiftExpression(op, true);
                                 if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr);
@@ -2825,7 +3049,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
 
+            m_processedInstructions.insert(resultInst.instructionIndex);
+
             if (inst.operation == LiftedOperation::NAMECALL) {
+                m_processedInstructions.insert(i);
                 m_processedInstructions.insert(i + 1);
                 m_processedInstructions.insert(i + 2);
             }
@@ -2851,6 +3078,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // the code below dereferences targetFunc, so drop the sample rather than null-deref.
             if (!targetFunc)
                 throw Fission::DecompilerError("malformed bytecode: DUPCLOSURE proto is not a lifted child function");
+
+            if (duplicatedFunction->numparams >= 1 &&
+                IsSingleUseClassMemberValue(m_currentFunction, inst.operands[0].value.reg, inst.operands[0].ssaVersion))
+                targetFunc->SetReceiverName(0, "self");
 
             // walk trailing CAPTUREs; "propagate" = rename the source reg to the upvalue's debug name
             // instead of emitting `local up = source`. needs: debug name + VAL/REF capture + register source.
@@ -2992,6 +3223,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->capturedNames.insert(capture.upName);
 
             auto &saveWhere = inst.operands[0];
+            if (m_deferToConditionInline.contains(&inst)) {
+                fnDecl->bAnonymousInline = true;
+                fnDecl->bIsLocalDeclaration = false;
+                m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
+                m_processedInstructions.insert(i);
+                break;
+            }
 
             // If the closure has a single use that is a call argument, park
             // it in the inline-substitution map and skip emitting a top-level
@@ -3002,7 +3240,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // inline map is consumed-and-erased on first lookup, so later
             // emissions resolve to an unbound register name. Emitting as a
             // proper named declaration sidesteps that.
-            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
+            if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion) ||
+                IsSingleUseClassMemberValue(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
@@ -3213,6 +3452,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->capturedNames.insert(capture.upName);
 
             auto &saveWhere = inst.operands[0];
+            if (m_deferToConditionInline.contains(&inst)) {
+                fnDecl->bAnonymousInline = true;
+                fnDecl->bIsLocalDeclaration = false;
+                m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
+                m_processedInstructions.insert(i);
+                break;
+            }
 
             // See DUPCLOSURE: single-use call-arg closures collapse to an inline
             // `function(...) ... end` substituted at the use site. Table-field
@@ -3438,7 +3684,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             break;
         if (m_processedInstructions.contains(moveDef->instructionIndex))
             break;
-        if (!forceExpression && !ShouldInline(moveDef))
+        if (!forceExpression && !ShouldInline(moveDef) && !m_deferToConditionInline.contains(moveDef))
             break;
         operand = moveDef->operands[1];
     }
@@ -3489,9 +3735,6 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
 
     const auto *def = m_currentFunction->GetDefinition(operand);
 
-    if (def && def->operation == LiftedOperation::GETVARARGS)
-        return std::make_shared<VarArgExpression>();
-
     if (def && m_processedInstructions.contains(def->instructionIndex)) {
         // "processed" covers two distinct fates: emitted as a declaration (has a name; reference it)
         // or consumed by inlining (no declaration exists; naming it reads an undefined register).
@@ -3505,7 +3748,10 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
     }
 
-    if (!def || (!forceExpression && !ShouldInline(def))) {
+    if (def && def->operation == LiftedOperation::GETVARARGS)
+        return std::make_shared<VarArgExpression>();
+
+    if (!def || (!forceExpression && !ShouldInline(def) && !m_deferToConditionInline.contains(def))) {
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
     }
 
@@ -3954,7 +4200,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
                     break;
                 }
             }
-            if (def && def->operation == LiftedOperation::GETVARARGS) {
+            if (def && def->operation == LiftedOperation::GETVARARGS && !m_processedInstructions.contains(def->instructionIndex)) {
                 isVararg = true;
                 auto vararg = std::make_shared<VarArgExpression>();
                 vararg->bAdjustToOne = def->operands.size() > 1 && def->operands[1].value.imm.n == 2 && k + 1 == argVersions.size();
@@ -4096,6 +4342,15 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     size_t scanLimit = 100;
     size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
     bool bFoundSetList = false;
+    const LiftedInstruction *deferredSetList = nullptr;
+    for (size_t i = inst.instructionIndex + 1; i < maxIdx && i < inst.instructionIndex + scanLimit; ++i) {
+        const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+        if (candidate.operation == LiftedOperation::SETLIST && candidate.operands.size() > 1 &&
+            candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion == tableVersion) {
+            deferredSetList = &candidate;
+            break;
+        }
+    }
 
     if (inst.operation == LiftedOperation::DUPTABLE) {
         int constantIdx = inst.operands[1].value.imm.k;
@@ -4189,6 +4444,25 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         return ok;
     };
 
+    std::unordered_set<SSARef, std::hash<SSARef>> closureVisited;
+    std::function<bool(const LiftedOperand &)> dependsOnClosure = [&](const LiftedOperand &op) -> bool {
+        if (op.type != LiftedOperandType::Register)
+            return false;
+        const SSARef key{static_cast<uint8_t>(op.value.reg), op.ssaVersion};
+        if (!closureVisited.insert(key).second)
+            return false;
+        const auto *def = m_currentFunction->GetDefinition(op);
+        if (!def)
+            return false;
+        if (def->operation == LiftedOperation::NEWCLOSURE || def->operation == LiftedOperation::DUPCLOSURE)
+            return true;
+        const size_t firstOperand = (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB) ? 0 : 1;
+        for (size_t i = firstOperand; i < def->operands.size(); ++i)
+            if (dependsOnClosure(def->operands[i]))
+                return true;
+        return false;
+    };
+
     std::unordered_set<SSARef, std::hash<SSARef>> diamondVisited;
     std::function<bool(const LiftedOperand &)> dependsOnMaterializedDiamond = [&](const LiftedOperand &op) -> bool {
         if (op.type != LiftedOperandType::Register || !diamondVisited.insert({static_cast<uint8_t>(op.value.reg), op.ssaVersion}).second)
@@ -4234,6 +4508,10 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         // operands; a method call `t[1]:m(t[2])` reads the table through these, so walk them too.
         if (!result && def && (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB) &&
             m_currentFunction->implicitUses.contains(def)) {
+            if (readsTableReg(def->operands[0])) {
+                readsTableMemo[key] = true;
+                return true;
+            }
             const auto &vers = m_currentFunction->implicitUses.at(def);
             const int32_t base = def->operands[0].value.reg + 1;
             for (size_t k = 0; k < vers.size(); ++k) {
@@ -4326,6 +4604,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         const auto *def = m_currentFunction->GetDefinition(itemOp);
         if (!def)
             return false;
+        if ((def->operation == LiftedOperation::NEWCLOSURE || def->operation == LiftedOperation::DUPCLOSURE) && isLaterName(def))
+            return true;
         if (def->operation == LiftedOperation::LOAD)
             return false;
         if (def->operation == LiftedOperation::MOVE)
@@ -4339,6 +4619,9 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             for (size_t oi = 1; oi < def->operands.size(); ++oi)
                 if (def->operands[oi].type == LiftedOperandType::Register && readsLaterName(def->operands[oi]))
                     return true;
+            if ((def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB) && !def->operands.empty() &&
+                readsLaterName(def->operands[0]))
+                return true;
             if ((def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB) && m_currentFunction->implicitUses.contains(def)) {
                 const auto &vers = m_currentFunction->implicitUses.at(def);
                 const int32_t base = def->operands[0].value.reg + 1;
@@ -4410,7 +4693,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                         if (anyForwardRef)
                             break;
                     }
-                    {
+                    if (tableIsLocal) {
                         bool anyDiamond = false;
                         const int startReg2 = candidate.operands[1].value.reg;
                         for (size_t k = 0; k < versions.size(); ++k) {
@@ -4513,8 +4796,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 // the closure is declared. Narrow to closures on purpose; a computed key (a call, arith) DOES
                 // force-inline correctly into the constructor (`[f(x)] = ...`); deferring those would instead
                 // spill them to a bare stale name, so leave them folded.
-                if (const auto *keyDef = m_currentFunction->GetDefinition(candidate.operands[2]);
-                    keyDef && (keyDef->operation == LiftedOperation::NEWCLOSURE || keyDef->operation == LiftedOperation::DUPCLOSURE))
+                closureVisited.clear();
+                if (dependsOnClosure(candidate.operands[2]))
                     break;
                 auto keyExpr = LiftExpression(candidate.operands[2], true);
                 auto valExpr = LiftExpression(candidate.operands[0]);
@@ -4531,6 +4814,28 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         // the instructions are processed, since they're inlined.
         for (const auto &ins : candidatesIndexes)
             m_processedInstructions.insert(ins);
+
+    if (!bFoundSetList && deferredSetList && !elements.empty() && m_currentFunction->implicitUses.contains(deferredSetList)) {
+        const auto &versions = m_currentFunction->implicitUses.at(deferredSetList);
+        if (!versions.empty()) {
+            LiftedOperand first{};
+            first.type = LiftedOperandType::Register;
+            first.value.reg = deferredSetList->operands[1].value.reg;
+            first.ssaVersion = versions.front();
+            const auto *firstDef = m_currentFunction->GetDefinition(first);
+            if (firstDef && (firstDef->operation == LiftedOperation::GETTABLE || firstDef->operation == LiftedOperation::GETTABLEKS ||
+                             firstDef->operation == LiftedOperation::GETTABLEN) &&
+                firstDef->operands.size() > 1 && firstDef->operands[1].type == LiftedOperandType::Register) {
+                const auto *baseDef = m_currentFunction->GetDefinition(firstDef->operands[1]);
+                if (baseDef && (baseDef->operation == LiftedOperation::GETGLOBAL || baseDef->operation == LiftedOperation::GETIMPORT ||
+                                baseDef->operation == LiftedOperation::GETUPVAL)) {
+                    elements.push_back(LiftExpression(first, true));
+                    m_processedInstructions.insert(firstDef->instructionIndex);
+                    m_inlineConsumedDefs.insert(firstDef->instructionIndex);
+                }
+            }
+        }
+    }
 
     if (!elements.empty())
         return std::make_shared<TableLiteralNode>(elements);
@@ -4553,6 +4858,9 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
 
 bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     if (!inst || inst->operands.size() < 1)
+        return false;
+
+    if (inst->operation == LiftedOperation::GETVARARGS && inst->operands.size() > 1 && inst->operands[1].value.imm.n > 2)
         return false;
 
     for (size_t i = 1; i < inst->operands.size(); ++i) {
@@ -4629,6 +4937,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     case LiftedOperation::SETTABLEN:
     case LiftedOperation::SETLIST:
     case LiftedOperation::NEWCLASSMEMBER: // V10: registers a member on a class table; mutation, never inlineable.
+    case LiftedOperation::NEWCLASS:       // WIP: reifies a class value and binds its declaration.
         return false;
     default:
         break;
@@ -4644,6 +4953,27 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         SSARef defRef{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
         if (m_currentFunction->useCounts.contains(defRef)) {
             const auto &users = m_currentFunction->users[defRef];
+            for (const auto *user : users) {
+                if (!user || user->operation != LiftedOperation::SETLIST || user->operands.size() < 2 ||
+                    user->operands[0].value.reg != inst->operands[0].value.reg || user->operands[0].ssaVersion != inst->operands[0].ssaVersion ||
+                    !m_currentFunction->implicitUses.contains(user))
+                    continue;
+                const auto &versions = m_currentFunction->implicitUses.at(user);
+                const int32_t startReg = user->operands[1].value.reg;
+                for (size_t k = 0; k < versions.size(); ++k) {
+                    LiftedOperand element{};
+                    element.type = LiftedOperandType::Register;
+                    element.value.reg = startReg + static_cast<int32_t>(k);
+                    element.ssaVersion = versions[k];
+                    const LiftedInstruction *elementDef = m_currentFunction->GetDefinition(element);
+                    for (int guard = 0; guard < 64 && elementDef && elementDef->operation == LiftedOperation::MOVE; ++guard)
+                        elementDef = m_currentFunction->GetDefinition(elementDef->operands[1]);
+                    if (elementDef && elementDef->operation == LiftedOperation::PHI)
+                        return false;
+                    if (elementDef && (elementDef->operation == LiftedOperation::NEWCLOSURE || elementDef->operation == LiftedOperation::DUPCLOSURE))
+                        return false;
+                }
+            }
             // count DISTINCT user instructions: a SETLIST that takes this table as an element records it
             // twice (operand read + implicit element use), which would otherwise inflate the count and
             // wrongly keep a single-use (e.g. nested) table as a separate forward-referenced local.
@@ -4662,8 +4992,9 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                     return false;
                 realUsers.insert(user);
             }
-            // exactly one real user of the register (the rest are syntactic-sugar artifacts) -> inline it.
-            return realUsers.size() == 1;
+            if (realUsers.size() != 1)
+                return false;
+            return !InliningReordersEffect(inst, *realUsers.begin());
         }
     }
 
@@ -4798,7 +5129,8 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
             return false;
     }
 
-    if (m_currentFunction->IsSimpleOrConstant(inst->operands[0]) && !m_currentFunction->IsConsumedByPhi(inst->operands[0]) &&
+    if ((inst->operation != LiftedOperation::GETIMPORT || bareImport || singleUse) && m_currentFunction->IsSimpleOrConstant(inst->operands[0]) &&
+        !m_currentFunction->IsConsumedByPhi(inst->operands[0]) &&
         inst->operands[0].ssaVersion != 1 /* first version cannot be inlined. It is a declaration */)
         return true;
 
@@ -4958,6 +5290,9 @@ bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
         found = true;
         for (const auto *user : users->second) {
             if (user->operation == LiftedOperation::SETLIST)
+                continue;
+            if ((user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB) && user->instructionIndex > e->instructionIndex &&
+                IsConstructorElement(user))
                 continue;
             if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
                  user->operation == LiftedOperation::SETTABLEN) &&
