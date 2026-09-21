@@ -12,8 +12,13 @@ cmake --build cmake-build-release --target Fission.Fuzzing
 Flags: `--count N`, `--seed S`, `--out DIR` (default: this folder), `--max-corpus N`,
 `--threads N`, `--sugar-only`, `--check-sugar SOURCE OUTPUT`, `--minimize-file PATH`,
 `--minimize-budget N`, `--mutate`, `--deser`, `--file PATH`, `--sem-file PATH`, `--deser-file PATH`,
-`--roblox-file PATH`, `--roblox-compare PATH`, `--roblox-corpus DIR`, `--corpus-start N`, `--corpus-limit N`, and `--repro-mutate PATH SEED`. Exit code is nonzero when any crash,
+`--roblox-file PATH`, `--roblox-recompile PATH`, `--roblox-compare PATH`, `--roblox-corpus DIR`, `--corpus-start N`, `--corpus-limit N`, and `--repro-mutate PATH SEED`. Exit code is nonzero when any crash,
 invalid output, generator failure, or semantic divergence surfaces.
+
+`--roblox-recompile` is the focused generated-local gate: Roblox bytecode must decompile successfully,
+the emitted source must compile with Luau, generated register names must be declared before use, and
+the compiled output must survive a second decompile/recompile pass with the same binding checks.
+Run `test_local_registers.ps1` to replay the known 200-local corpus fixtures.
 
 ## Two generator front-ends (alternated per sample)
 - **Luau parser-AST** ([src/LuauAstGenerator.cpp](src/LuauAstGenerator.cpp)) — builds real

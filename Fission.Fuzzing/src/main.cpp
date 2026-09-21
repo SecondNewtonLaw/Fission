@@ -289,6 +289,7 @@ int main(int argc, char **argv) {
     std::string deserFile;  // --deser-file <path>: re-run one raw bytecode sample (crash breadcrumb)
     std::string robloxFile; // --roblox-file <path>: decompile a binary Roblox-bytecode sample (regress guard)
     std::string robloxCompare;
+    bool robloxRecompileOnly = false;
     std::string robloxCorpus;
     int corpusStart = 0;
     int corpusLimit = 0;
@@ -327,7 +328,10 @@ int main(int argc, char **argv) {
             robloxFile = argv[++i];
         else if (a == "--roblox-compare" && i + 1 < argc)
             robloxCompare = argv[++i];
-        else if (a == "--roblox-corpus" && i + 1 < argc)
+        else if (a == "--roblox-recompile" && i + 1 < argc) {
+            robloxCompare = argv[++i];
+            robloxRecompileOnly = true;
+        } else if (a == "--roblox-corpus" && i + 1 < argc)
             robloxCorpus = argv[++i];
         else if (a == "--corpus-start" && i + 1 < argc)
             corpusStart = (std::max)(0, std::atoi(argv[++i]));
@@ -393,13 +397,37 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "[roblox-compare] decompile failed: %d\n", static_cast<int>(result.resultCode));
             return 2;
         }
-        std::fputs("SOURCE_BEGIN\n", stdout);
-        std::fputs(result.decompilationOutput.c_str(), stdout);
-        std::fputs("\nSOURCE_END\n", stdout);
+        if (!robloxRecompileOnly) {
+            std::fputs("SOURCE_BEGIN\n", stdout);
+            std::fputs(result.decompilationOutput.c_str(), stdout);
+            std::fputs("\nSOURCE_END\n", stdout);
+        }
         std::string recompiled;
         if (!fuzz::LuauCompiles(result.decompilationOutput, &recompiled)) {
             std::fprintf(stderr, "[roblox-compare] recompile failed: %s\n", recompiled.empty() ? "(empty)" : recompiled.substr(1).c_str());
             return 2;
+        }
+        std::string forwardReference;
+        if (fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &forwardReference)) {
+            std::fprintf(stderr, "[roblox-recompile] generated binding failure: %s\n", forwardReference.c_str());
+            return 2;
+        }
+        if (robloxRecompileOnly) {
+            const auto secondGeneration = fuzz::FullDecompile(result.decompilationOutput);
+            std::string secondGenerationBytecode;
+            if (secondGeneration.code != DecompileResult::Success || !fuzz::LuauCompiles(secondGeneration.output, &secondGenerationBytecode)) {
+                std::fprintf(stderr, "[roblox-recompile] second-generation decompile/recompile failed\n");
+                return 2;
+            }
+            if (fuzz::UsesGeneratedLocalBeforeDeclared(secondGeneration.output, &forwardReference)) {
+                std::fprintf(stderr, "[roblox-recompile] second-generation binding failure: %s\n", forwardReference.c_str());
+                return 2;
+            }
+            std::fprintf(
+                stderr, "[roblox-recompile] ok: %s (%zu/%zu source bytes, %zu/%zu bytecode bytes)\n", robloxCompare.c_str(), result.decompilationOutput.size(),
+                secondGeneration.output.size(), recompiled.size(), secondGenerationBytecode.size()
+            );
+            return 0;
         }
         Fission::RobloxClientDecoder robloxDecoder{};
         Fission::InstructionDecoder vanillaDecoder{};
