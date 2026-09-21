@@ -13,9 +13,13 @@
 #pragma clang diagnostic ignored "-Wmicrosoft-cpp-macro"
 #pragma clang diagnostic ignored "-Wunused-value"
 #pragma clang diagnostic ignored "-Wnan-infinity-disabled"
+#endif
+
 #include <boost/asio.hpp>
 #include <boost/beast.hpp>
 #include <boost/json.hpp>
+
+#ifdef __clang__
 #pragma clang diagnostic pop
 #endif
 

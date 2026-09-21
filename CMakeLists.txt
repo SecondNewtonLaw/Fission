@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.31)
 project(Fission)
 
 include(CTest)
+find_package(Threads REQUIRED)
 
 
 set(CMAKE_CXX_STANDARD 23)
@@ -304,7 +305,7 @@ add_library(Fission.Server STATIC
 )
 target_include_directories(Fission.Server PUBLIC Fission.Server/include)
 # Consumers of Fission.Server also compile Boost.Asio headers.
-target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast Boost::json)
+target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast Boost::json Threads::Threads)
 if (WIN32)
     target_link_libraries(Fission.Server PUBLIC ws2_32)
     target_compile_definitions(Fission.Server PUBLIC _WIN32_WINNT=0x0601)
