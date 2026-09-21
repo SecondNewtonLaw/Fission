@@ -20,12 +20,16 @@ class ScopeBlockIntroducer {
 
   private:
     // Scope each child list before splitting this list at local redefinitions.
-    void ProcessList(std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> &refsOut) {
+    void ProcessList(
+        std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> &refsOut, const std::unordered_set<std::string> *liveOut = nullptr,
+        std::unordered_set<std::string> *capturesOut = nullptr
+    ) {
         const size_t n = stmts.size();
         if (n == 0)
             return;
 
         std::vector<std::unordered_set<std::string>> refs(n);
+        std::vector<std::unordered_set<std::string>> captures(n);
         std::vector<std::string> declName(n);
         bool bailMulti = false;
         for (size_t i = 0; i < n; ++i) {
@@ -33,7 +37,9 @@ class ScopeBlockIntroducer {
             declName[i] = DeclaredLocalName(stmts[i], multi);
             if (multi)
                 bailMulti = true; // a statement binding >1 local: phase scoping unsupported, leave as-is
-            ProcessStatement(stmts[i], refs[i]);
+            ProcessStatement(stmts[i], refs[i], captures[i]);
+            if (capturesOut)
+                capturesOut->insert(captures[i].begin(), captures[i].end());
         }
         if (bailMulti) {
             for (auto &r : refs)
@@ -49,15 +55,23 @@ class ScopeBlockIntroducer {
         // redefinition whose RHS does not read the old binding does not block its own cut.
         std::unordered_map<std::string, size_t> currentDecl;
         std::unordered_map<size_t, size_t> lifeLastUse;
+        std::vector<size_t> previousDeclaration(n, n);
         for (size_t i = 0; i < n; ++i) {
             for (const auto &nm : refs[i]) {
                 auto it = currentDecl.find(nm);
                 if (it != currentDecl.end())
                     lifeLastUse[it->second] = i;
             }
-            if (!declName[i].empty())
+            if (!declName[i].empty()) {
+                if (auto previous = currentDecl.find(declName[i]); previous != currentDecl.end())
+                    previousDeclaration[i] = previous->second;
                 currentDecl[declName[i]] = i;
+            }
         }
+        if (liveOut)
+            for (const auto &nm : *liveOut)
+                if (auto it = currentDecl.find(nm); it != currentDecl.end())
+                    lifeLastUse[it->second] = n;
 
         auto bubble = [&]() {
             for (auto &r : refs)
@@ -128,37 +142,25 @@ class ScopeBlockIntroducer {
             crossing[i] = lu >= segEndAt[i];
         }
 
-        // A segment becomes a do-block iff it has >=1 non-crossing local decl (a genuinely scoped
-        // temp); wrapping a segment of only escapers would add noise without scoping anything.
+        for (size_t i = n; i-- > 0;) {
+            if (declName[i].empty() || !crossing[i] || previousDeclaration[i] == n || !CanDemoteLocal(stmts[i]))
+                continue;
+            const bool initializerCapturesPrevious = captures[i].contains(declName[i]) && !std::dynamic_pointer_cast<FunctionDeclarationNode>(stmts[i]);
+            const bool previousFunctionCapturesSelf =
+                captures[previousDeclaration[i]].contains(declName[i]) && std::dynamic_pointer_cast<FunctionDeclarationNode>(stmts[previousDeclaration[i]]);
+            if (initializerCapturesPrevious || previousFunctionCapturesSelf ||
+                std::any_of(captures.begin() + previousDeclaration[i] + 1, captures.begin() + i, [&](const auto &names) {
+                    return names.contains(declName[i]);
+                }))
+                continue;
+            crossing[previousDeclaration[i]] = true;
+            DemoteLocal(stmts[i]);
+            declName[i].clear();
+            crossing[i] = false;
+        }
+
         std::vector<bool> wrapped(segCount, false);
-        std::vector<bool> mixed(segCount, false);
-        bool anyWrap = false;
         for (size_t s = 0; s < segCount; ++s) {
-            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i)
-                if (!declName[i].empty() && !crossing[i]) {
-                    wrapped[s] = true;
-                    anyWrap = true;
-                    break;
-                }
-        }
-        if (!anyWrap) {
-            bubble();
-            return;
-        }
-
-        std::unordered_map<std::string, size_t> firstDeclaration;
-        for (size_t i = 0; i < n; ++i)
-            if (!declName[i].empty() && !firstDeclaration.contains(declName[i]))
-                firstDeclaration[declName[i]] = i;
-
-        for (size_t s = 0; s < segCount; ++s) {
-            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
-                if (declName[i].empty() || !crossing[i] || firstDeclaration[declName[i]] == i || !CanDemoteLocal(stmts[i]))
-                    continue;
-                DemoteLocal(stmts[i]);
-                declName[i].clear();
-                crossing[i] = false;
-            }
             bool hasLocal = false;
             bool hasCrossing = false;
             for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
@@ -166,29 +168,6 @@ class ScopeBlockIntroducer {
                 hasCrossing |= !declName[i].empty() && crossing[i];
             }
             wrapped[s] = hasLocal && !hasCrossing;
-            mixed[s] = hasLocal && hasCrossing;
-            if (wrapped[s])
-                anyWrap = true;
-        }
-
-        std::vector<std::vector<std::pair<size_t, size_t>>> partial(segCount);
-        for (size_t s = 0; s < segCount; ++s) {
-            if (!mixed[s])
-                continue;
-            for (size_t i = bounds[s]; i < bounds[s + 1]; ++i) {
-                if (declName[i].empty() || crossing[i])
-                    continue;
-                const auto use = lifeLastUse.find(i);
-                const size_t end = (use == lifeLastUse.end() ? i : use->second) + 1;
-                bool containsCrossing = false;
-                for (size_t j = i; j < end; ++j)
-                    if (!declName[j].empty() && crossing[j]) {
-                        containsCrossing = true;
-                        break;
-                    }
-                if (!containsCrossing)
-                    partial[s].emplace_back(i, end);
-            }
         }
 
         std::vector<std::shared_ptr<Statement>> rebuilt;
@@ -210,25 +189,6 @@ class ScopeBlockIntroducer {
                     block->bEmitAsDoBlock = true;
                     block->body.assign(seg.begin() + lead, seg.end());
                     rebuilt.push_back(block);
-                }
-            } else if (!partial[s].empty()) {
-                size_t i = bounds[s];
-                size_t range = 0;
-                while (i < bounds[s + 1]) {
-                    while (range < partial[s].size() && partial[s][range].second <= i)
-                        ++range;
-                    if (range >= partial[s].size() || partial[s][range].first != i) {
-                        rebuilt.push_back(stmts[i++]);
-                        continue;
-                    }
-                    size_t end = partial[s][range].second;
-                    while (++range < partial[s].size() && partial[s][range].first < end)
-                        end = (std::max)(end, partial[s][range].second);
-                    auto block = std::make_shared<BlockStatementNode>();
-                    block->bEmitAsDoBlock = true;
-                    block->body.assign(stmts.begin() + i, stmts.begin() + end);
-                    rebuilt.push_back(block);
-                    i = end;
                 }
             } else {
                 rebuilt.insert(rebuilt.end(), seg.begin(), seg.end());
@@ -264,8 +224,8 @@ class ScopeBlockIntroducer {
     }
 
     static bool CanDemoteLocal(const std::shared_ptr<Statement> &stmt) {
-        if (std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
-            return true;
+        if (auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
+            return declaration->value != nullptr;
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt))
             return fn->bIsLocalDeclaration && !fn->bAnonymousInline;
         return LocalDeclCall(stmt) != nullptr;
@@ -317,74 +277,77 @@ class ScopeBlockIntroducer {
     // Collect the names a statement REFERENCES (uses/writes), recursing into nested blocks and inline
     // closures (which are scoped in passing). A declaration's own bound name is excluded so it does
     // not count as a use of itself.
-    void ProcessStatement(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &refs) {
+    void ProcessStatement(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &refs, std::unordered_set<std::string> &captures) {
         if (!stmt)
             return;
         if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            ScanExpr(decl->value, refs); // RHS only; the bound LHS name is the declaration, not a use
+            ScanExpr(decl->value, refs, captures); // RHS only; the bound LHS name is the declaration, not a use
             return;
         }
         if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            ScanExpr(ifS->condition, refs);
+            ScanExpr(ifS->condition, refs, captures);
             if (ifS->thenBranch)
-                ProcessList(ifS->thenBranch->body, refs);
+                ProcessList(ifS->thenBranch->body, refs, nullptr, &captures);
             if (ifS->elseBranch)
-                ProcessList(ifS->elseBranch->body, refs);
+                ProcessList(ifS->elseBranch->body, refs, nullptr, &captures);
             return;
         }
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+            captures.insert(fn->capturedNames.begin(), fn->capturedNames.end());
             if (fn->lpFunctionBody)
                 ProcessList(fn->lpFunctionBody->body, refs);
             return;
         }
         if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            ScanExpr(w->condition, refs);
+            ScanExpr(w->condition, refs, captures);
             if (w->body)
-                ProcessList(w->body->body, refs);
+                ProcessList(w->body->body, refs, nullptr, &captures);
             return;
         }
         if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            ScanExpr(r->condition, refs);
+            std::unordered_set<std::string> conditionRefs;
+            ScanExpr(r->condition, conditionRefs, captures);
+            refs.insert(conditionRefs.begin(), conditionRefs.end());
             if (r->body)
-                ProcessList(r->body->body, refs);
+                ProcessList(r->body->body, refs, &conditionRefs, &captures);
             return;
         }
         if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            ScanExpr(fnum->startVariable, refs);
-            ScanExpr(fnum->increaseBy, refs);
-            ScanExpr(fnum->maxIncreased, refs);
+            ScanExpr(fnum->startVariable, refs, captures);
+            ScanExpr(fnum->increaseBy, refs, captures);
+            ScanExpr(fnum->maxIncreased, refs, captures);
             if (fnum->lpLoopBody)
-                ProcessList(fnum->lpLoopBody->body, refs);
+                ProcessList(fnum->lpLoopBody->body, refs, nullptr, &captures);
             return;
         }
         if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            ScanExpr(fgen->generator, refs);
-            ScanExpr(fgen->state, refs);
-            ScanExpr(fgen->index, refs);
+            ScanExpr(fgen->generator, refs, captures);
+            ScanExpr(fgen->state, refs, captures);
+            ScanExpr(fgen->index, refs, captures);
             if (fgen->body)
-                ProcessList(fgen->body->body, refs);
+                ProcessList(fgen->body->body, refs, nullptr, &captures);
             return;
         }
         if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            ScanExpr(asn->left, refs); // a bare-identifier LHS write to a scoped-away local is unsafe
-            ScanExpr(asn->right, refs);
+            ScanExpr(asn->left, refs, captures); // a bare-identifier LHS write to a scoped-away local is unsafe
+            ScanExpr(asn->right, refs, captures);
             return;
         }
         if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            ScanCallOrExpr(es->expression, refs);
+            ScanCallOrExpr(es->expression, refs, captures);
             return;
         }
         if (std::dynamic_pointer_cast<CallExpressionNode>(stmt) || std::dynamic_pointer_cast<NameCallExpressionNode>(stmt)) {
-            ScanCallOrExpr(std::dynamic_pointer_cast<Expression>(stmt), refs);
+            ScanCallOrExpr(std::dynamic_pointer_cast<Expression>(stmt), refs, captures);
             return;
         }
         if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
             for (const auto &v : ret->returnValues)
-                ScanExpr(v, refs);
+                ScanExpr(v, refs, captures);
             return;
         }
         if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            ProcessList(blk->body, refs);
+            ProcessList(blk->body, refs, nullptr, &captures);
             return;
         }
         // BreakStatementNode / ContinueStatementNode / CommentNode reference nothing. Any future
@@ -395,29 +358,29 @@ class ScopeBlockIntroducer {
     // Scan a call used as a statement: callee/args are uses; rets are uses only when the call is NOT
     // a local declaration (a local decl's rets are the bound names). Falls back to a plain expression
     // scan when `e` is not a call.
-    void ScanCallOrExpr(const std::shared_ptr<Expression> &e, std::unordered_set<std::string> &refs) {
+    void ScanCallOrExpr(const std::shared_ptr<Expression> &e, std::unordered_set<std::string> &refs, std::unordered_set<std::string> &captures) {
         if (auto c = std::dynamic_pointer_cast<CallExpressionNode>(e)) {
-            ScanExpr(c->callee, refs);
+            ScanExpr(c->callee, refs, captures);
             for (const auto &a : c->arguments)
-                ScanExpr(a, refs);
+                ScanExpr(a, refs, captures);
             if (!c->bIsLocalDeclaration)
                 for (const auto &r : c->rets)
-                    ScanExpr(r, refs);
+                    ScanExpr(r, refs, captures);
             return;
         }
         if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(e)) {
-            ScanExpr(nc->calledOn, refs);
+            ScanExpr(nc->calledOn, refs, captures);
             for (const auto &a : nc->arguments)
-                ScanExpr(a, refs);
+                ScanExpr(a, refs, captures);
             if (!nc->bIsLocalDeclaration)
                 for (const auto &r : nc->rets)
-                    ScanExpr(r, refs);
+                    ScanExpr(r, refs, captures);
             return;
         }
-        ScanExpr(e, refs);
+        ScanExpr(e, refs, captures);
     }
 
-    void ScanExpr(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &refs) {
+    void ScanExpr(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &refs, std::unordered_set<std::string> &captures) {
         if (!expr)
             return;
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr)) {
@@ -426,55 +389,62 @@ class ScopeBlockIntroducer {
             return;
         }
         if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            ScanExpr(mem->table, refs);
-            ScanExpr(mem->key, refs);
+            ScanExpr(mem->table, refs, captures);
+            ScanExpr(mem->key, refs, captures);
             return;
         }
         if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            ScanExpr(idx->left, refs);
-            ScanExpr(idx->right, refs);
+            ScanExpr(idx->left, refs, captures);
+            ScanExpr(idx->right, refs, captures);
             return;
         }
         if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
             // separate type: does NOT derive from BinaryExpressionNode, so must be handled explicitly
-            ScanExpr(cmp->left, refs);
-            ScanExpr(cmp->right, refs);
+            ScanExpr(cmp->left, refs, captures);
+            ScanExpr(cmp->right, refs, captures);
             return;
         }
         if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
             // also catches TableBinaryExpressionNode (derives from BinaryExpressionNode)
-            ScanExpr(bin->left, refs);
-            ScanExpr(bin->right, refs);
+            ScanExpr(bin->left, refs, captures);
+            ScanExpr(bin->right, refs, captures);
             return;
         }
         if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            ScanExpr(un->operand, refs);
+            ScanExpr(un->operand, refs, captures);
+            return;
+        }
+        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
+            ScanExpr(conditional->condition, refs, captures);
+            ScanExpr(conditional->thenExpr, refs, captures);
+            ScanExpr(conditional->elseExpr, refs, captures);
             return;
         }
         if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            ScanExpr(call->callee, refs);
+            ScanExpr(call->callee, refs, captures);
             for (const auto &a : call->arguments)
-                ScanExpr(a, refs);
+                ScanExpr(a, refs, captures);
             for (const auto &rt : call->rets)
-                ScanExpr(rt, refs);
+                ScanExpr(rt, refs, captures);
             return;
         }
         if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            ScanExpr(nameCall->calledOn, refs);
+            ScanExpr(nameCall->calledOn, refs, captures);
             for (const auto &a : nameCall->arguments)
-                ScanExpr(a, refs);
+                ScanExpr(a, refs, captures);
             for (const auto &rt : nameCall->rets)
-                ScanExpr(rt, refs);
+                ScanExpr(rt, refs, captures);
             return;
         }
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+            captures.insert(fn->capturedNames.begin(), fn->capturedNames.end());
             if (fn->lpFunctionBody)
                 ProcessList(fn->lpFunctionBody->body, refs); // scope inside inline closures too
             return;
         }
         if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
             for (const auto &e : tbl->expressions)
-                ScanExpr(e, refs);
+                ScanExpr(e, refs, captures);
             return;
         }
         // literals (nil/bool/number/integer/string/vector), VarArgExpression, NoExpression reference

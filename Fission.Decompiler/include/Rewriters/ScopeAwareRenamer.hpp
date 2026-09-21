@@ -452,6 +452,12 @@ class ScopeAwareRenamer {
                 merged.insert(bound.begin(), bound.end());
                 use = &merged;
             }
+            std::unordered_set<std::string> renamedCaptures;
+            for (const auto &name : fn->capturedNames) {
+                const auto replacement = rename.find(name);
+                renamedCaptures.insert(replacement != rename.end() && !use->contains(name) ? replacement->second : name);
+            }
+            fn->capturedNames = std::move(renamedCaptures);
             for (const auto &[idx, arg] : fn->argumentsNames)
                 if (arg)
                     RenameExpr(arg->argumentName, rename, *use);
