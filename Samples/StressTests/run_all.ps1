@@ -1,11 +1,14 @@
 param(
     [string]$ResultsDir = (Join-Path $PSScriptRoot "results"),
-    [switch]$OptimizeIR
+    [switch]$OptimizeIR,
+    [string]$CliExe
 )
 
 $ErrorActionPreference = "Stop"
 $RepoRoot = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$CliExe = Join-Path $RepoRoot "cmake-build-debug\Fission.CLI.exe"
+if (-not $CliExe) {
+    $CliExe = Join-Path $RepoRoot "cmake-build-debug\Fission.CLI.exe"
+}
 
 New-Item -ItemType Directory -Path $ResultsDir -Force | Out-Null
 

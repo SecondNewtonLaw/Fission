@@ -258,6 +258,13 @@ class DeadLocalEliminator : public ASTRewriter {
                 return true;
             return fd->lpFunctionBody && MentionsBlock(fd->lpFunctionBody, name);
         }
+        if (auto cls = std::dynamic_pointer_cast<ClassDeclarationNode>(s)) {
+            if (MentionsExpression(cls->superclass, name))
+                return true;
+            for (const auto &method : cls->methods)
+                if (MentionsExpression(method, name))
+                    return true;
+        }
         if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s))
             return MentionsBlock(blk, name);
         if (auto e = std::dynamic_pointer_cast<Expression>(s))

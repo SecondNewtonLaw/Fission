@@ -833,6 +833,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_capturedRegisters.clear();
     this->m_processedInstructions.clear();
     this->m_inlineConsumedDefs.clear();
+    this->m_pendingClasses.clear();
     this->m_phiConsumers.clear();
     this->m_deferToConditionInline.clear();
     this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
@@ -934,9 +935,17 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 const bool srcIsRegister = cap.operands.size() >= 2 && cap.operands[1].type == LiftedOperandType::Register;
                 if ((mode == 0 || mode == 1) && srcIsRegister) {
                     m_capturedRegisters.insert(cap.operands[1].value.reg);
-                    if (proto->upvalueNames.size() > capIdx)
+                    if (proto->upvalueNames.size() > capIdx) {
                         analyzedFunction.ssaOverrides[SSARef{static_cast<uint8_t>(cap.operands[1].value.reg), cap.operands[1].ssaVersion}] =
                             proto->upvalueNames[capIdx];
+                        if (mode == 1)
+                            for (const auto &local : analyzedFunction.lpLiftedFunction->lpDeserialized->locvars)
+                                if (local.reg == cap.operands[1].value.reg && local.startpc <= cap.instructionIndex && cap.instructionIndex < local.endpc)
+                                    for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+                                        if (ref.regIndex == local.reg && definition && local.startpc <= definition->instructionIndex &&
+                                            definition->instructionIndex < local.endpc)
+                                            analyzedFunction.ssaOverrides[ref] = proto->upvalueNames[capIdx];
+                    }
                 }
             }
         }
@@ -1105,51 +1114,6 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         ast.statements = LiftControlFlow(0, InvalidBlockId, visited).Run();
         // nested blocks fold via CreateBlock; the top-level body comes straight from LiftControlFlow, so fold it too.
         FoldShortCircuitChain(ast.statements);
-
-        // `export class C` is lowered as `local t = {}; t.C = C; return table.freeze(t)`.
-        // The class declaration already carries the source-level export, so discard only this compiler scaffold.
-        std::unordered_set<std::string> exportedClasses;
-        for (const auto &statement : ast.statements)
-            if (auto classNode = std::dynamic_pointer_cast<ClassDeclarationNode>(statement); classNode && classNode->bExported)
-                exportedClasses.insert(classNode->className);
-        std::unordered_set<std::string> exportTables;
-        for (const auto &statement : ast.statements) {
-            auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statement);
-            if (!assignment)
-                continue;
-            auto member = std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left);
-            auto table = member ? std::dynamic_pointer_cast<IdentifierExpressionNode>(member->table) : nullptr;
-            auto key = member ? std::dynamic_pointer_cast<StringLiteralNode>(member->key) : nullptr;
-            auto value = std::dynamic_pointer_cast<IdentifierExpressionNode>(assignment->right);
-            if (table && table->identifier && key && value && value->identifier && exportedClasses.contains(key->value) &&
-                value->identifier->name == key->value)
-                exportTables.insert(table->identifier->name);
-        }
-        if (!exportTables.empty()) {
-            std::erase_if(ast.statements, [&](const auto &statement) {
-                if (auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statement)) {
-                    auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(declaration->identifier);
-                    auto table = std::dynamic_pointer_cast<TableLiteralNode>(declaration->value);
-                    return identifier && identifier->identifier && table && table->expressions.empty() && exportTables.contains(identifier->identifier->name);
-                }
-                if (auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statement)) {
-                    auto member = std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left);
-                    auto table = member ? std::dynamic_pointer_cast<IdentifierExpressionNode>(member->table) : nullptr;
-                    return table && table->identifier && exportTables.contains(table->identifier->name);
-                }
-                if (auto result = std::dynamic_pointer_cast<ReturnStatementNode>(statement); result && result->returnValues.size() == 1) {
-                    auto call = std::dynamic_pointer_cast<CallExpressionNode>(result->returnValues.front());
-                    auto freeze = call ? std::dynamic_pointer_cast<MemberExpressionNode>(call->callee) : nullptr;
-                    auto table = freeze ? std::dynamic_pointer_cast<IdentifierExpressionNode>(freeze->table) : nullptr;
-                    auto key = freeze ? std::dynamic_pointer_cast<StringLiteralNode>(freeze->key) : nullptr;
-                    return table && table->identifier && key && key->value == "freeze" && call->arguments.size() == 1 &&
-                           std::dynamic_pointer_cast<IdentifierExpressionNode>(call->arguments.front()) &&
-                           std::dynamic_pointer_cast<IdentifierExpressionNode>(call->arguments.front())->identifier &&
-                           (exportTables.contains(table->identifier->name) || !exportedClasses.empty());
-                }
-                return false;
-            });
-        }
 
         std::string ttinfo = "Unavailable";
 
@@ -2816,11 +2780,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         }
         case LiftedOperation::SETTABLEKS: {
             const auto &k = ConstantAt(inst.operands[2].value.imm.k);
-            if (inst.operands[0].type == LiftedOperandType::Register && k.kType == LUA_TSTRING) {
-                const SSARef classRef{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
-                if (auto pc = m_pendingClasses.find(classRef); pc != m_pendingClasses.end() && std::get<std::string>(k.constantData) == pc->second->className)
-                    pc->second->bExported = true;
-            }
             auto memExpr = std::make_shared<MemberExpressionNode>(LiftExpression(inst.operands[1]), std::get<std::string>(k.constantData));
             statements.push_back(std::make_shared<AssignmentStatementNode>(memExpr, LiftExpression(inst.operands[0])));
             break;
@@ -3606,7 +3565,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                     statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
                 }
-                if (forceDefinitions)
+                if (forceDefinitions || inst.operation == LiftedOperation::NEWTABLE || inst.operation == LiftedOperation::DUPTABLE)
                     m_processedInstructions.insert(inst.instructionIndex);
             }
             break;

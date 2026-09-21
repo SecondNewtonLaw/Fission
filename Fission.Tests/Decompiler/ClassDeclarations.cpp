@@ -1,10 +1,12 @@
 // Hand-build experimental V10 class opcodes and verify source reconstruction through the identity decoder.
 
+#include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
 #include <catch2/catch_test_macros.hpp>
+#include <catch2/generators/catch_generators.hpp>
 #include <cstring>
 #include <regex>
 #include <string>
@@ -375,7 +377,98 @@ TEST_CASE("Class: NEWCLASS opcode decompiles compiler-emitted classes", "[Decomp
     CHECK(ContainsRegex(out, std::regex(R"(public\s+breed)")));
     CHECK(ContainsRegex(out, std::regex(R"(function\s+live\s*\()")));
     CHECK(ContainsRegex(out, std::regex(R"(function\s+describe\s*\()")));
-    CHECK(ContainsRegex(out, std::regex(R"(export\s+class\s+Cat\s+extends\s+Animal)")));
+    CHECK(ContainsRegex(out, std::regex(R"(class\s+Cat\s+extends\s+Animal)")));
+    CHECK(Contains(out, "table.freeze"));
+}
+
+TEST_CASE("Class: NEWCLASS preserves table exports and captured values", "[Decompiler][Class][ClassSemantics]") {
+    EnableLuauFFlagsOnce();
+    struct ClassFlags {
+        std::vector<std::pair<Luau::FValue<bool> *, bool>> saved;
+        ClassFlags() {
+            for (auto *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+                if (std::strcmp(flag->name, "DebugLuauUserDefinedClasses") == 0 || std::strcmp(flag->name, "DebugLuauUserDefinedClassesRuntime") == 0) {
+                    saved.emplace_back(flag, flag->value);
+                    flag->value = true;
+                }
+        }
+        ~ClassFlags() {
+            for (auto [flag, value] : saved)
+                flag->value = value;
+        }
+    } flags;
+    REQUIRE(flags.saved.size() == 2);
+    const int optimization = GENERATE(0, 1, 2);
+    const int debug = GENERATE(0, 2);
+    std::string source;
+    std::string expected;
+    SECTION("ordinary class table member") {
+        source = "class C end local t = {} t.C = C t.answer = 42 return t.answer";
+        expected = "return: 42\n";
+    }
+    SECTION("mixed module exports") {
+        source = "export class C end export local answer = 42";
+        expected = "return: {\"C\"=<class>,\"answer\"=42}\n";
+    }
+    SECTION("multiple classes and value exports") {
+        source = "export class C end export class D end export local answer = 42";
+        expected = "return: {\"C\"=<class>,\"D\"=<class>,\"answer\"=42}\n";
+    }
+    SECTION("method captures table") {
+        source = "local state = {} class C function get(self) return state end end return C.new({}):get()";
+        expected = "return: {}\n";
+    }
+    SECTION("method preserves captured identity and mutation") {
+        source = "local state = {n = 1} class C function get(self) return state end end "
+                 "state.n = 42 local value = C.new({}):get() return value == state, value.n";
+        expected = "return: true\t42\n";
+    }
+    SECTION("method retains binding before local shadow") {
+        source = "local state = {} class C function get(self) return state end end "
+                 "local state = {} return C.new({}):get() == state";
+        expected = "return: false\n";
+    }
+    SECTION("method observes reassigned captured binding") {
+        source = "local state = {} class C function get(self) return state end end "
+                 "local previous = state state = {} return C.new({}):get() == state, C.new({}):get() == previous";
+        expected = "return: true\tfalse\n";
+    }
+    SECTION("ordinary class table and unrelated frozen return") {
+        source = "class C end local t = {} t.C = C local other = {answer = 42} return table.freeze(other)";
+        expected = "return: {\"answer\"=42}\n";
+    }
+    SECTION("superclass read through table") {
+        source = "open class Base function get(self) return 42 end end local t = {Base = Base} "
+                 "class Child extends t.Base end return Child.new({}):get()";
+        expected = "return: 42\n";
+    }
+    const Luau::CompileOptions options{optimization, debug};
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE(!bytecode.empty());
+    REQUIRE(bytecode.front() != '\0');
+    const auto output = DecompileVanillaOrFail(bytecode);
+    INFO(output);
+    const auto compiled = Luau::compile(output, options);
+    REQUIRE(!compiled.empty());
+    REQUIRE(compiled.front() != '\0');
+    const auto prelude = Luau::compile("");
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(compiled, prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+    REQUIRE(original.trace == expected);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
+TEST_CASE("Class: reused decompiler does not retain previous class registrations", "[Decompiler][Class][ClassSemantics]") {
+    Decompiler decompiler;
+    const auto first = decompiler.DecompileVanillaBytecode(BuildClassDeclarationBytecode());
+    REQUIRE(first.resultCode == DecompileResult::Success);
+    const auto second = decompiler.DecompileVanillaBytecode(BuildClassMemberBytecode());
+    REQUIRE(second.resultCode == DecompileResult::Success);
+    INFO(second.decompilationOutput);
+    CHECK(ContainsRegex(second.decompilationOutput, std::regex(R"(function\s+\w+\.greet\s*\()")));
+    CHECK(Recompiles(second.decompilationOutput));
 }
 
 // The reconstructed class must serialize through the AST-JSON path: a ClassDeclaration node with its name,

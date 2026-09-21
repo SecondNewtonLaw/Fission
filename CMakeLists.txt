@@ -296,6 +296,9 @@ add_executable(Fission.CLI
         Fission.Decompiler/include/ASTLifter.hpp
 )
 target_link_libraries(Fission.CLI PUBLIC Fission.Decompiler)
+if (WIN32)
+    target_link_libraries(Fission.CLI PRIVATE crypt32)
+endif ()
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
 

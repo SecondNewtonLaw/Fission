@@ -47,7 +47,7 @@ static void PrintDecompileError(const DecompilationResult &result) {
 #pragma comment(lib, "crypt32.lib")
 
 std::string DecodeBase64FileToBinary(const std::wstring &filepath) {
-    std::ifstream file(filepath, std::ios::binary);
+    std::ifstream file(filepath.c_str(), std::ios::binary);
     if (!file.is_open())
         throw std::runtime_error("Failed to open Base64 file");
 

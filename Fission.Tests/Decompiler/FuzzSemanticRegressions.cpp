@@ -50,6 +50,48 @@ static bool HasAnonBareAssign(const std::string &s) {
     return false;
 }
 
+TEST_CASE("Regress fuzz: materialized numeric loop tables evaluate once", "[Decompiler][FuzzRegress][LoopTable]") {
+    EnableLuauFFlagsOnce();
+    const int optimization = GENERATE(0, 1, 2);
+    const int debug = GENERATE(0, 2);
+    std::string header;
+    SECTION("t3_1 table step after conditional limit") { header = "..., (if function() end then false else nil), {y = data.y, data[1]}"; }
+    SECTION("table start before conditional limit") { header = "{y = data.y, data[1]}, (if function() end then 2 else 3), ..."; }
+    SECTION("table limit after conditional start") { header = "(if function() end then 1 else 2), {y = data.y, data[1]}, ..."; }
+    SECTION("table step is the first invalid bound") { header = "..., (if function() end then 2 else 3), {y = data.y, data[1]}"; }
+    const std::string source = R"LUA(
+local data = setmetatable({}, {__index = function(_, key)
+    print("read", key)
+    return 1
+end})
+local function run(...)
+    for i = )LUA" + header + R"LUA( do
+    end
+end
+local ok = pcall(run, 1)
+return ok
+)LUA";
+    const Luau::CompileOptions options{optimization, debug};
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE(!bytecode.empty());
+    REQUIRE(bytecode.front() != '\0');
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+    const auto compiled = Luau::compile(result.decompilationOutput, options);
+    REQUIRE(!compiled.empty());
+    REQUIRE(compiled.front() != '\0');
+    const auto prelude = Luau::compile("");
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(compiled, prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+    REQUIRE(original.trace == "\"read\"\t\"y\"\n\"read\"\t1\nreturn: false\n");
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
 static size_t CountOccurrences(const std::string &haystack, const std::string &needle) {
     size_t n = 0;
     for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
