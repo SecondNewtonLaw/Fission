@@ -370,6 +370,14 @@ if (BUILD_TESTING)
             Fission.Tests/Decoding/BytecodeV10V12Decoding.cpp
             Fission.Tests/CFG/CFGCoherence.cpp
             Fission.Tests/Decompiler/DecompilationRoundtrip.cpp
+            Fission.Tests/Decompiler/DebugNotesRegressions.cpp
+            Fission.Tests/Decompiler/BindingLifetimeRegressions.cpp
+            Fission.Tests/Decompiler/EmptyLoopConditionRegressions.cpp
+            Fission.Tests/Decompiler/ExpressionLifetimeBatch4Regressions.cpp
+            Fission.Tests/Decompiler/ExpressionLifetimeRegressions.cpp
+            Fission.Tests/Decompiler/ForwardDeclarationRegressions.cpp
+            Fission.Tests/Decompiler/LoopOperandRegressions.cpp
+            Fission.Tests/Decompiler/RepeatExitRegressions.cpp
             Fission.Tests/Decompiler/LiftingSemantics.cpp
             Fission.Tests/Decompiler/ControlFlowRegressions.cpp
             Fission.Tests/Decompiler/ControlFlowRewriterRegressions.cpp
@@ -382,6 +390,9 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
             Fission.Tests/Decompiler/FuzzRun35678124075Regressions.cpp
             Fission.Tests/Decompiler/FuzzRun35682025082Regressions.cpp
+            Fission.Tests/Decompiler/FuzzRun35687267534Regressions.cpp
+        Fission.Tests/Decompiler/PlacementMatrix.cpp
+        Fission.Tests/Decompiler/SemanticOracleRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp

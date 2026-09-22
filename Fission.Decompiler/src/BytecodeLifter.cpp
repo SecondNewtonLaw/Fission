@@ -343,7 +343,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.b = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             if (jumpOffset != 0) {
                 instr.operands[2].type = LiftedOperandType::ImmediateInteger;
-                instr.operands[2].value.imm.n = jumpOffset;
+                instr.operands[2].value.imm.n = jumpOffset + 1; // LOADB skips C instructions after itself
             }
             break;
         }
@@ -1645,6 +1645,19 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
     // landing outside the stream (corrupt jump displacement) would read out of bounds there. The lifted
     // stream is 1:1 with the raw one, so a target is the instruction's own index plus that offset.
     const long liftedCount = static_cast<long>(liftedFunction.instructions.size());
+    // FORNPREP offsets name the FORNLOOP so the latch stands in for the exit. When the compiler threads
+    // the exit elsewhere, that shorthand lands one instruction early; use the VM target instead.
+    for (long i = 0; i < liftedCount; ++i) {
+        auto &inst = liftedFunction.instructions[i];
+        if (inst.operation != LiftedOperation::FORNPREP || inst.operands.size() < 2)
+            continue;
+        const long target = i + inst.operands[1].value.imm.n;
+        if (target < 0 || target >= liftedCount)
+            continue;
+        const auto &latch = liftedFunction.instructions[target];
+        if (latch.operation != LiftedOperation::FORNLOOP || latch.operands.empty() || latch.operands[0].value.reg != inst.operands[0].value.reg)
+            ++inst.operands[1].value.imm.n;
+    }
     for (long i = 0; i < liftedCount; ++i) {
         const auto &inst = liftedFunction.instructions[i];
         const auto &ops = inst.operands;

@@ -179,8 +179,10 @@ namespace {
         Decompiler decompiler{};
         std::ostringstream sink;
         std::streambuf *coutBuf = std::cout.rdbuf(sink.rdbuf());
-        auto result =
-            decompiler.DecompileTestCode(source, DecompilerFlags::CaptureAST | DecompilerFlags::CaptureCFGGraph, Luau::CompileOptions{kOptLevel, kDebugLevel});
+        auto result = decompiler.DecompileTestCode(
+            source, DecompilerFlags::CaptureAST | DecompilerFlags::CaptureCFGGraph | DecompilerFlags::FissionDebugNotes,
+            Luau::CompileOptions{kOptLevel, kDebugLevel}
+        );
         std::cout.rdbuf(coutBuf);
         return result;
     }
@@ -830,9 +832,17 @@ TEST_CASE("Capture: AST serializes to well-formed JSON and CFG to a DOT graph", 
 
     // CFG captured in-memory as Graphviz DOT (no cfg.dot written to disk).
     CHECK(result.cfgGraph.find("digraph") != std::string::npos);
+    CHECK(result.cfgGraph.find("<B>WHY</B>") != std::string::npos);
+    CHECK(result.cfgGraph.find("partition:") != std::string::npos);
+    CHECK(result.cfgGraph.find("link:") != std::string::npos);
+    CHECK(result.cfgGraph.find("SSA:") != std::string::npos);
+    CHECK(result.debugNotes.find("[Pipeline]") != std::string::npos);
+    CHECK(result.debugNotes.find("[CFA]") != std::string::npos);
+    CHECK(result.debugNotes.find("[SSA]") != std::string::npos);
+    CHECK(result.debugNotes.find("[AST]") != std::string::npos);
 
     // AST captured as a well-formed JSON tree rooted at a Root node, carrying the expected kinds.
-    INFO("astJson:\n" << result.astJson);
+    INFO("AST JSON bytes: " << result.astJson.size());
     REQUIRE_FALSE(result.astJson.empty());
     CHECK(IsWellFormedJson(result.astJson));
     CHECK(result.astJson.rfind("{\"kind\":\"Root\"", 0) == 0);
@@ -889,4 +899,20 @@ TEST_CASE("Capture: no captures unless the flags are set", "[Decompiler][Capture
     REQUIRE(result.resultCode == DecompileResult::Success);
     CHECK(result.cfgGraph.empty());
     CHECK(result.astJson.empty());
+    CHECK(result.debugNotes.empty());
+}
+
+TEST_CASE("Debug notes do not change decompiled source", "[Decompiler][DebugNotes]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = "local x = 1\nif x > 0 then x += 2 end\nreturn x";
+    Decompiler plainDecompiler{};
+    Decompiler debugDecompiler{};
+    const auto plain = plainDecompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{kOptLevel, kDebugLevel});
+    const auto debug = debugDecompiler.DecompileTestCode(source, DecompilerFlags::FissionDebugNotes, Luau::CompileOptions{kOptLevel, kDebugLevel});
+    REQUIRE(plain.resultCode == DecompileResult::Success);
+    REQUIRE(debug.resultCode == DecompileResult::Success);
+    CHECK(debug.decompilationOutput == plain.decompilationOutput);
+    CHECK(plain.debugNotes.empty());
+    CHECK_FALSE(debug.debugNotes.empty());
+    CHECK(debug.debugNotes.size() < 65536);
 }

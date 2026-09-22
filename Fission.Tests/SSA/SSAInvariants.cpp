@@ -13,7 +13,11 @@
 //                                           dominator-tree siblings)
 //   I8  one def per (instruction, register) (an instruction never forks a register
 //                                           into two SSA versions)
+//   I9  synthetic phis have no bytecode PC  (their identity cannot alias a real instruction)
+//   I10 reaching definitions match the VM   (phi-flattened defs of every read equal an independent
+//                                            dataflow over the raw bytecode; a superset is tolerated)
 
+#include "../../Fission.Fuzzing/include/SSAOracle.hpp"
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "DenominatorAnalysis.hpp"
@@ -30,6 +34,7 @@
 #include <cstring>
 #include <set>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 namespace {
@@ -49,40 +54,14 @@ namespace {
         return m == AccessType::Read || m == AccessType::ReadWrite;
     }
 
-    // Registers controlled by a for-loop header. Their per-iteration versions are
-    // defined structurally by the FOR* opcodes (via NewVersion) and deliberately
-    // NOT placed in definitionMap; they are loop-controlled, not inlineable
-    // expression defs; so a use of one need not resolve through definitionMap.
-    std::set<int> CollectLoopRegs(const AnalyzedFunction &fn) {
-        std::set<int> regs;
-        for (const auto &block : fn.basicBlocks) {
-            if (!block.lpHead)
-                continue;
-            for (const LiftedInstruction *p = block.lpHead; p && p <= block.lpTail; ++p) {
-                const auto op = p->operation;
-                const bool isFor = op == LiftedOperation::FORNPREP || op == LiftedOperation::FORNLOOP || op == LiftedOperation::FORGPREP ||
-                                   op == LiftedOperation::FORGLOOP || op == LiftedOperation::FORGPREP_INEXT || op == LiftedOperation::FORGPREP_NEXT;
-                if (!isFor || p->operands.empty())
-                    continue;
-                const int base = p->operands[0].value.reg;
-                for (int r = base; r <= base + 2; ++r) // numeric: limit/step/index
-                    regs.insert(r);
-                if (op == LiftedOperation::FORGLOOP && p->operands.size() >= 3) {
-                    const int numVars = p->operands[2].value.imm.n & 0xFF;
-                    for (int r = base + 3; r < base + 3 + numVars; ++r)
-                        regs.insert(r);
-                }
-                for (const auto &o : p->operands)
-                    if (o.type == LiftedOperandType::Register)
-                        regs.insert(o.value.reg);
-            }
-        }
-        return regs;
-    }
-
     // I1-I3 + I5, recursively over a function and its nested functions.
     void CheckInvariants(const AnalyzedFunction &fn) {
-        const std::set<int> loopRegs = CollectLoopRegs(fn);
+        for (const auto &block : fn.basicBlocks)
+            for (const auto &phi : block.phiNodes) {
+                INFO("phi in block=" << block.dwBlockId << " has bytecode index=" << phi.instructionIndex);
+                CHECK(phi.instructionIndex == -1);
+            }
+
         // I1: users <-> useCounts agree.
         for (const auto &[ref, insts] : fn.users) {
             const auto uc = fn.useCounts.find(ref);
@@ -118,18 +97,12 @@ namespace {
             }
         }
 
-        // I5: a used (reg,version) either resolves to a def, or is a parameter / entry
-        //     value (version <= numparams area); never a dangling higher version.
-        const int32_t numParams = fn.lpLiftedFunction ? fn.lpLiftedFunction->numparams : 0;
+        // I5: a used (reg,version) resolves to a def, or is the function-entry version 0.
         for (const auto &[usedRef, insts] : fn.users) {
             if (fn.definitionMap.contains(usedRef))
                 continue;
-            if (loopRegs.contains(usedRef.regIndex))
-                continue; // loop-induction var: defined structurally by a FOR* opcode
             INFO("unresolved use reg=" << static_cast<int>(usedRef.regIndex) << " ver=" << usedRef.version);
-            // an unresolved use must be an entry value: a parameter register, or the
-            // initial version of a register (legal nil read of an unwritten slot).
-            CHECK((usedRef.regIndex < numParams || usedRef.version <= 1));
+            CHECK(usedRef.version == 0);
         }
 
         for (const auto &inner : fn.innerFunctions)
@@ -167,31 +140,21 @@ namespace {
 
     // I6: every register write defines a resolvable SSA value. For each instruction that writes
     //     its destination register, the (reg, version) it produces must appear in definitionMap
-    //     (so every later reader can resolve it). Loop-induction registers are exempt: the FOR*
-    //     opcodes bump their version structurally without a definitionMap entry (by design).
-    //     This is the dual of I5 (every use resolves) and, run across the opcode-coverage sweep
-    //     below, exercises the SSA write/versioning path of every IR instruction Fission emits.
+    //     (so every later reader can resolve it). This is the dual of I5 (every use resolves) and,
+    //     run across the opcode-coverage sweep below, exercises the SSA write/versioning path of
+    //     every IR instruction Fission emits.
     void CheckWriteDefs(const AnalyzedFunction &fn) {
-        const std::set<int> loopRegs = CollectLoopRegs(fn);
         for (const auto &block : fn.basicBlocks) {
             if (!block.lpHead)
                 continue;
             for (const LiftedInstruction *p = block.lpHead; p && p <= block.lpTail; ++p) {
                 const auto &inst = *p;
-                // FOR* loop control registers are versioned structurally, not via definitionMap.
-                const auto op = inst.operation;
-                if (op == LiftedOperation::FORNPREP || op == LiftedOperation::FORNLOOP || op == LiftedOperation::FORGPREP ||
-                    op == LiftedOperation::FORGLOOP || op == LiftedOperation::FORGPREP_INEXT || op == LiftedOperation::FORGPREP_NEXT ||
-                    op == LiftedOperation::PHI)
-                    continue;
                 if (inst.operands.empty() || inst.operands[0].type != LiftedOperandType::Register)
                     continue;
                 const AccessType acc = SSABuilder::GetRegisterAccess(inst, 0);
                 if (acc != AccessType::Write && acc != AccessType::ReadWrite)
                     continue;
                 const SSARef ref{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
-                if (loopRegs.contains(ref.regIndex))
-                    continue;
                 INFO("write without def reg=" << static_cast<int>(ref.regIndex) << " ver=" << ref.version << " idx=" << inst.instructionIndex);
                 CHECK(fn.definitionMap.contains(ref));
             }
@@ -204,10 +167,18 @@ namespace {
     //     is used in. This is THE structural SSA property; a violation means a version
     //     leaked out of its dominator subtree (e.g. a latch def visible to a sibling
     //     branch; the exact bug class of the FORNLOOP/FORGLOOP version-stack leak).
-    //     Phi defs and phi users are exempt (a phi consumes values on predecessor edges).
+    //     A phi is defined at its own block; each phi input must be available at the end of the
+    //     predecessor it arrives from.
     void CheckDominance(const AnalyzedFunction &fn) {
         const auto domInfo = AnalyzeDenominators(fn);
-        const std::set<int> loopRegs = CollectLoopRegs(fn);
+        std::unordered_map<const LiftedInstruction *, int> phiBlock;
+        for (const auto &block : fn.basicBlocks)
+            for (const auto &phi : block.phiNodes)
+                phiBlock[&phi] = static_cast<int>(block.dwBlockId);
+        const auto blockOf = [&](const LiftedInstruction *inst) {
+            const auto it = phiBlock.find(inst);
+            return it != phiBlock.end() ? it->second : fn.GetBlockId(inst);
+        };
 
         auto dominates = [&](int a, int b) {
             // walk b's idom chain up to the entry; true if we pass a
@@ -227,13 +198,9 @@ namespace {
         for (const auto &[usedRef, insts] : fn.users) {
             const auto defIt = fn.definitionMap.find(usedRef);
             if (defIt == fn.definitionMap.end() || defIt->second == nullptr)
-                continue; // parameter / entry / structurally-versioned value
+                continue; // function-entry value
             const LiftedInstruction *def = defIt->second;
-            if (def->operation == LiftedOperation::PHI)
-                continue;
-            if (loopRegs.contains(usedRef.regIndex))
-                continue;
-            const int defBlock = fn.GetBlockId(def);
+            const int defBlock = blockOf(def);
             if (defBlock == -1)
                 continue;
             for (const LiftedInstruction *u : insts) {
@@ -248,6 +215,20 @@ namespace {
                 CHECK(dominates(defBlock, useBlock));
             }
         }
+
+        for (const auto &block : fn.basicBlocks)
+            for (const auto &phi : block.phiNodes)
+                for (size_t p = 0; p < block.predecessors.size() && p + 1 < phi.operands.size(); ++p) {
+                    const SSARef input{phi.operands[0].value.reg, phi.operands[p + 1].ssaVersion};
+                    const auto defIt = fn.definitionMap.find(input);
+                    if (input.version < 0 || defIt == fn.definitionMap.end())
+                        continue;
+                    const int defBlock = blockOf(defIt->second);
+                    INFO("phi input not available on its edge: reg=" << static_cast<int>(input.regIndex) << " ver=" << input.version
+                                                                      << " defBlock=" << defBlock << " pred=" << block.predecessors[p]
+                                                                      << " phiBlock=" << block.dwBlockId);
+                    CHECK(dominates(defBlock, static_cast<int>(block.predecessors[p])));
+                }
 
         for (const auto &inner : fn.innerFunctions)
             CheckDominance(inner);
@@ -305,9 +286,29 @@ namespace {
         CheckWriteDefs(fn);
         CheckDominance(fn);
         CheckSingleDefPerInst(fn);
+
+        const auto oracle = fuzz::CheckSSAAgainstVM(fn);
+        for (const auto &mismatch : oracle.mismatches) {
+            INFO(mismatch.function << " pc=" << mismatch.pc << " r" << mismatch.reg << " " << mismatch.operation << " " << mismatch.detail << "\n"
+                                   << oracle.dumps);
+            CHECK(mismatch.kind == "EXTRA_REACHING");
+        }
     }
 
 } // namespace
+
+TEST_CASE("SSA: reaching definitions match VM dataflow", "[SSA][Invariant][Oracle]") {
+    // loop headed at the entry block: its back-edge def must reach the in-place read
+    CheckSSA("local function f(n) repeat n *= 2 until n > 5 return n end return f");
+    CheckSSA("local function f(a, b) repeat b %= 'x' while b(false) do print() end until nil end return f");
+    // LOADB-materialized comparisons merge both loads
+    CheckSSA("local function f(x) local b = x ~= 52.5 return nil + b, x < 3 end return f");
+    // generic-for state from a branch merge; prep reads see only the entry value
+    CheckSSA("local function f(c, a, b) local s = 0 for _, v in next, if c then a else b do s += v end return s end return f");
+    CheckSSA("local function f(t) local s = 0 for k, v in t do s = s + v end return s end return f");
+    // numeric-for limit from a branch merge inside an outer loop
+    CheckSSA("local function f(c) local n = 0 repeat for i = 1, (if c then 2 else 3) do print(i) end n += 1 until n == 2 end return f");
+}
 
 TEST_CASE("SSA: straight-line code is sound", "[SSA][Invariant]") {
     CheckSSA("local a = 1 local b = a + 2 local c = a + b return a, b, c");
@@ -477,6 +478,71 @@ TEST_CASE("SSA: FASTCALL2 and CAPTURE access modes are explicit", "[SSA][Invaria
     }
     capture.operands[0].value.imm.n = 2;
     CHECK(SSABuilder::GetRegisterAccess(capture, 1) == AccessType::NoAccess);
+}
+
+TEST_CASE("SSA: FORNLOOP defines only a fresh control-variable version", "[SSA][Invariant][LoopScope]") {
+    EnableLuauFFlagsOnce();
+    Luau::CompileOptions opts{};
+    opts.optimizationLevel = 1;
+    opts.debugLevel = 1;
+    const std::string bytecode = Luau::compile(
+        "local function sum(limit, step) local total = 0 for i = 1, limit, step do total += i end return total end return sum", opts
+    );
+    REQUIRE(!bytecode.empty());
+    REQUIRE(bytecode[0] != '\0');
+
+    Fission::InstructionDecoder decoder{};
+    Deserializer deserializer{};
+    const auto deserialized = deserializer.Deserialize(bytecode);
+    REQUIRE(deserialized.has_value());
+    BytecodeLifter lifter{&decoder};
+    LiftedFunction lifted = lifter.LiftDeserializedBytecode(*deserialized);
+    ControlFlowAnalyzer cfa{};
+    AnalyzedFunction function = cfa.DetermineBasicBlocks(&lifted);
+    cfa.OptimizeGraph(function);
+    cfa.IdentifyStructures(function);
+    cfa.PruneUnreachable(function);
+    SSABuilder ssa{};
+    ssa.Build(function);
+
+    bool sawNumericLoop = false;
+    std::vector<const AnalyzedFunction *> pending{&function};
+    while (!pending.empty()) {
+        const auto *current = pending.back();
+        pending.pop_back();
+        for (const auto &inner : current->innerFunctions)
+            pending.push_back(&inner);
+        for (const auto &block : current->basicBlocks) {
+            if (!block.lpHead)
+                continue;
+            for (const auto *instruction = block.lpHead; instruction <= block.lpTail; ++instruction) {
+                if (instruction->operation != LiftedOperation::FORNLOOP)
+                    continue;
+                sawNumericLoop = true;
+                REQUIRE(instruction->operands.size() >= 3);
+                const int base = instruction->operands[0].value.reg;
+                CHECK(SSABuilder::GetRegisterAccess(*instruction, 0) == AccessType::Read);
+                CHECK(SSABuilder::GetRegisterAccess(*instruction, 2) == AccessType::Read);
+
+                const auto uses = current->implicitUses.find(instruction);
+                CHECK(uses != current->implicitUses.end());
+                if (uses != current->implicitUses.end()) {
+                    REQUIRE(uses->second.size() == 3);
+                    CHECK(uses->second[0] == instruction->operands[0].ssaVersion);
+                    CHECK(uses->second[2] == instruction->operands[2].ssaVersion);
+                }
+
+                std::vector<SSARef> definitions;
+                for (const auto &[reference, owner] : current->definitionMap)
+                    if (owner == instruction)
+                        definitions.push_back(reference);
+                REQUIRE(definitions.size() == 1);
+                CHECK(definitions[0].regIndex == base + 2);
+                CHECK(definitions[0].version > instruction->operands[2].ssaVersion);
+            }
+        }
+    }
+    REQUIRE(sawNumericLoop);
 }
 
 TEST_CASE("CFG: coincident branch targets create one edge", "[SSA][Invariant][CFG]") {

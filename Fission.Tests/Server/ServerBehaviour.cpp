@@ -157,9 +157,10 @@ TEST_CASE("Server: valid vanilla bytecode decompiles successfully", "[Server][De
     CHECK(Contains(res.body, "\"ok\":true"));
     CHECK(Contains(res.body, "\"resultCode\":\"Success\""));
     CHECK(Contains(res.body, "\"decompilationOutput\":"));
-    // source/ir/timing are always present; cfg/ast are not, since no outputs were requested.
+    // source/ir/timing are always present; optional artifacts are absent unless requested.
     CHECK_FALSE(Contains(res.body, "\"cfg\":"));
     CHECK_FALSE(Contains(res.body, "\"ast\":"));
+    CHECK_FALSE(Contains(res.body, "\"debugNotes\":"));
 }
 
 // A remote client must not be able to make the server touch its filesystem: the flags that write
@@ -204,6 +205,16 @@ TEST_CASE("Server: outputs=[cfg,ast] add the CFG graph and AST tree", "[Server][
     CHECK(Contains(res.body, "\"nodeKind\":\"IfStatement\""));
 }
 
+TEST_CASE("Server: outputs=[debug] adds bounded decompiler notes", "[Server][Decompile][Outputs]") {
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(CompileVanilla(kSnippet)), ",\"outputs\":[\"debug\"]"));
+    INFO(res.body);
+    CHECK(res.status == 200);
+    CHECK(Contains(res.body, "\"debugNotes\":\"[Pipeline]"));
+    CHECK(Contains(res.body, "[CFA]"));
+    CHECK(Contains(res.body, "[SSA]"));
+    CHECK(Contains(res.body, "[AST]"));
+}
+
 TEST_CASE("Server: undeserializable bytecode maps to a 4xx/5xx error, not a crash", "[Server][Decompile]") {
     // valid base64 but not a real Luau chunk -> the deserializer rejects it. The server must answer
     // with an error status and an ok:false body, never take the process down.
@@ -215,10 +226,13 @@ TEST_CASE("Server: undeserializable bytecode maps to a 4xx/5xx error, not a cras
 
 TEST_CASE("Server: Luau script errors include compiler diagnostic", "[Server][Decompile]") {
     const std::string diagnostic = ":1: Incomplete statement: expected assignment or a function call";
-    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(std::string(1, '\0') + diagnostic)));
+    const auto res =
+        Handle("POST", "/decompile", DecompileBody(Base64Encode(std::string(1, '\0') + diagnostic), ",\"outputs\":[\"debug\"]"));
     INFO(res.body);
     CHECK(res.status == 422);
     CHECK(Contains(res.body, "Nothing to decompile, bytecode is a script error: " + diagnostic));
+    CHECK(Contains(res.body, "\"debugNotes\":\"[Pipeline]"));
+    CHECK(Contains(res.body, "compiler input contains an error diagnostic instead of bytecode"));
 }
 
 TEST_CASE("Server: a per-request timeout is accepted and clamped to the server max", "[Server][Decompile]") {

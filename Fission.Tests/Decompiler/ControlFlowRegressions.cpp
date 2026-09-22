@@ -602,7 +602,7 @@ TEST_CASE("Sibling branches keep independent local bindings", "[Decompiler][Scop
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(else\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+\.\.\.)")));
+    CHECK(ContainsRegex(out, std::regex(R"(else\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));
     CHECK(Recompiles(out));
 }
 

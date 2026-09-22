@@ -8,7 +8,7 @@
 #include "AbstractSyntaxTree/Visitor.hpp"
 #include "SafetyGuard.hpp"
 
-#include <cmath>
+#include <bit>
 #include <cstdint>
 #include <format>
 #include <sstream>
@@ -703,10 +703,13 @@ class SourceGenerator : public Visitor {
     void Visit(NumberLiteralNode *lpNode) override {
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        if (std::isnan(lpNode->value))
+        // Floating-point predicates can fold to false under fast-math.
+        const uint64_t bits = std::bit_cast<uint64_t>(lpNode->value);
+        const uint64_t magnitude = bits & 0x7fffffffffffffffULL;
+        if (magnitude > 0x7ff0000000000000ULL)
             buffer << "(0 / 0)";
-        else if (std::isinf(lpNode->value))
-            buffer << (std::signbit(lpNode->value) ? "(-1 / 0)" : "(1 / 0)");
+        else if (magnitude == 0x7ff0000000000000ULL)
+            buffer << ((bits >> 63) ? "(-1 / 0)" : "(1 / 0)");
         else
             buffer << std::format("{}", lpNode->value);
         if (lpNode->bUseParenthesis)

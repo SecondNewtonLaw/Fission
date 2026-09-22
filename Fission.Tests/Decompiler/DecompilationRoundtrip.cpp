@@ -262,6 +262,19 @@ TEST_CASE("DeclarationHoister: coalesces only safe adjacent assignments", "[Deco
         auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), nullptr), std::make_shared<AssignmentStatementNode>(id("v40"), value)});
         CHECK(s.size() == 2);
     }
+    {
+        auto body = std::make_shared<BlockStatementNode>();
+        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v40")}));
+        auto fn =
+            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
+        fn->capturedNames.insert("v40");
+        auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), fn)});
+        REQUIRE(s.size() == 2);
+        auto d = std::dynamic_pointer_cast<VariableDeclarationNode>(s.front());
+        REQUIRE(d);
+        CHECK_FALSE(d->value);
+        CHECK(std::dynamic_pointer_cast<AssignmentStatementNode>(s.back()));
+    }
 }
 
 TEST_CASE("DeclarationHoister: hoists branch writes with suffixed register names", "[Decompiler][Rewriter]") {

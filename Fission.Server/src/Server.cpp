@@ -82,10 +82,12 @@ namespace {
         return output;
     }
 
-    std::string ErrorJson(const std::string &message) {
+    std::string ErrorJson(const std::string &message, const std::string &debugNotes = {}) {
         json::object obj;
         obj["ok"] = false;
         obj["error"] = message;
+        if (!debugNotes.empty())
+            obj["debugNotes"] = debugNotes;
         return json::serialize(obj);
     }
 
@@ -101,6 +103,8 @@ namespace {
         // Optional AST output stays structured JSON instead of a JSON-encoded string.
         if (!result.cfgGraph.empty())
             res["cfg"] = result.cfgGraph;
+        if (!result.debugNotes.empty())
+            res["debugNotes"] = result.debugNotes;
         if (!result.astJson.empty()) {
             boost::system::error_code ec;
             json::value astValue = json::parse(result.astJson, ec);
@@ -119,7 +123,7 @@ namespace {
         obj["version"] = "1.0.0";
         obj["description"] = "Luau bytecode decompilation HTTP API";
         json::object endpoints;
-        endpoints["decompile"] = "POST /decompile  (body: {mode, bytecode, flags?, timeout?, outputs?}; outputs may include \"cfg\" and \"ast\")";
+        endpoints["decompile"] = "POST /decompile  (body: {mode, bytecode, flags?, timeout?, outputs?}; outputs may include \"cfg\", \"ast\", and \"debug\")";
         endpoints["health"] = "GET /health";
         endpoints["root"] = "GET /";
         obj["endpoints"] = endpoints;
@@ -153,6 +157,7 @@ namespace {
         setFlag("inferRobloxTypes", DecompilerFlags::InferRobloxTypes);
         setFlag("autoNameVariables", DecompilerFlags::AutoNameVariables);
         setFlag("omitFissionComments", DecompilerFlags::OmitFissionComments);
+        setFlag("fissionDebugNotes", DecompilerFlags::FissionDebugNotes);
         return result;
     }
 
@@ -207,6 +212,8 @@ namespace {
                     flags |= DecompilerFlags::CaptureCFGGraph;
                 else if (output == "ast")
                     flags |= DecompilerFlags::CaptureAST;
+                else if (output == "debug")
+                    flags |= DecompilerFlags::FissionDebugNotes;
             }
         }
 
@@ -234,7 +241,7 @@ namespace {
         static const char *kErrorMessages[] = {"", "Failed to read file", "Failed to deserialize bytecode", "Internal decompilation failure"};
         const unsigned int httpStatus = (result.resultCode == DecompileResult::FailedToDeserialize) ? 422u : 500u;
         const std::string errorMessage = result.errorMessage.empty() ? kErrorMessages[static_cast<int>(result.resultCode)] : result.errorMessage;
-        return {httpStatus, "application/json", ErrorJson(errorMessage)};
+        return {httpStatus, "application/json", ErrorJson(errorMessage, result.debugNotes)};
     }
 
     // Bound memory consumed before request validation.

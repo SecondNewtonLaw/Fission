@@ -131,6 +131,8 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
 
                 currentBlock.loopHeader = GetBlockIdAtInstruction((currentBlock.lpTail) + offset, leaderToBlockId);
                 blocks.at(*currentBlock.loopHeader).loopLatch = i; // current block is exit for the loop.
+                ExplainDetail(currentBlock, "link: {} back-edge selects B{} as loop header", OperationToString(currentBlock.lpTail->operation), *currentBlock.loopHeader);
+                ExplainDetail(blocks.at(*currentBlock.loopHeader), "link: B{} {} selects this block as loop header", i, OperationToString(currentBlock.lpTail->operation));
 
                 nextInstructions.push_back(currentBlock.lpTail + 1);
                 currentBlock.loopLatch = i /* self */;
@@ -210,6 +212,20 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
             if (std::ranges::find(predecessors, currentBlock.dwBlockId) == predecessors.end())
                 predecessors.push_back(currentBlock.dwBlockId);
         }
+
+        if (currentBlock.ifStatementTrue && currentBlock.ifStatementFalse) {
+            ExplainDetail(
+                currentBlock, "link: {} maps true to B{} and false to B{}", OperationToString(currentBlock.lpTail->operation), *currentBlock.ifStatementTrue,
+                *currentBlock.ifStatementFalse
+            );
+        } else if (currentBlock.successors.size() == 1) {
+            ExplainDetail(
+                currentBlock, "link: {} edge targets B{}", currentBlock.bTerminator == BlockTerminator::Fallthrough ? "fallthrough" : "jump",
+                currentBlock.successors.front()
+            );
+        } else if (currentBlock.successors.empty()) {
+            ExplainDetail(currentBlock, "link: no successor; path terminates here");
+        }
     }
     if (!blocks.empty() && blocks.back().bTerminator == BlockTerminator::Fallthrough) {
         std::vector<bool> visited(blocks.size(), false);
@@ -229,6 +245,7 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
 }
 
 AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction) {
+    SetDebugFunction(lpLiftedFunction);
     std::vector<BasicBlock> basicBlocks;
 
     std::set<size_t> leaderIndexes;
@@ -312,23 +329,29 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
                 else
                     block.bType = BlockType::Continue; // possibly breaking out of a loop.
 
+                ExplainDetail(block, "partition: JUMP before FORxLOOP uses offset {}; provisional {}", jmpOffset, jmpOffset > 0 ? "break" : "continue");
+
                 break;
             }
 
             auto jmpOffset = GetJumpOffset(tailInst);
             if (jmpOffset < 0) {
                 block.bType = BlockType::Continue;
+                ExplainDetail(block, "partition: backward JUMP offset {} creates continue/back-edge candidate", jmpOffset);
             } else {
                 // Dominance analysis later classifies forward jumps inside loops.
+                ExplainDetail(block, "partition: forward JUMP offset {}; loop pass decides break role", jmpOffset);
             }
 
             break;
         }
         case LiftedOperation::LOADNJUMP: // DO NOT FUCKING ADD FORXPREP OPERATIONS HERE, THEY ARE NOT A TERMINATOR.
             block.bTerminator = BlockTerminator::Unconditional;
-            if (GetJumpOffset(tailInst) < 0)
+            if (GetJumpOffset(tailInst) < 0) {
                 block.bType = BlockType::LoopLatch;
-            else {
+                ExplainDetail(block, "partition: LOADNJUMP offset {} creates loop-latch candidate", GetJumpOffset(tailInst));
+            } else {
+                ExplainDetail(block, "partition: LOADNJUMP offset {} is forward", GetJumpOffset(tailInst));
             }
 
             break;
@@ -336,8 +359,10 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
             block.bTerminator = BlockTerminator::Conditional;
             if (GetJumpOffset(tailInst) < 0) {
                 block.bType = BlockType::LoopLatch;
+                ExplainDetail(block, "partition: backward JUMPXEQK offset {} creates loop-latch candidate", GetJumpOffset(tailInst));
             } else {
                 block.bType = BlockType::IfHeader;
+                ExplainDetail(block, "partition: forward JUMPXEQK offset {} creates conditional header", GetJumpOffset(tailInst));
             }
             break;
 
@@ -347,6 +372,7 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::FORNPREP: {
             block.bTerminator = BlockTerminator::Conditional;
             block.bType = BlockType::LoopHeader;
+            ExplainDetail(block, "partition: {} is loop-preparation opcode", OperationToString(tailInst->operation));
             break;
         }
         case LiftedOperation::JUMPIF:
@@ -359,20 +385,25 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
         case LiftedOperation::JUMPIFNOTLT:
             block.bType = BlockType::IfHeader;
             block.bTerminator = BlockTerminator::Conditional;
+            ExplainDetail(block, "partition: {} creates conditional header", OperationToString(tailInst->operation));
             break;
         case LiftedOperation::FORNLOOP:
         case LiftedOperation::FORGLOOP:
             block.bTerminator = BlockTerminator::Conditional;
-            if (GetJumpOffset(tailInst) < 0)
+            if (GetJumpOffset(tailInst) < 0) {
                 block.bType = BlockType::LoopLatch;
+                ExplainDetail(block, "partition: {} offset {} creates loop latch", OperationToString(tailInst->operation), GetJumpOffset(tailInst));
+            }
             break;
         case LiftedOperation::RETURN:
             block.bTerminator = BlockTerminator::Return;
             block.bType = BlockType::Return;
+            ExplainDetail(block, "partition: RETURN terminates function path");
             break;
         default:
             block.bTerminator = BlockTerminator::Fallthrough;
             block.bType = BlockType::Standard;
+            ExplainDetail(block, "partition: tail {} falls through", OperationToString(tailInst->operation));
             break;
         }
 
@@ -457,6 +488,7 @@ void ControlFlowAnalyzer::OptimiseGraphInternal(std::vector<BasicBlock> &blocks)
                 }
 
                 block.bType = BlockType::Dead; // mark dead
+                Explain(block, "optimize: empty forwarding block removed; predecessors redirected to B{}", targetId);
                 block.successors.clear();
                 block.predecessors.clear();
 
@@ -569,6 +601,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                               header.lpTail->operation == LiftedOperation::FORGPREP_NEXT || header.lpTail->operation == LiftedOperation::FORGPREP_INEXT);
         if (headerIsForPrep) {
             blk.bType = BlockType::LoopLatch; // still surface the back-edge so the wrapper-detect succeeds
+            Explain(blk, "structure: back-edge reaches FORxPREP B{}; keep latch visible without overwriting for-loop kind", headerId);
+            Explain(header, "structure: B{} back-edge encloses this for header", blk.dwBlockId);
             continue;
         }
 
@@ -577,6 +611,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         blk.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
         header.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
         blk.bType = BlockType::LoopLatch;
+        Explain(blk, "structure: backward JUMP targets B{}; provisional while latch", headerId);
+        Explain(header, "structure: B{} backward JUMP targets this block; provisional while header", blk.dwBlockId);
 
         std::optional<uint32_t> loopExit;
         for (const uint32_t succ : header.successors) {
@@ -585,11 +621,13 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 break;
             }
         }
-        if (!loopExit.has_value() && header.ifStatementFalse.has_value())
-            loopExit = header.ifStatementFalse.value();
         if (loopExit.has_value()) {
             blk.loopExit = loopExit.value();
             header.loopExit = loopExit.value();
+            Explain(blk, "structure: B{} chosen as provisional loop exit; header successor cannot reach latch B{}", *loopExit, blk.dwBlockId);
+            Explain(header, "structure: B{} chosen as provisional loop exit; it cannot reach latch B{}", *loopExit, blk.dwBlockId);
+        } else {
+            Explain(header, "structure: no header successor escapes latch B{}; loop considered infinite", blk.dwBlockId);
         }
     }
 
@@ -602,8 +640,12 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 if (blocks[succ].bType != BlockType::LoopHeader && blocks[succ].bType != BlockType::Break && blocks[succ].bType != BlockType::Continue)
                     blocks[succ].bType = BlockType::LoopHeader;
 
-                if (block.bType != BlockType::Return && block.bType != BlockType::Break)
+                Explain(blocks[succ], "structure: B{} -> B{} is back-edge because B{} dominates B{}", block.dwBlockId, succ, succ, block.dwBlockId);
+
+                if (block.bType != BlockType::Return && block.bType != BlockType::Break) {
                     block.bType = BlockType::LoopLatch;
+                    Explain(block, "structure: edge to dominating B{} makes this block a loop latch", succ);
+                }
             }
         }
     }
@@ -613,6 +655,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             for (int32_t pred : block.predecessors) {
                 if (dominates(block.dwBlockId, pred)) {
                     block.bType = BlockType::LoopHeader;
+                    Explain(block, "structure: conditional block dominates predecessor B{}; classify as loop header", pred);
                     break;
                 }
             }
@@ -636,9 +679,11 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         block.loopHeader = block.dwBlockId;
         block.loopLatch = block.dwBlockId;
         block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+        Explain(block, "structure: unconditional self-edge forms infinite while header and latch");
         for (uint32_t succ : block.successors)
             if (succ != block.dwBlockId) {
                 block.loopExit = succ;
+                Explain(block, "structure: non-self successor B{} is infinite-loop exit", succ);
                 break;
             }
     }
@@ -660,6 +705,10 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             if (successor.lpTail != successor.lpHead ||
                 (successor.lpTail->operation != LiftedOperation::FORNLOOP && successor.lpTail->operation != LiftedOperation::FORGLOOP))
                 continue; // not target
+            // A threaded exit can reach an enclosing loop's latch; only the latch of this loop's registers pairs.
+            if (successor.lpTail->operands.empty() || block.lpTail->operands.empty() ||
+                successor.lpTail->operands[0].value.reg != block.lpTail->operands[0].value.reg)
+                continue;
 
             auto loopFlag = LoopBlockFlags::WhileLoop;
 
@@ -739,14 +788,24 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 auto &successor = blocks.at(succ);
                 const bool innermostLatch = !successor.loopLatch || block.lpTail->instructionIndex < blocks[*successor.loopLatch].lpTail->instructionIndex;
                 // A separate back-edge into a for header belongs to an enclosing infinite while loop.
-                if ((successor.dwBlockFlags & kForLoopMask) != 0)
+                if ((successor.dwBlockFlags & kForLoopMask) != 0) {
+                    Explain(block, "structure: back-edge to for header B{} belongs to enclosing loop; do not replace for metadata", successor.dwBlockId);
                     continue;
+                }
 
                 // A back-edge through an inner loop exit belongs to an enclosing loop.
                 if (successor.loopLatch && successor.loopExit && *successor.loopLatch != block.dwBlockId &&
                     blocks[*successor.loopLatch].lpTail->instructionIndex < block.lpTail->instructionIndex && dominates(*successor.loopExit, block.dwBlockId) &&
                     !dominates(*successor.loopExit, *successor.loopLatch)) {
                     block.loopHeader = successor.dwBlockId;
+                    Explain(
+                        block, "structure: back-edge reaches B{} through inner-loop exit B{}; preserve inner latch B{} and treat this as enclosing loop edge",
+                        successor.dwBlockId, *successor.loopExit, *successor.loopLatch
+                    );
+                    Explain(
+                        successor, "structure: B{} is enclosing back-edge through inner-loop exit B{}; primary latch remains nearer B{}", block.dwBlockId,
+                        *successor.loopExit, *successor.loopLatch
+                    );
                     continue;
                 }
                 // conditional jump.
@@ -778,20 +837,61 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             continue;
                         conditionalLatch = &pred;
                         conditionalExit = other;
+                        Explain(
+                            block, "structure: candidate repeat bridge; conditional B{} selects back-edge B{} versus exit B{}", pred.dwBlockId, block.dwBlockId,
+                            other
+                        );
                         break;
                     }
 
                     if (conditionalLatch && successor.bTerminator == BlockTerminator::Conditional)
-                        for (const uint32_t headerSucc : successor.successors)
-                            if (headerSucc != conditionalExit && !reachesBefore(headerSucc, block.dwBlockId, successor.dwBlockId)) {
+                        for (const uint32_t headerSucc : successor.successors) {
+                            if (headerSucc == conditionalExit)
+                                continue;
+                            bool reachesReturn = false;
+                            std::vector<bool> seen(blocks.size());
+                            std::queue<uint32_t> pending;
+                            pending.push(headerSucc);
+                            while (!pending.empty()) {
+                                const uint32_t current = pending.front();
+                                pending.pop();
+                                if (current >= blocks.size() || current == block.dwBlockId || current == successor.dwBlockId || current == conditionalExit ||
+                                    seen[current])
+                                    continue;
+                                seen[current] = true;
+                                if (blocks[current].bType == BlockType::Return) {
+                                    reachesReturn = true;
+                                    break;
+                                }
+                                for (const uint32_t next : blocks[current].successors)
+                                    pending.push(next);
+                            }
+                            if (reachesReturn) {
+                                Explain(
+                                    block,
+                                    "structure: reject repeat candidate B{}; header arm B{} reaches return without passing latch B{} or exit B{}",
+                                    conditionalLatch->dwBlockId, headerSucc, block.dwBlockId, conditionalExit
+                                );
                                 conditionalLatch = nullptr;
                                 break;
                             }
+                        }
+
+                    if (conditionalLatch && conditionalExit < blocks.size() && blocks[conditionalExit].bType == BlockType::LoopHeader &&
+                        successor.loopExit == conditionalExit) {
+                        Explain(block, "structure: reject repeat candidate B{}; proposed exit B{} is another loop header", conditionalLatch->dwBlockId, conditionalExit);
+                        conditionalLatch = nullptr;
+                    }
 
                     if (conditionalLatch && conditionalExit < blocks.size() && blocks[conditionalExit].bTerminator == BlockTerminator::Unconditional &&
-                        blocks[conditionalExit].lpTail &&
-                        GetJumpOffset(blocks[conditionalExit].lpTail) > 0)
+                        blocks[conditionalExit].lpTail && blocks[conditionalExit].lpTail->operation == LiftedOperation::JUMP &&
+                        GetJumpOffset(blocks[conditionalExit].lpTail) > 0) {
+                        Explain(
+                            block, "structure: reject repeat candidate B{}; proposed exit B{} is forward-jump bridge", conditionalLatch->dwBlockId,
+                            conditionalExit
+                        );
                         conditionalLatch = nullptr;
+                    }
 
                     if (conditionalLatch) {
                         successor.dwBlockFlags &= ~static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
@@ -807,6 +907,12 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                                                 static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop));
                         block.loopExit.reset();
                         block.bType = BlockType::Continue;
+                        Explain(
+                            successor, "structure: conditional B{} before bridge B{} proves repeat-until; latch B{}, exit B{}", conditionalLatch->dwBlockId,
+                            block.dwBlockId, conditionalLatch->dwBlockId, conditionalExit
+                        );
+                        Explain(*conditionalLatch, "structure: repeat condition exits to B{} and otherwise returns to header B{}", conditionalExit, successor.dwBlockId);
+                        Explain(block, "structure: bridge into B{} demoted to continue after repeat latch moved to B{}", successor.dwBlockId, conditionalLatch->dwBlockId);
                         continue;
                     }
 
@@ -827,9 +933,13 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     if (isRepeatUntil) {
                         block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                        Explain(block, "structure: header B{} branches directly to this latch; classify repeat-until", successor.dwBlockId);
+                        Explain(successor, "structure: conditional header reaches latch B{} directly; classify repeat-until", block.dwBlockId);
                     } else {
                         block.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
+                        Explain(block, "structure: no post-body conditional proved repeat; retain while classification for header B{}", successor.dwBlockId);
+                        Explain(successor, "structure: back-edge B{} lacks repeat proof; retain while classification", block.dwBlockId);
                     }
                 } else {
                     auto lpPreHead = targetInstruction;
@@ -909,10 +1019,10 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             loopExit = succId;
                             break;
                         }
-                    if (!loopExit.has_value())
-                        loopExit = successor.ifStatementFalse.value_or(successor.ifStatementTrue.value());
-                    block.loopExit = loopExit.value();
-                    successor.loopExit = loopExit.value();
+                    if (loopExit.has_value()) {
+                        block.loopExit = loopExit.value();
+                        successor.loopExit = loopExit.value();
+                    }
                 }
             }
         }
@@ -982,8 +1092,10 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
         if (innermostExit >= 0 && targetId == innermostExit) {
             blk.bType = BlockType::Break;
+            Explain(blk, "structure: forward JUMP targets innermost loop exit B{}; classify break", targetId);
         } else if (dominates(innermostHeader, targetId)) {
             blk.bType = BlockType::Continue;
+            Explain(blk, "structure: forward JUMP stays inside loop header B{} dominance region; classify continue", innermostHeader);
         }
     }
 
@@ -1011,6 +1123,7 @@ void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks
     for (size_t i = 0; i < blocks.size(); ++i) {
         if (!reachable[i]) {
             blocks[i].bType = BlockType::Dead;
+            Explain(blocks[i], "prune: no path from entry B0 reaches this block");
             blocks[i].successors.clear();
             for (auto &b : blocks) {
                 std::erase(b.predecessors, i);
@@ -1021,6 +1134,7 @@ void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks
 }
 
 void ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func) {
+    SetDebugFunction(func.lpLiftedFunction);
     this->LinkBasicBlocks(func.basicBlocks);
     for (auto &sub : func.innerFunctions) {
         this->DetermineBasicBlocksInternalAdvanced(sub);
@@ -1035,18 +1149,21 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocks(LiftedFunction *lpLif
 }
 
 void ControlFlowAnalyzer::OptimizeGraph(AnalyzedFunction &func) {
+    SetDebugFunction(func.lpLiftedFunction);
     this->OptimiseGraphInternal(func.basicBlocks);
     for (auto &f : func.innerFunctions)
         this->OptimizeGraph(f);
 }
 
 void ControlFlowAnalyzer::PruneUnreachable(AnalyzedFunction &func) {
+    SetDebugFunction(func.lpLiftedFunction);
     this->PruneUnreachableBlocks(func.basicBlocks);
     for (auto &f : func.innerFunctions)
         this->PruneUnreachable(f);
 }
 
 void ControlFlowAnalyzer::IdentifyStructures(AnalyzedFunction &func) {
+    SetDebugFunction(func.lpLiftedFunction);
     this->IdentifyStructuresInternal(func);
 
     for (auto &f : func.innerFunctions)
@@ -1151,6 +1268,8 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
             spec = "/For Loop (Next Form)";
         } else if ((block.dwBlockFlags & LoopBlockFlags::ForNumericLoop) == LoopBlockFlags::ForNumericLoop) {
             spec = "/For Loop (Numeric Form)";
+        } else if ((block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop) {
+            spec = "/repeat-until structure";
         } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
             spec = "/while structure";
         } else {
@@ -1233,6 +1352,13 @@ std::string GraphVisualizer::GenerateNodeHtml(const BasicBlock &block, const Lif
         }
     } else {
         ss << "<TR><TD ALIGN=\"LEFT\">(Empty)</TD></TR>";
+    }
+
+    if (!block.analysisNotes.empty()) {
+        ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#888888\">--------------------------------------------------</FONT></TD></TR>";
+        ss << "<TR><TD ALIGN=\"LEFT\"><FONT COLOR=\"#555555\"><B>WHY</B></FONT></TD></TR>";
+        for (const auto &note : block.analysisNotes)
+            ss << "<TR><TD ALIGN=\"LEFT\" BALIGN=\"LEFT\"><FONT POINT-SIZE=\"9\" COLOR=\"#555555\">" << EscapeHtml(note) << "</FONT></TD></TR>";
     }
 
     ss << "</TABLE>";

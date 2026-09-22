@@ -2,6 +2,7 @@
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
+#include "FissionDebugNotes.hpp"
 #include <chrono>
 #if defined(__GNUC__)
 #pragma GCC diagnostic push
@@ -44,7 +45,9 @@ enum class DecompilerFlags : uint16_t {
     // Capture CFG as in-memory Graphviz DOT.
     CaptureCFGGraph = 1 << 10,
     // Capture lifted AST as JSON.
-    CaptureAST = 1 << 11
+    CaptureAST = 1 << 11,
+    // Emit bounded reasoning notes for pipeline, CFA, SSA, and AST decisions.
+    FissionDebugNotes = 1 << 12
 };
 
 constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {
@@ -76,6 +79,7 @@ struct DecompilationResult {
     std::string cfgGraph{};
     std::string astJson{};
     std::string errorMessage{};
+    std::string debugNotes{};
 };
 class Decompiler {
     Deserializer deserializer{};
@@ -84,6 +88,7 @@ class Decompiler {
     ASTLifter astLifter{};
     SourceGenerator sourceGenerator{};
     GraphVisualizer visualizer{};
+    FissionDebugNotes m_debugNotes{};
 
     // Wall-clock limit for hostile or runaway CFG and lifting work.
     std::chrono::steady_clock::duration m_decompileBudget = std::chrono::seconds(120);

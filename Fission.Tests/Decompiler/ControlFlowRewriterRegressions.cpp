@@ -402,6 +402,21 @@ TEST_CASE("Source: non-finite numbers preserve their values", "[Decompiler][Sour
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
 }
 
+TEST_CASE("Source: constant overflow preserves call argument errors", "[Decompiler][Source][Regression]") {
+    const std::string source = "select(893 ^ 373, {})";
+    const auto output = DecompileOrFail(source);
+    INFO("rendered source:\n" << output);
+    REQUIRE(Recompiles(source));
+    REQUIRE(Recompiles(output));
+    const auto prelude = Luau::compile("");
+    const auto original = fuzz::RunLuauTrace(Luau::compile(source), prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output), prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Error);
+    REQUIRE(original.trace == "error: invalid argument #1 to 'select' (index out of range)\n");
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
 // End-to-end: with the pass on, a real decompile of register-reuse-shaped code recompiles.
 TEST_CASE("Scope: pass keeps decompiled output recompilable", "[Decompiler][Scope][Regression]") {
     const auto out = DecompileOrFail(R"(

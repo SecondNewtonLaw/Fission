@@ -7,13 +7,16 @@
 
 #include "BytecodeLifter.hpp"
 #include "Deserializer.hpp"
+#include "FissionDebugNotes.hpp"
 
 #include <boost/unordered/unordered_flat_map.hpp>
 #include <cctype>
+#include <format>
 #include <map>
 #include <queue>
 #include <sstream>
 #include <unordered_set>
+#include <utility>
 
 enum class BlockType {
     Standard,
@@ -80,6 +83,7 @@ struct BasicBlock {
 
     std::vector<std::uint32_t> successors;
     std::vector<std::uint32_t> predecessors;
+    std::vector<std::string> analysisNotes;
 
     std::vector<LiftedInstruction> phiNodes;
 
@@ -416,6 +420,27 @@ inline std::string BlockTerminatorToString(BlockTerminator term) {
 }
 
 class ControlFlowAnalyzer {
+    FissionDebugNotes *m_debugNotes = nullptr;
+    std::string m_debugFunction;
+
+    void SetDebugFunction(const LiftedFunction *function) {
+        if (m_debugNotes && m_debugNotes->Enabled())
+            m_debugFunction = std::format("F{} ({})", function->lpDeserialized ? static_cast<int>(function->lpDeserialized->bytecodeId) : -1,
+                                          function->name);
+    }
+
+    template <typename... Args> void Explain(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
+        if (!m_debugNotes || !m_debugNotes->Enabled())
+            return;
+        m_debugNotes->AddBlock(FissionDebugStage::CFA, m_debugFunction, block.dwBlockId, block.analysisNotes,
+                               std::format(format, std::forward<Args>(args)...));
+    }
+
+    template <typename... Args> void ExplainDetail(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
+        if (m_debugNotes && m_debugNotes->Enabled())
+            m_debugNotes->AddBlock(FissionDebugStage::CFA, m_debugFunction, block.dwBlockId, block.analysisNotes,
+                                   std::format(format, std::forward<Args>(args)...), false);
+    }
     bool IsTerminator(LiftedOperation operation);
 
     int32_t GetJumpOffset(const LiftedInstruction *lpInstruction);
@@ -436,7 +461,9 @@ class ControlFlowAnalyzer {
     void DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func);
 
   public:
-    ControlFlowAnalyzer() = default;
+    explicit ControlFlowAnalyzer(FissionDebugNotes *debugNotes = nullptr) : m_debugNotes(debugNotes) {}
+
+    void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
 
     AnalyzedFunction DetermineBasicBlocks(LiftedFunction *lpLiftedFunction);
 

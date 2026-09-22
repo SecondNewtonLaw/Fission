@@ -221,7 +221,6 @@ static std::string FormatDecompilerOptions(DecompilerFlags flags) {
         enabled.emplace_back("AutoNameVariables");
     if ((flags & DecompilerFlags::OmitFissionComments) == DecompilerFlags::OmitFissionComments)
         enabled.emplace_back("OmitFissionComments");
-
     if (enabled.empty())
         return "None";
 
@@ -717,21 +716,38 @@ static void OptimizeAST(ASTFunction &ast) { OptimizeStatements(ast.statements); 
 DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
     Fission::ScopedThrowingAssertHandler assertGuard;
     Fission::ScopedDecompileBudget budget(m_decompileBudget);
+    const bool debugEnabled = (flags & DecompilerFlags::FissionDebugNotes) == DecompilerFlags::FissionDebugNotes;
+    m_debugNotes.Reset(debugEnabled);
+    controlFlowAnalyzer.SetDebugNotes(debugEnabled ? &m_debugNotes : nullptr);
+    ssaBuilder.SetDebugNotes(debugEnabled ? &m_debugNotes : nullptr);
+    astLifter.SetDebugNotes(debugEnabled ? &m_debugNotes : nullptr);
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "decompilation started for {} bytecode bytes", bytecode.size());
 
-    if (decoder == nullptr)
-        return {"", "", "", DecompileResult::FailedToDecompile};
+    if (decoder == nullptr) {
+        DecompilationResult failure{"", "", "", DecompileResult::FailedToDecompile};
+        m_debugNotes.Add(FissionDebugStage::Pipeline, "stopped before deserialization because decoder is null");
+        failure.debugNotes = m_debugNotes.Render();
+        return failure;
+    }
 
     try {
-        return CommonDecompilerEntryImpl(bytecode, decoder, flags);
+        auto result = CommonDecompilerEntryImpl(bytecode, decoder, flags);
+        result.debugNotes = m_debugNotes.Render();
+        return result;
     } catch (const std::exception &error) {
         DecompilationResult failure{};
         failure.resultCode = DecompileResult::FailedToDecompile;
+        m_debugNotes.Add(FissionDebugStage::Pipeline, "aborted: {}", error.what());
+        failure.debugNotes = m_debugNotes.Render();
 #ifndef PRODUCTION_BUILD
         failure.decompilationOutput = std::string("--[[ Fission failed to decompile this chunk: ") + error.what() + " ]]";
 #endif
         return failure;
     } catch (...) {
-        return {"", "", "", DecompileResult::FailedToDecompile};
+        DecompilationResult failure{"", "", "", DecompileResult::FailedToDecompile};
+        m_debugNotes.Add(FissionDebugStage::Pipeline, "aborted with a non-standard exception");
+        failure.debugNotes = m_debugNotes.Render();
+        return failure;
     }
 }
 
@@ -742,19 +758,25 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     if (!bytecode.empty() && bytecode.front() == '\0') {
         res.resultCode = DecompileResult::FailedToDeserialize;
         res.errorMessage = "Nothing to decompile, bytecode is a script error: " + bytecode.substr(1);
+        m_debugNotes.Add(FissionDebugStage::Pipeline, "compiler input contains an error diagnostic instead of bytecode");
         return res;
     }
 #endif
     const auto deserializeStart = std::chrono::steady_clock::now();
     const auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
-    if (!deserializedBytecode || deserializedBytecode->functions.empty())
+    if (!deserializedBytecode || deserializedBytecode->functions.empty()) {
+        m_debugNotes.Add(FissionDebugStage::Pipeline, "deserializer produced no functions");
         return {"", "", "", DecompileResult::FailedToDeserialize};
+    }
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "deserialized {} functions", deserializedBytecode->functions.size());
 
     auto bytecodeLifter = BytecodeLifter{decoder};
     const auto bytecodeLiftStart = std::chrono::steady_clock::now();
     auto liftedBytecode = bytecodeLifter.LiftDeserializedBytecode(*deserializedBytecode);
     const auto bytecodeLiftEnd = std::chrono::steady_clock::now();
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "bytecode lift produced {} root instructions and {} nested functions", liftedBytecode.instructions.size(),
+                     liftedBytecode.subfunctions.size());
 
     const auto controlFlowAnalyzeStart = std::chrono::steady_clock::now();
     const auto basicBlockIdentificationStart = std::chrono::steady_clock::now();
@@ -773,10 +795,12 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
     const auto unreachablePruningEnd = std::chrono::steady_clock::now();
     const auto controlFlowAnalyzeEnd = std::chrono::steady_clock::now();
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "CFA retained {} root blocks", controlFlowAnalyzedFunction.basicBlocks.size());
 
     const auto ssaStart = std::chrono::steady_clock::now();
     ssaBuilder.Build(controlFlowAnalyzedFunction);
     const auto ssaEnd = std::chrono::steady_clock::now();
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "SSA recorded {} root definitions", controlFlowAnalyzedFunction.definitionMap.size());
 
     const auto irOptimizationStart = std::chrono::steady_clock::now();
     if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR) {
@@ -793,6 +817,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto astStart = std::chrono::steady_clock::now();
     auto liftedAST = astLifter.Lift(controlFlowAnalyzedFunction);
     AddDecompilerOptionsToHeader(liftedAST, flags);
+    const size_t statementsBeforeRewrite = liftedAST.statements.size();
 
     const auto astRewriteStart = std::chrono::steady_clock::now();
     // Hoisting must run while names still identify registers and before later passes reshape scopes.
@@ -828,6 +853,8 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     ScopeBlockIntroducer{}.Run(liftedAST.statements);
     DeclarationHoister{}.Run(liftedAST.statements);
     const auto astRewriteEnd = std::chrono::steady_clock::now();
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "AST rewrites changed root statement count from {} to {}", statementsBeforeRewrite,
+                     liftedAST.statements.size());
 
     if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR)
         OptimizeAST(liftedAST);
@@ -852,6 +879,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto sgenStart = std::chrono::steady_clock::now();
     const auto generator = sourceGenerator.GenerateSource(&root);
     const auto sgenEnd = std::chrono::steady_clock::now();
+    m_debugNotes.Add(FissionDebugStage::Pipeline, "source generation emitted {} bytes", generator.size());
 
     const auto printIR = (flags & DecompilerFlags::PrintIR) == DecompilerFlags::PrintIR;
     if (printIR) // debug echo only; unconditional writes to std::cout race across threads and spam embedders
@@ -877,8 +905,10 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     }
 
     // Capture requested server artifacts without file I/O.
-    if ((flags & DecompilerFlags::CaptureCFGGraph) == DecompilerFlags::CaptureCFGGraph)
-        res.cfgGraph = GraphVisualizer::GenerateDotGraph(controlFlowAnalyzedFunction, GraphContent::IROnly);
+    if ((flags & DecompilerFlags::CaptureCFGGraph) == DecompilerFlags::CaptureCFGGraph) {
+        const bool includeSSA = (flags & DecompilerFlags::FissionDebugNotes) == DecompilerFlags::FissionDebugNotes;
+        res.cfgGraph = GraphVisualizer::GenerateDotGraph(controlFlowAnalyzedFunction, includeSSA ? GraphContent::SSAOnly : GraphContent::IROnly);
+    }
 
     if ((flags & DecompilerFlags::CaptureAST) == DecompilerFlags::CaptureAST) {
         AstJsonSerializer astSerializer{};

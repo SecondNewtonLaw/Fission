@@ -1058,6 +1058,8 @@ namespace Fission::ConstantPropagationDetail {
                     for (size_t i = 0; i < block.predecessors.size() && i + 1 < phi.operands.size(); ++i)
                         if (executableEdges.contains(EdgeKey(block.predecessors[i], block.dwBlockId)))
                             incoming = Join(incoming, ReadOperand(function, phi.operands[i + 1], values, context));
+                    if (block.dwBlockId == 0 && phi.operands.size() > block.predecessors.size() + 1)
+                        incoming = Join(incoming, ReadOperand(function, phi.operands.back(), values, context));
                     const auto defs = definitions.find(&phi);
                     if (defs != definitions.end())
                         for (const auto &reference : defs->second)

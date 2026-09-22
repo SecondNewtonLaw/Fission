@@ -400,7 +400,7 @@ end
 return f(1, 2, 3, true, function() return 4 end), f(1, 2, 3, false, function() return 5 end)
 )LUA";
     Decompiler decompiler{};
-    const auto result = decompiler.DecompileTestCode(source);
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0));
     REQUIRE(result.resultCode == DecompileResult::Success);
     INFO("decompiled output:\n" << result.decompilationOutput);
     std::string error;

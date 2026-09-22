@@ -10,10 +10,22 @@ cmake --build cmake-build-release --target Fission.Fuzzing
 ./cmake-build-release/Fission.Fuzzing.exe --count 5000 --seed 1
 ```
 Flags: `--count N`, `--seed S`, `--out DIR` (default: this folder), `--max-corpus N`,
-`--threads N`, `--sugar-only`, `--check-sugar SOURCE OUTPUT`, `--minimize-file PATH`,
+`--threads N`, `--sugar-only`, `--check-sugar SOURCE OUTPUT`, `--minimize-file PATH`, `--replay-dir DIR`,
 `--minimize-budget N`, `--mutate`, `--deser`, `--file PATH`, `--sem-file PATH`, `--deser-file PATH`,
 `--roblox-file PATH`, `--roblox-recompile PATH`, `--roblox-compare PATH`, `--roblox-corpus DIR`, `--corpus-start N`, `--corpus-limit N`, and `--repro-mutate PATH SEED`. Exit code is nonzero when any crash,
 invalid output, generator failure, or semantic divergence surfaces.
+
+`--ssa-oracle` checks SSA instead of execution: for every register read, Fission's phi-flattened
+definitions must equal an independent reaching-definitions dataflow over the raw Luau bytecode
+([include/SSAOracle.hpp](include/SSAOracle.hpp)). It runs `--count` generated samples, or every `.lua`
+under `--replay-dir`, and saves findings with an SSA dump to `<out>/ssa-oracle/`. `EXTRA_REACHING`
+(a sound superset, e.g. the FORNPREP-skip-through-latch shorthand) is imprecision; every other kind
+is a missed definition.
+
+`--replay-dir` recursively validates every unique saved source finding in one deterministic run. It checks
+recompilation, generated-local declaration order, and execution traces across all semantic fixtures, then
+reports every remaining failure instead of stopping after the first one. Forward-reference classes and
+semantic trace-pair hashes group failures by cause. Raw opcode differences are diagnostic only.
 
 `--roblox-recompile` is the focused generated-local gate: Roblox bytecode must decompile successfully,
 the emitted source must compile with Luau, generated register names must be declared before use, and

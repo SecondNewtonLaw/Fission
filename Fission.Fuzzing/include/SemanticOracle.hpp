@@ -178,12 +178,16 @@ namespace fuzz {
             return 0;
         }
 
+        inline std::string NormalizeAddresses(const std::string &text) {
+            static const std::regex addressRe(R"((table|function|userdata|thread): 0x[0-9a-fA-F]+)");
+            return std::regex_replace(text, addressRe, "$1: <address>");
+        }
+
         // strip "[string \"...\"]:<line>:" location prefixes: original and decompiled sources have
         // different line numbers for the same semantic error.
         inline std::string NormalizeError(const std::string &msg) {
             static const std::regex locRe(R"((\[string \"[^\"]*\"\]|\bchunk):\d+:?\s*)");
-            static const std::regex addressRe(R"((table|function|userdata|thread): 0x[0-9a-fA-F]+)");
-            return std::regex_replace(std::regex_replace(msg, locRe, ""), addressRe, "$1: <address>");
+            return NormalizeAddresses(std::regex_replace(msg, locRe, ""));
         }
     } // namespace detail
 
@@ -288,9 +292,12 @@ namespace fuzz {
         } else {
             result.status = SemTrace::Status::Ok;
         }
-        result.trace = std::move(trace);
+        result.trace = detail::NormalizeAddresses(trace);
         result.comparable = runBudget.comparable;
         result.prints = std::move(runBudget.prints);
+        for (auto &print : result.prints)
+            if (print)
+                *print = detail::NormalizeAddresses(*print);
         lua_close(L);
         return result;
     }

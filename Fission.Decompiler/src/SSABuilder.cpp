@@ -23,7 +23,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
                     LiftedOperation::FASTCALL2,      LiftedOperation::FASTCALL2K,  LiftedOperation::FORGLOOP,      LiftedOperation::FORGPREP_NEXT,
                     LiftedOperation::FORGPREP,
                     LiftedOperation::FORGPREP_INEXT, LiftedOperation::FORNPREP,    LiftedOperation::FASTCALL3,     LiftedOperation::SETUDATAKS,
-                    LiftedOperation::NEWCLASSMEMBER, LiftedOperation::CMPPROTO}) {
+                    LiftedOperation::NEWCLASSMEMBER, LiftedOperation::CMPPROTO,    LiftedOperation::FORNLOOP}) {
         set(op, AccessType::Read);
     }
 
@@ -35,12 +35,11 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
           LiftedOperation::DIVK,       LiftedOperation::MODK,         LiftedOperation::POWK,       LiftedOperation::AND,        LiftedOperation::OR,
           LiftedOperation::ANDK,       LiftedOperation::ORK,          LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
           LiftedOperation::NEWTABLE,   LiftedOperation::DUPTABLE,     LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
-          LiftedOperation::CONCAT,     LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,      LiftedOperation::FORNLOOP,
+          LiftedOperation::CONCAT,     LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,
           LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA, LiftedOperation::NEWCLASS}) {
         set(op, AccessType::Write);
     }
 
-    // ASTLifter consumes FORNLOOP's base-register definition; Rename handles the VM's R(A+2) write.
     set(LiftedOperation::CALL, AccessType::Read);
     set(LiftedOperation::CALLFB, AccessType::Read);
     set(LiftedOperation::RETURN, AccessType::Deferred);
@@ -159,6 +158,11 @@ std::vector<int> SSABuilder::GetImplicitDefinitions(const LiftedInstruction &ins
     case LiftedOperation::SETLIST: {
         break;
     }
+    case LiftedOperation::FORNLOOP: {
+        if (!inst.operands.empty())
+            defs.push_back(inst.operands[0].value.reg + 2);
+        break;
+    }
     case LiftedOperation::FORGLOOP: {
         if (inst.operands.empty())
             break;
@@ -196,10 +200,21 @@ int32_t SSABuilder::CurrentVersion(int32_t reg) {
     return versionStack[reg].back();
 }
 
-static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn) {
+static bool IsLoopPrep(LiftedOperation operation) {
+    return operation == LiftedOperation::FORNPREP || operation == LiftedOperation::FORGPREP || operation == LiftedOperation::FORGPREP_INEXT ||
+           operation == LiftedOperation::FORGPREP_NEXT;
+}
+
+// The CFG routes the loop latch back into the FOR*PREP block, but the VM runs the prep once: its reads
+// happen on entry edges only. `liveInNormal` omits those reads and is what the latch edge observes.
+static void ComputeLiveness(
+    AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn, std::vector<std::vector<bool>> &liveInNormal
+) {
     size_t numBlocks = func->basicBlocks.size();
     liveIn.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    liveInNormal.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
     std::vector<std::vector<bool>> use(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    std::vector<std::vector<bool>> entryUse(numBlocks, std::vector<bool>(maxRegs + 1, false));
     std::vector<std::vector<bool>> def(numBlocks, std::vector<bool>(maxRegs + 1, false));
 
     for (const auto &block : func->basicBlocks) {
@@ -211,9 +226,10 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
             if (inst->operation == LiftedOperation::NOP)
                 continue;
 
+            const bool entryRead = IsLoopPrep(inst->operation) && block.loopLatch.has_value();
             auto markRead = [&](int r) {
                 if (r >= 0 && r <= maxRegs && !def[bid][r]) {
-                    use[bid][r] = true;
+                    (entryRead ? entryUse : use)[bid][r] = true;
                 }
             };
             auto markWrite = [&](int r) {
@@ -277,7 +293,12 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 int effectiveCount = (count == 0) ? VariadicTailCount(*func, *inst, base) : (count - 1);
                 for (int k = 0; k < effectiveCount; ++k)
                     markRead(base + k);
-            } else if (inst->operation == LiftedOperation::FORNPREP && !inst->operands.empty()) {
+            } else if (
+                (inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
+                 inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT ||
+                 inst->operation == LiftedOperation::FORNLOOP) &&
+                !inst->operands.empty()
+            ) {
                 const int base = inst->operands[0].value.reg;
                 for (int k = 0; k < 3; ++k)
                     markRead(base + k);
@@ -310,15 +331,18 @@ static void ComputeLiveness(AnalyzedFunction *func, int maxRegs, std::vector<std
                 for (uint32_t succ : block.successors) {
                     if (succ >= liveIn.size())
                         continue; // hostile bytecode: wild jump target
-                    if (liveIn[succ][r]) {
+                    const bool latchEdge = func->basicBlocks[succ].loopLatch == bid;
+                    if ((latchEdge ? liveInNormal : liveIn)[succ][r]) {
                         isLiveOut = true;
                         break;
                     }
                 }
 
-                bool isLiveIn = use[bid][r] || (isLiveOut && !def[bid][r]);
-                if (liveIn[bid][r] != isLiveIn) {
+                const bool isLiveInNormal = use[bid][r] || (isLiveOut && !def[bid][r]);
+                const bool isLiveIn = isLiveInNormal || entryUse[bid][r];
+                if (liveIn[bid][r] != isLiveIn || liveInNormal[bid][r] != isLiveInNormal) {
                     liveIn[bid][r] = isLiveIn;
+                    liveInNormal[bid][r] = isLiveInNormal;
                     blockChanged = true;
                 }
             }
@@ -339,8 +363,9 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
         numParams = lpOriginalFunction->lpLiftedFunction->lpDeserialized->numparams;
     }
 
-    std::vector<std::vector<bool>> liveIn;
-    ComputeLiveness(lpOriginalFunction, maxRegs, liveIn);
+    std::vector<std::vector<bool>> liveIn, liveInNormal;
+    ComputeLiveness(lpOriginalFunction, maxRegs, liveIn, liveInNormal);
+    entryOnlyPhis.assign(lpOriginalFunction->basicBlocks.size(), std::vector<bool>(maxRegs + 1, false));
 
     std::vector<std::vector<int>> defBlocks(maxRegs + 1);
 
@@ -396,16 +421,6 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 }
             }
 
-            // Match Rename's explicit R(A+2) definition so the loop header receives a phi.
-            if (inst->operation == LiftedOperation::FORNLOOP && inst->operands.size() > 2) {
-                int reg = inst->operands[2].value.reg;
-                if (reg <= maxRegs) {
-                    if (defBlocks[reg].empty() || static_cast<uint32_t>(defBlocks[reg].back()) != block.dwBlockId) {
-                        defBlocks[reg].push_back(block.dwBlockId);
-                    }
-                }
-            }
-
             if (inst == block.lpTail)
                 break;
         }
@@ -447,14 +462,21 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                 if (!liveIn[frontierId][reg])
                     continue;
 
+                BasicBlock *frontierBlock = &lpOriginalFunction->basicBlocks[frontierId];
+                const bool entryOnly = !liveInNormal[frontierId][reg];
+                if (entryOnly) {
+                    const auto entryEdges = std::ranges::count_if(frontierBlock->predecessors, [&](uint32_t p) { return frontierBlock->loopLatch != p; });
+                    if (entryEdges < 2)
+                        continue;
+                }
+
                 if (hasPhi[frontierId] != visitedToken) {
                     hasPhi[frontierId] = visitedToken;
+                    entryOnlyPhis[frontierId][reg] = entryOnly;
 
-                    BasicBlock *frontierBlock = &lpOriginalFunction->basicBlocks[frontierId];
-
-                    LiftedInstruction phi;
-                    phi.operation = LiftedOperation::PHI;
-                    phi.operands.resize(1 + frontierBlock->predecessors.size());
+                    LiftedInstruction phi{LiftedOperation::PHI, -1};
+                    // An entry-block phi carries a trailing operand for the function-entry edge.
+                    phi.operands.resize(1 + frontierBlock->predecessors.size() + (frontierId == 0 ? 1 : 0));
 
                     phi.operands[0].type = LiftedOperandType::Register;
                     phi.operands[0].value.reg = reg;
@@ -466,6 +488,8 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
                     }
 
                     frontierBlock->phiNodes.push_back(std::move(phi));
+                    Explain(*frontierBlock, "inserted phi for R{} because B{} is in B{}'s dominance frontier and R{} is live on entry", reg, frontierId,
+                            blockId, reg);
 
                     if (inWorkList[frontierId] != visitedToken) {
                         inWorkList[frontierId] = visitedToken;
@@ -488,6 +512,12 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
 
     for (auto &phi : block.phiNodes) {
         int reg = phi.operands[0].value.reg;
+        if (blockId == 0 && phi.operands.size() > block.predecessors.size() + 1) {
+            const int32_t entry = CurrentVersion(reg);
+            phi.operands.back().ssaVersion = entry;
+            func.useCounts[SSARef{reg, entry}]++;
+            func.users[SSARef{reg, entry}].push_back(&phi);
+        }
         int v = NewVersion(reg);
         phi.operands[0].ssaVersion = v;
         varsDefinedHere.push_back(reg);
@@ -670,7 +700,8 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                 }
             } else if (
                 (inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
-                 inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT) &&
+                 inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT ||
+                 inst->operation == LiftedOperation::FORNLOOP) &&
                 !inst->operands.empty()
             ) {
                 int32_t baseReg = inst->operands[0].value.reg;
@@ -687,10 +718,12 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                     func.users[{r, v}].push_back(inst);
                 }
                 func.implicitUses[inst] = std::move(loopInputs);
-            } else if (inst->operation == LiftedOperation::FORNLOOP && inst->operands.size() > 2) {
-                // Pop this version when leaving the dominator subtree.
-                NewVersion(inst->operands[2].value.reg);
-                varsDefinedHere.push_back(inst->operands[2].value.reg);
+
+                if (inst->operation == LiftedOperation::FORNLOOP) {
+                    const int32_t indexVersion = NewVersion(baseReg + 2);
+                    varsDefinedHere.push_back(baseReg + 2);
+                    func.definitionMap[{static_cast<uint8_t>(baseReg + 2), indexVersion}] = inst;
+                }
             } else if (inst->operation == LiftedOperation::FORGLOOP && inst->operands.size() > 2) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 int numVars = (inst->operands[2].value.imm.n & 0xFF);
@@ -742,15 +775,26 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                 if (size_t(predIndex + 1) < phi.operands.size()) {
                     if (isEntryEdgeLoopVar(succ, reg)) {
                         phi.operands[predIndex + 1].ssaVersion = -1; // loop var: nothing flows in from the entry edge
+                        Explain(succ, "phi R{} input[{}] from B{} = undefined because generic-for entry has no loop value", reg, predIndex, block.dwBlockId);
+                        continue;
+                    }
+                    if (succ.loopLatch == block.dwBlockId && entryOnlyPhis[succId][reg]) {
+                        phi.operands[predIndex + 1].ssaVersion = -1;
+                        Explain(succ, "phi R{} input[{}] from latch B{} = undefined because only the loop prep reads it", reg, predIndex, block.dwBlockId);
                         continue;
                     }
                     phi.operands[predIndex + 1].ssaVersion = CurrentVersion(reg);
                     func.useCounts[SSARef{reg, CurrentVersion(reg)}]++;
                     func.users[SSARef{static_cast<uint8_t>(reg), CurrentVersion(reg)}].push_back(&phi);
+                    Explain(succ, "phi R{} input[{}] from B{} = R{}#{} from the current dominator stack", reg, predIndex, block.dwBlockId, reg,
+                            phi.operands[predIndex + 1].ssaVersion);
                 }
             }
         }
     }
+
+    if (!varsDefinedHere.empty() || !block.phiNodes.empty())
+        ExplainDetail(block, "renamed {} definitions, including {} phi outputs, under dominator-stack state", varsDefinedHere.size(), block.phiNodes.size());
 
     return varsDefinedHere;
 }
@@ -787,10 +831,14 @@ void SSABuilder::Rename(int blockId, AnalyzedFunction &func, const std::map<int3
 void SSABuilder::Build(AnalyzedFunction &func) {
     DEBUG_ASSERT(!func.basicBlocks.empty());
     DEBUG_ASSERT(func.lpLiftedFunction != nullptr);
+    if (m_debugNotes && m_debugNotes->Enabled())
+        m_debugFunction = std::format("F{} ({})", func.lpLiftedFunction->lpDeserialized ? static_cast<int>(func.lpLiftedFunction->lpDeserialized->bytecodeId) : -1,
+                                      func.lpLiftedFunction->name);
     int totalRegs = 255;
     if (func.lpLiftedFunction && func.lpLiftedFunction->lpDeserialized) {
         totalRegs = func.lpLiftedFunction->lpDeserialized->maxstacksize;
     }
+    Explain("function {}: building SSA for {} blocks and {} registers", m_debugFunction, func.basicBlocks.size(), totalRegs);
 
     this->versionStack.assign(totalRegs + 1, {});
     this->versionCounter.assign(totalRegs + 1, 0);
@@ -808,6 +856,11 @@ void SSABuilder::Build(AnalyzedFunction &func) {
     }
 
     Rename(0, func, domInfo);
+
+    size_t phiCount = 0;
+    for (const auto &block : func.basicBlocks)
+        phiCount += block.phiNodes.size();
+    Explain("function {}: SSA complete with {} phi nodes and {} definitions", m_debugFunction, phiCount, func.definitionMap.size());
 
     for (auto &sub : func.innerFunctions)
         this->Build(sub);

@@ -296,7 +296,7 @@ namespace fuzz {
         return false;
     }
 
-    inline std::string ClassifyForwardRef(const std::string &source, const std::string *original = nullptr) {
+    inline std::string ClassifyForwardRef(const std::string &source, const std::string *original = nullptr, std::string *culprit = nullptr) {
         const auto names = FindGeneratedNames(source);
         if (!names)
             return "OTHER";
@@ -304,10 +304,16 @@ namespace fuzz {
         for (const auto &name : names->globals) {
             const bool outputForward = HasSameScopeGlobalBeforeLocal(*names, name);
             const bool originalForward = originalNames && HasSameScopeGlobalBeforeLocal(*originalNames, name);
-            if (outputForward && !originalForward)
+            if (outputForward && !originalForward) {
+                if (culprit)
+                    *culprit = name;
                 return "USE_BEFORE_DECL";
-            if (!names->locals.contains(name) || (originalNames && !originalNames->globals.contains(name)))
+            }
+            if (!names->locals.contains(name) || (originalNames && !originalNames->globals.contains(name))) {
+                if (culprit)
+                    *culprit = name;
                 return "NO_DECL";
+            }
         }
         return "OTHER";
     }

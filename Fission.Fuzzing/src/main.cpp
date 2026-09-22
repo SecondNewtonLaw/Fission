@@ -2,6 +2,7 @@
 #include "FissionAstGenerator.hpp"
 #include "FuzzOracle.hpp"
 #include "LuauAstGenerator.hpp"
+#include "SSAOracle.hpp"
 #include "SemanticOracle.hpp"
 
 #include <atomic>
@@ -295,7 +296,9 @@ int main(int argc, char **argv) {
     int corpusLimit = 0;
     std::string mutateFile; // --repro-mutate <path> <seed>: compile src, flip bytes by seed, decompile (single-shot)
     std::string semFile;    // --sem-file <path>: decompile one source, run both in the Luau VM, diff traces
+    std::string replayDir;  // --replay-dir <path>: validate every saved source finding in one run
     uint32_t mutateSeed = 0;
+    bool ssaOracle = false; // --ssa-oracle: compare SSA reaching definitions against VM dataflow (generated or --replay-dir)
 
     for (int i = 1; i < argc; ++i) {
         const std::string a = argv[i];
@@ -339,6 +342,10 @@ int main(int argc, char **argv) {
             corpusLimit = (std::max)(0, std::atoi(argv[++i]));
         else if (a == "--sem-file" && i + 1 < argc)
             semFile = argv[++i];
+        else if (a == "--replay-dir" && i + 1 < argc)
+            replayDir = argv[++i];
+        else if (a == "--ssa-oracle")
+            ssaOracle = true;
         else if (a == "--repro-mutate" && i + 2 < argc) {
             mutateFile = argv[++i];
             mutateSeed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
@@ -358,6 +365,193 @@ int main(int argc, char **argv) {
     // route every libassert failure (incl. our out-of-boundary direct stage calls) through a throw
     // so one bad sample is attributed and skipped, not an _Exit that kills the whole campaign.
     Fission::ScopedThrowingAssertHandler guard;
+
+    if (ssaOracle) {
+        const fs::path findingDir = fs::path(out) / "ssa-oracle";
+        fs::create_directories(findingDir);
+        std::map<std::string, size_t> signatures;
+        std::map<std::string, size_t> saved;
+        size_t samples = 0, dirty = 0, failed = 0, functions = 0, reads = 0, skipped = 0;
+        auto check = [&](const std::string &source, const std::string &label) {
+            std::string bc;
+            if (!fuzz::LuauCompiles(source, &bc))
+                return;
+            ++samples;
+            fuzz::SSAOracleReport report;
+            try {
+                Fission::InstructionDecoder decoder{};
+                Deserializer deserializer{};
+                auto deserialized = deserializer.Deserialize(bc);
+                if (!deserialized || deserialized->functions.empty()) {
+                    ++failed;
+                    return;
+                }
+                BytecodeLifter lifter{&decoder};
+                auto lifted = lifter.LiftDeserializedBytecode(*deserialized);
+                ControlFlowAnalyzer cfa{};
+                auto analyzed = cfa.DetermineBasicBlocks(&lifted);
+                cfa.OptimizeGraph(analyzed);
+                cfa.IdentifyStructures(analyzed);
+                cfa.PruneUnreachable(analyzed);
+                SSABuilder{}.Build(analyzed);
+                report = fuzz::CheckSSAAgainstVM(analyzed);
+            } catch (...) {
+                ++failed;
+                return;
+            }
+            functions += report.functions;
+            reads += report.readsCompared;
+            skipped += report.functionsSkipped;
+            if (report.mismatches.empty())
+                return;
+            ++dirty;
+            std::set<std::string> sampleSignatures;
+            std::string evidence;
+            for (const auto &m : report.mismatches) {
+                sampleSignatures.insert(m.kind + ":" + m.operation);
+                evidence += std::format("-- {} {} pc={} r{} {} {}\n", m.kind, m.function, m.pc, m.reg, m.operation, m.detail);
+            }
+            for (const auto &signature : sampleSignatures) {
+                ++signatures[signature];
+                if (saved[signature]++ < 3) {
+                    std::string file = signature;
+                    std::ranges::replace(file, ':', '_');
+                    Write(findingDir / std::format("{}_{}.lua", file, saved[signature]), "-- " + label + "\n" + evidence + source + "\n" + report.dumps);
+                }
+            }
+        };
+
+        if (!replayDir.empty()) {
+            for (const auto &entry : fs::recursive_directory_iterator(replayDir, fs::directory_options::skip_permission_denied)) {
+                const std::string name = entry.path().filename().string();
+                if (entry.is_regular_file() && entry.path().extension() == ".lua" && !name.contains(".out.lua") && !name.contains(".min.out.lua"))
+                    check(ReadBin(entry.path()), entry.path().string());
+            }
+        } else {
+            LuauAstGenerator luauGen{seed + 1u};
+            FissionAstGenerator fissionGen{(seed ^ 0x5bd1e995u) + 1u};
+            for (int i = 0; i < count; ++i) {
+                std::string source;
+                try {
+                    source = (i % 2) == 0 ? luauGen.Generate(sugarOnly) : fissionGen.Generate();
+                } catch (...) {
+                    continue;
+                }
+                check(source, std::format("seed={} idx={}", seed, i));
+                if ((i + 1) % 1000 == 0)
+                    std::fprintf(stderr, "[ssa-oracle] %d/%d dirty=%zu\n", i + 1, count, dirty);
+            }
+        }
+
+        std::fprintf(stderr, "\n================ FISSION.FUZZING SSA ORACLE ================\n");
+        std::fprintf(
+            stderr, "samples=%zu dirty=%zu pipeline-failed=%zu functions=%zu skipped=%zu reads=%zu\n", samples, dirty, failed, functions, skipped, reads
+        );
+        for (const auto &[signature, n] : signatures)
+            std::fprintf(stderr, "  %-40s %zu\n", signature.c_str(), n);
+        std::fprintf(stderr, "findings: %s\n", findingDir.string().c_str());
+        return dirty == 0 ? 0 : 1;
+    }
+
+    if (!replayDir.empty()) {
+        std::vector<fs::path> paths;
+        for (const auto &entry : fs::recursive_directory_iterator(replayDir, fs::directory_options::skip_permission_denied)) {
+            if (!entry.is_regular_file() || entry.path().extension() != ".lua")
+                continue;
+            const std::string name = entry.path().filename().string();
+            if (name.contains(".out.lua") || name.contains(".min.lua"))
+                continue;
+            paths.push_back(entry.path());
+        }
+        std::ranges::sort(paths);
+        const auto preludes = fuzz::CompilePreludes([](const std::string &s, std::string *o) { return fuzz::LuauCompiles(s, o); });
+        if (preludes.empty()) {
+            std::fprintf(stderr, "[replay] semantic preludes failed to compile\n");
+            return 2;
+        }
+
+        std::map<std::string, size_t> outcomes;
+        std::map<std::string, size_t> forwardClasses;
+        std::map<uint64_t, size_t> semanticClusters;
+        std::map<uint64_t, fs::path> semanticExamples;
+        std::set<std::string> seenSources;
+        size_t sourceCount = 0;
+        for (const auto &path : paths) {
+            const std::string source = ReadBin(path);
+            if (!seenSources.insert(source).second)
+                continue;
+            ++sourceCount;
+            std::string originalBc;
+            if (!fuzz::LuauCompiles(source, &originalBc)) {
+                ++outcomes["INVALID_INPUT"];
+                std::fprintf(stderr, "[replay] INVALID_INPUT %016llx %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str());
+                continue;
+            }
+            const auto decompiled = fuzz::FullDecompile(source);
+            if (decompiled.code != DecompileResult::Success) {
+                ++outcomes["DECOMPILE_FAILED"];
+                std::fprintf(stderr, "[replay] DECOMPILE_FAILED %016llx %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str());
+                continue;
+            }
+            std::string decompiledBc;
+            if (!fuzz::LuauCompiles(decompiled.output, &decompiledBc)) {
+                ++outcomes["INVALID_RECOMPILE"];
+                std::fprintf(stderr, "[replay] INVALID_RECOMPILE %016llx %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str());
+                continue;
+            }
+            if (fuzz::UsesGeneratedLocalBeforeDeclared(decompiled.output, &source)) {
+                ++outcomes["FORWARD_REFERENCE"];
+                std::string culprit;
+                const std::string forwardClass = fuzz::ClassifyForwardRef(decompiled.output, &source, &culprit);
+                ++forwardClasses[forwardClass];
+                std::fprintf(
+                    stderr, "[replay] FORWARD_REFERENCE %016llx %s %s:%s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str(),
+                    forwardClass.c_str(), culprit.c_str()
+                );
+                continue;
+            }
+
+            const auto semantics = fuzz::CompareSemantics(originalBc, decompiledBc, preludes);
+            if (semantics.kind == fuzz::SemVerdict::Kind::Diverge) {
+                ++outcomes["SEM_DIVERGE"];
+                const std::string semanticSignature = std::format(
+                    "{}\n{}\n{}\n{}", static_cast<int>(semantics.original.status), semantics.original.trace,
+                    static_cast<int>(semantics.decompiled.status), semantics.decompiled.trace
+                );
+                const uint64_t signature = HashBytes(semanticSignature);
+                ++semanticClusters[signature];
+                semanticExamples.try_emplace(signature, path);
+                std::fprintf(
+                    stderr, "[replay] SEM_DIVERGE %016llx fixture=%zu cluster=%016llx %s\n", static_cast<unsigned long long>(HashBytes(source)),
+                    semantics.fixture, static_cast<unsigned long long>(signature), path.string().c_str()
+                );
+            } else if (semantics.kind == fuzz::SemVerdict::Kind::Unrunnable) {
+                ++outcomes["SEM_UNCHECKED"];
+            } else {
+                ++outcomes["PASS"];
+                const auto originalOps = fuzz::LiftOpcodes(source);
+                const auto reconstructedOps = fuzz::LiftOpcodes(decompiled.output);
+                if (originalOps && reconstructedOps && *originalOps != *reconstructedOps)
+                    ++outcomes["IR_DIFFERENT"];
+            }
+        }
+
+        std::fprintf(stderr, "\n================ FISSION.FUZZING REPLAY ================\n");
+        std::fprintf(stderr, "sources: %zu\n", sourceCount);
+        for (const auto &[name, count] : outcomes)
+            std::fprintf(stderr, "  %-22s %zu\n", name.c_str(), count);
+        for (const auto &[name, count] : forwardClasses)
+            std::fprintf(stderr, "  forward:%-14s %zu\n", name.c_str(), count);
+        for (const auto &[signature, count] : semanticClusters)
+            std::fprintf(
+                stderr, "  semantic:%016llx %zu example=%s\n", static_cast<unsigned long long>(signature), count,
+                semanticExamples.at(signature).string().c_str()
+            );
+        std::fprintf(stderr, "=========================================================\n");
+        const size_t failures = outcomes["INVALID_INPUT"] + outcomes["DECOMPILE_FAILED"] + outcomes["INVALID_RECOMPILE"] +
+                                outcomes["FORWARD_REFERENCE"] + outcomes["SEM_DIVERGE"];
+        return failures == 0 ? 0 : 1;
+    }
     if (!sugarSource.empty()) {
         const auto source = ReadBin(sugarSource), output = ReadBin(sugarOutput);
         std::string before, after;
@@ -704,22 +898,44 @@ int main(int argc, char **argv) {
             if (d && !d->functions.empty()) {
                 BytecodeLifter lifter{&decoder};
                 auto lifted = lifter.LiftDeserializedBytecode(*d);
-                ControlFlowAnalyzer cfa{};
+                FissionDebugNotes debugNotes;
+                debugNotes.Reset(true);
+                ControlFlowAnalyzer cfa{&debugNotes};
                 auto cf = cfa.DetermineBasicBlocks(&lifted);
                 cfa.OptimizeGraph(cf);
                 cfa.IdentifyStructures(cf);
                 cfa.PruneUnreachable(cf);
+                SSABuilder ssa{};
+                ssa.SetDebugNotes(&debugNotes);
+                ssa.Build(cf);
                 std::function<void(const AnalyzedFunction &, int)> dump = [&](const AnalyzedFunction &fn, int dep) {
                     std::fprintf(stderr, "[cfg] %*sfn blocks=%zu\n", dep * 2, "", fn.basicBlocks.size());
                     for (const auto &b : fn.basicBlocks) {
-                        std::fprintf(stderr, "[cfg] %*s  B%u type=%d flags=0x%x succ=[", dep * 2, "", b.dwBlockId, (int)b.bType, b.dwBlockFlags);
+                        std::fprintf(
+                            stderr, "[cfg] %*s  B%u type=%d term=%d flags=0x%x pred=[", dep * 2, "", b.dwBlockId, (int)b.bType, (int)b.bTerminator,
+                            b.dwBlockFlags
+                        );
+                        for (auto p : b.predecessors)
+                            std::fprintf(stderr, "%u ", p);
+                        std::fprintf(stderr, "] succ=[");
                         for (auto s : b.successors)
                             std::fprintf(stderr, "%u ", s);
                         std::fprintf(
-                            stderr, "] latch=%d exit=%d header=%d tail=%d\n", b.loopLatch.has_value() ? (int)b.loopLatch.value() : -1,
+                            stderr, "] latch=%d exit=%d header=%d head=%d tail=%d\n", b.loopLatch.has_value() ? (int)b.loopLatch.value() : -1,
                             b.loopExit.has_value() ? (int)b.loopExit.value() : -1, b.loopHeader.has_value() ? (int)b.loopHeader.value() : -1,
+                            b.lpHead ? (int)b.lpHead->operation : -1,
                             b.lpTail ? (int)b.lpTail->operation : -1
                         );
+                        for (const auto &note : b.analysisNotes)
+                            std::fprintf(stderr, "[cfg] %*s    why: %s\n", dep * 2, "", note.c_str());
+                        if (b.lpHead)
+                            for (const auto *instruction = b.lpHead; instruction <= b.lpTail; ++instruction)
+                                if (const auto uses = fn.implicitUses.find(instruction); uses != fn.implicitUses.end()) {
+                                    std::fprintf(stderr, "[cfg] %*s    _%d implicit=[", dep * 2, "", instruction->instructionIndex);
+                                    for (const int version : uses->second)
+                                        std::fprintf(stderr, "v%d ", version);
+                                    std::fprintf(stderr, "]\n");
+                                }
                     }
                     for (const auto &inner : fn.innerFunctions)
                         dump(inner, dep + 1);

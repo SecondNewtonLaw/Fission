@@ -6,6 +6,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
+#include "FissionDebugNotes.hpp"
 #include "lua.h"
 
 #include <boost/unordered/unordered_flat_set.hpp>
@@ -19,7 +20,6 @@ struct ASTFunction {
     AnalyzedFunction *backingFunction = nullptr; // not owned by ASTFunction
     std::vector<std::shared_ptr<Statement>> statements;
 
-    std::vector<ASTFunction> subFunctions;
 };
 
 class ControlFlowTask;
@@ -34,9 +34,10 @@ class ASTLifter {
 
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
     std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
+    void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
 
     boost::unordered_flat_set<int32_t> m_definedRegisters;
-    boost::unordered_flat_set<int32_t> m_pinnedRegisters;
+    boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_pinnedRegisters;
     // Captured-register declarations must remain before their closures.
     boost::unordered_flat_set<int32_t> m_capturedRegisters;
 
@@ -47,11 +48,16 @@ class ASTLifter {
 
     struct PinnedRegisterScope {
         ASTLifter *m_lpLifter;
-        int32_t dwReg;
+        SSARef m_ref;
+        bool m_inserted;
 
-        PinnedRegisterScope(ASTLifter *lifter, int32_t reg) : m_lpLifter(lifter), dwReg(reg) { m_lpLifter->m_pinnedRegisters.insert(reg); }
+        PinnedRegisterScope(ASTLifter *lifter, SSARef ref)
+            : m_lpLifter(lifter), m_ref(ref), m_inserted(lifter->m_pinnedRegisters.insert(ref).second) {}
 
-        ~PinnedRegisterScope() { m_lpLifter->m_pinnedRegisters.erase(dwReg); }
+        ~PinnedRegisterScope() {
+            if (m_inserted)
+                m_lpLifter->m_pinnedRegisters.erase(m_ref);
+        }
 
         PinnedRegisterScope(const PinnedRegisterScope &) = delete;
         PinnedRegisterScope &operator=(const PinnedRegisterScope &) = delete;
@@ -59,8 +65,8 @@ class ASTLifter {
 
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_phiConsumers;
 
-    // Keep effectful loop-condition definitions at their original execution site.
-    boost::unordered_flat_set<const LiftedInstruction *> m_loopCondNoInline;
+    // Keep cross-block effects and forward-dependent constructors at their original execution site.
+    boost::unordered_flat_set<const LiftedInstruction *> m_forcedMaterialization;
 
     // Repeat conditions consume terminator-only definitions exactly once.
     boost::unordered_flat_set<const LiftedInstruction *> m_deferToConditionInline;
@@ -74,6 +80,24 @@ class ASTLifter {
     int32_t m_dwLastFunctionIndex = 0;
 
   private:
+    FissionDebugNotes *m_debugNotes = nullptr;
+    std::string m_debugFunction;
+
+    template <typename... Args> void Explain(std::format_string<Args...> format, Args &&...args) const {
+        if (m_debugNotes)
+            m_debugNotes->Add(FissionDebugStage::AST, format, std::forward<Args>(args)...);
+    }
+
+    template <typename... Args> void Explain(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
+        if (!m_debugNotes || !m_debugNotes->Enabled())
+            return;
+        m_debugNotes->AddBlock(FissionDebugStage::AST, m_debugFunction, block.dwBlockId, block.analysisNotes,
+                               std::format(format, std::forward<Args>(args)...));
+    }
+
+    void ExplainKeep(const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer = nullptr,
+                     const LiftedInstruction *barrier = nullptr) const;
+
     AnalyzedFunction *m_currentFunction = nullptr;
 
     // Reject malformed constant indices at the decompiler safety boundary.

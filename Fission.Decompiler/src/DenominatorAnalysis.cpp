@@ -166,7 +166,8 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
         int32_t blkId = blocks[blkIdx].dwBlockId;
 
         const auto &preds = blocks[blkIdx].predecessors;
-        if (preds.size() < 2)
+        // The entry block also has the implicit function-entry edge.
+        if (preds.size() + (i == 0 ? 1 : 0) < 2)
             continue;
 
         for (int32_t pId : preds) {

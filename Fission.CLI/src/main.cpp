@@ -93,11 +93,14 @@ int main(int argc, char **argv) {
     Decompiler decompiler{};
     const bool omitComments = std::any_of(argv + 1, argv + argc, [](const char *arg) { return std::strcmp(arg, "--omit-comments") == 0; });
     const bool optimizeIR = std::any_of(argv + 1, argv + argc, [](const char *arg) { return std::strcmp(arg, "--optimize-ir") == 0; });
+    const bool debugNotes = std::any_of(argv + 1, argv + argc, [](const char *arg) { return std::strcmp(arg, "--debug-notes") == 0; });
     auto outputFlags = static_cast<DecompilerFlags>(0);
     if (omitComments)
         outputFlags |= DecompilerFlags::OmitFissionComments;
     if (optimizeIR)
         outputFlags |= DecompilerFlags::OptimizeIR;
+    if (debugNotes)
+        outputFlags |= DecompilerFlags::FissionDebugNotes;
     int inputExitCode = 0;
     bool handledInputs = false;
 
@@ -223,9 +226,11 @@ int main(int argc, char **argv) {
                 if (strncmp(flag->name, "Luau", 4) == 0)
                     flag->value = true;
             decompiler.SetDecompileBudget(std::chrono::seconds(120));
-            const auto r = decompiler.DecompileRobloxBytecode(bytecode, DecompilerFlags::CaptureAST);
+            const auto r = decompiler.DecompileRobloxBytecode(bytecode, DecompilerFlags::CaptureAST | outputFlags);
             std::fprintf(stderr, "[roblox-ast] %s: code=%d\n", argv[i + 1], static_cast<int>(r.resultCode));
             PrintDecompileError(r);
+            if (!r.debugNotes.empty())
+                std::fprintf(stderr, "%s", r.debugNotes.c_str());
             std::cout << r.astJson << "\n";
             return r.resultCode == DecompileResult::Success ? 0 : 1;
         }
@@ -246,9 +251,11 @@ int main(int argc, char **argv) {
             Luau::CompileOptions dopts{};
             dopts.optimizationLevel = 1;
             dopts.debugLevel = 2;
-            const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::CaptureAST, dopts);
+            const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::CaptureAST | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test-ast] %s: code=%d\n", argv[i + 1], static_cast<int>(dr.resultCode));
             PrintDecompileError(dr);
+            if (!dr.debugNotes.empty())
+                std::fprintf(stderr, "%s", dr.debugNotes.c_str());
             std::cout << dr.astJson << "\n";
             return dr.resultCode == DecompileResult::Success ? 0 : 1;
         }
@@ -272,6 +279,8 @@ int main(int argc, char **argv) {
             const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::WriteIRToFile | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test] %s: code=%d (IR -> ir_out.txt)\n", argv[i + 1], static_cast<int>(dr.resultCode));
             PrintDecompileError(dr);
+            if (!dr.debugNotes.empty())
+                std::fprintf(stderr, "%s", dr.debugNotes.c_str());
             std::cout << "\n===SOURCE===\n" << dr.decompilationOutput << "\n===END===\n";
             return dr.resultCode == DecompileResult::Success ? 0 : 1;
         }
@@ -306,6 +315,8 @@ int main(int argc, char **argv) {
             r.decompilationOutput.size()
         );
         PrintDecompileError(r);
+        if (!r.debugNotes.empty())
+            std::fprintf(stderr, "%s", r.debugNotes.c_str());
         if (!r.timingStatistics.empty())
             std::fprintf(stderr, "%s\n", r.timingStatistics.c_str());
         std::cout << "\n===SOURCE===\n" << r.decompilationOutput << "\n===END===\n";

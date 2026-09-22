@@ -1,5 +1,7 @@
 # Fission
 
+[![Fuzzing & Testing](check thttps://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml/badge.svg)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml)
+
 ### Background Knowledge
 
 Fission is a Luau decompiler built from scratch for my closed source project, **RbxCli**. This project originally began as a gag to try and build a decompiler. It originally was meant to be the worst quickest fix possible in an argument of who can make the best decompiler in a short time frame.
