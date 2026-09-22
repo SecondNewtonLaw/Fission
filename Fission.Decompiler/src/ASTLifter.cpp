@@ -79,7 +79,8 @@ class ControlFlowTask {
     struct FinalAwaiter;
 
     struct promise_type {
-        std::coroutine_handle<> continuation{};
+        Handle continuation{};
+        Handle *next = nullptr;
         std::optional<Result> result;
         std::exception_ptr error;
 
@@ -92,8 +93,8 @@ class ControlFlowTask {
 
     struct FinalAwaiter {
         bool await_ready() const noexcept { return false; }
-        std::coroutine_handle<> await_suspend(Handle handle) const noexcept {
-            return handle.promise().continuation ? handle.promise().continuation : std::noop_coroutine();
+        void await_suspend(Handle handle) const noexcept {
+            *handle.promise().next = handle.promise().continuation;
         }
         void await_resume() const noexcept {}
     };
@@ -117,8 +118,10 @@ class ControlFlowTask {
 
     Result Run() && {
         auto handle = std::exchange(m_handle, {});
-        while (!handle.done())
-            handle.resume();
+        auto next = handle;
+        handle.promise().next = &next;
+        while (next)
+            next.resume();
         if (handle.promise().error) {
             auto error = handle.promise().error;
             handle.destroy();
@@ -138,9 +141,10 @@ class ControlFlowTask {
         }
 
         bool await_ready() const noexcept { return !handle || handle.done(); }
-        std::coroutine_handle<> await_suspend(std::coroutine_handle<> continuation) noexcept {
+        void await_suspend(Handle continuation) noexcept {
             handle.promise().continuation = continuation;
-            return handle;
+            handle.promise().next = continuation.promise().next;
+            *handle.promise().next = handle;
         }
         Result await_resume() {
             if (handle.promise().error)

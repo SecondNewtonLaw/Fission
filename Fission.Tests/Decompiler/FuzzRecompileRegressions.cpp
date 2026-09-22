@@ -14,6 +14,9 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <cctype>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
+#include <sstream>
 #include <string>
 
 static void EnableLuauFFlagsOnce() {
@@ -53,6 +56,38 @@ static void CheckDecompileRecompiles(const std::string &source) {
     const bool ok = Recompiles(result.decompilationOutput, &err);
     INFO("recompile error: " << err);
     CHECK(ok);
+}
+
+TEST_CASE("Roblox corpus RegEx fixture does not stack-overflow during lifting", "[Decompiler][Regression][RobloxCorpus]") {
+    EnableLuauFFlagsOnce();
+    const auto fixture = std::filesystem::path(FISSION_SOURCE_DIR) /
+                         "Bytecode_12_Dump/CorePackages.Packages._Index.RegExp.RegExp.RegEx.lbc";
+    if (!std::filesystem::exists(fixture)) {
+        SUCCEED("optional Bytecode_12_Dump fixture is absent");
+        return;
+    }
+
+    std::ifstream input(fixture, std::ios::binary);
+    REQUIRE(input);
+    std::stringstream bytes;
+    bytes << input.rdbuf();
+
+    Decompiler decompiler{};
+    decompiler.SetDecompileBudget(std::chrono::seconds(30));
+    const auto result = decompiler.DecompileRobloxBytecode(bytes.str(), static_cast<DecompilerFlags>(0));
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    std::string error;
+    const bool recompiles = Recompiles(result.decompilationOutput, &error);
+    INFO("recompile error: " << error);
+    CHECK(recompiles);
+}
+
+TEST_CASE("Regress sibling branches lift without accumulating native coroutine frames", "[Decompiler][Regression][StackDepth]") {
+    std::string source = "local flag = ...\n";
+    for (int i = 0; i < 1024; ++i)
+        source += "if flag then ping() else pong() end\n";
+    source += "return flag";
+    CheckDecompileRecompiles(source);
 }
 
 static void CheckNoIntroducedGeneratedGlobals(const std::string &source) {
