@@ -3106,6 +3106,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     continue;
                 const auto &srcOp = act.capInst->operands[1];
                 m_currentFunction->ssaOverrides[SSARef{static_cast<uint8_t>(srcOp.value.reg), srcOp.ssaVersion}] = act.upName;
+                if (srcOp.value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams && IsValidLuauIdent(act.upName))
+                    m_currentFunction->SetGlobalName(srcOp.value.reg, act.upName);
                 statements.push_back(
                     std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
                 );
@@ -3355,6 +3357,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     continue;
                 const auto &srcOp = act.capInst->operands[1];
                 m_currentFunction->ssaOverrides[SSARef{static_cast<uint8_t>(srcOp.value.reg), srcOp.ssaVersion}] = act.upName;
+                if (srcOp.value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams && IsValidLuauIdent(act.upName))
+                    m_currentFunction->SetGlobalName(srcOp.value.reg, act.upName);
                 statements.push_back(
                     std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
                 );

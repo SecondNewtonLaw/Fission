@@ -264,18 +264,23 @@ class DeclarationHoister {
             return;
         }
         if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(s)) {
-            if (auto localCall = LocalDeclCall(s)) {
+            const auto recordReturns = [&](const std::vector<std::shared_ptr<Expression>> &rets, bool local) {
                 bool multi = false;
-                const auto name = localCall->nodeKind == ASTNodeKind::CallExpression
-                                      ? SingleRetName(std::static_pointer_cast<CallExpressionNode>(localCall)->rets, multi)
-                                      : localCall->nodeKind == ASTNodeKind::MethodCallExpression
-                                          ? SingleRetName(std::static_pointer_cast<NameCallExpressionNode>(localCall)->rets, multi)
-                                          : std::string{};
-                if (!name.empty()) {
+                const auto name = SingleRetName(rets, multi);
+                if (name.empty())
+                    return;
+                if (local) {
                     RecordDecl(name, scopeId);
                     RecordAccess(name, scopeId);
+                } else if (IsOwnedRegisterName(name)) {
+                    m_bareAssigned.insert(name);
+                    m_bareAssignmentScopes[name].insert(scopeId);
                 }
-            }
+            };
+            if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(es->expression))
+                recordReturns(call->rets, call->bIsLocalDeclaration);
+            else if (auto call = std::dynamic_pointer_cast<NameCallExpressionNode>(es->expression))
+                recordReturns(call->rets, call->bIsLocalDeclaration);
             CollectExpr(es->expression, scopeId);
             return;
         }
@@ -390,6 +395,13 @@ class DeclarationHoister {
         });
     }
 
+    static void InsertLeadingDeclaration(std::vector<std::shared_ptr<Statement>> &body, const std::string &name) {
+        const auto position = std::find_if(body.begin(), body.end(), [](const auto &statement) {
+            return !statement || statement->nodeKind != ASTNodeKind::Comment;
+        });
+        body.insert(position, std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+    }
+
     // for a name with no declaration anywhere, insert `local vN` at the lowest scope dominating all
     // its accesses, hoisted out of any loop body (a loop-carried value must be declared outside the
     // loop or it re-initialises each iteration).
@@ -452,7 +464,7 @@ class DeclarationHoister {
             // carried across iterations / read after the loop). Declare `local name` once at the target
             // scope so every use; including the deeper writes; binds to it instead of leaking a global.
             if (!promoted)
-                body->insert(body->begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+                InsertLeadingDeclaration(*body, name);
         }
     }
 
@@ -542,7 +554,7 @@ class DeclarationHoister {
                 if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt); vd && DeclName(vd) == name)
                     alreadyDeclared = true;
             if (!alreadyDeclared)
-                m_scopes[target].body->insert(m_scopes[target].body->begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+                InsertLeadingDeclaration(*m_scopes[target].body, name);
         }
     }
 
@@ -557,7 +569,7 @@ class DeclarationHoister {
         for (const auto &name : m_bareAssigned) {
             if (!HasUnboundBareAssignment(name) || m_declCount[name] <= 1 || rootDeclarations.contains(name))
                 continue;
-            root->insert(root->begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+            InsertLeadingDeclaration(*root, name);
             rootDeclarations.insert(name);
         }
     }

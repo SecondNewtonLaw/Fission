@@ -102,6 +102,43 @@ static void CheckNoIntroducedGeneratedGlobals(const std::string &source) {
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
 }
 
+TEST_CASE("Regress AST2 seed659130932 root and propagated parameter bindings", "[Fuzz][ForwardRef][Binding][Regression]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"AST2(obj(((math % t)), true);
+local function f0(p1, p2, ...)
+    repeat
+        p1, f0 = true, next;
+        f0, p1 = "value", next;
+        select();
+    until function(p3)
+math(82, 117.5);
+p1(23, true);
+return nil, select;
+end;
+    p1(..., (print));
+    return (if tostring then obj else nil), ...;
+end
+(f0["hello"])(table);
+return (#function(p1, p2, p3, ...)
+p1("a-b", tostring);
+tonumber();
+ipairs(next);
+return ;
+end), (if print then f0:method("x") else f0:set(91.5));
+)AST2";
+
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+
+    std::string error;
+    CHECK(Recompiles(result.decompilationOutput, &error));
+    INFO("recompile error: " << error);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+    CHECK(result.decompilationOutput.find("local function f0(p1, arg1, ...)") != std::string::npos);
+}
+
 TEST_CASE("Forward-reference oracle recognizes Luau local bindings", "[Fuzz][ForwardRef][Regression]") {
     const std::string source = GENERATE(
         "local function v0() local v0 = {} return v0 end v0()",

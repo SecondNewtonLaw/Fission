@@ -822,11 +822,11 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     GlobalAssignmentRenamer{}.Run(liftedAST.statements);
     // Fold branch assignments before scope blocks separate declarations from their diamonds.
     IfExpressionFolder{}.Run(liftedAST.statements);
-    DeclarationHoister{}.Run(liftedAST.statements);
     DeadLocalEliminator{}.Run(liftedAST.statements);
 
     // Scope blocks run last against final statement lifetimes.
     ScopeBlockIntroducer{}.Run(liftedAST.statements);
+    DeclarationHoister{}.Run(liftedAST.statements);
     const auto astRewriteEnd = std::chrono::steady_clock::now();
 
     if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR)
