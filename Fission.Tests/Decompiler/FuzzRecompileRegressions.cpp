@@ -1561,6 +1561,65 @@ return f(true, false, true, 3, 9)
     CHECK(arg3Count >= 2);
 }
 
+TEST_CASE("Regress generic-for capture survives sibling loop binding", "[Decompiler][FuzzRegress][GenericFor][Semantic]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+local function iter()
+    return next, {3}, nil
+end
+local saved
+for a, b in iter() do
+    saved = function() return a end
+end
+for c in iter() do
+    print(c * c)
+end
+return saved()
+)LUA";
+
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    std::string error;
+    REQUIRE(Recompiles(result.decompilationOutput, &error));
+    INFO("recompile error: " << error);
+
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile("")});
+    INFO("original trace: " << verdict.original.trace);
+    INFO("decompiled trace: " << verdict.decompiled.trace);
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+    CHECK(verdict.original.trace == "1\nreturn: 1\n");
+}
+
+TEST_CASE("Regress generic-for loop-carried noncapturing closure", "[Decompiler][FuzzRegress][GenericFor][Semantic]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+local function iter()
+    return next, {3}, nil
+end
+local saved
+for a in iter() do
+    saved = function() return 9 end
+end
+return saved()
+)LUA";
+
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    std::string error;
+    REQUIRE(Recompiles(result.decompilationOutput, &error));
+    INFO("recompile error: " << error);
+
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile("")});
+    INFO("original trace: " << verdict.original.trace);
+    INFO("decompiled trace: " << verdict.decompiled.trace);
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+    CHECK(verdict.original.trace == "return: 9\n");
+}
+
 TEST_CASE("Regress fuzz t3_2: local keyed closure keeps owner and first error", "[Decompiler][FuzzRegress][Semantic]") {
     EnableLuauFFlagsOnce();
     const std::string source = R"LUA(

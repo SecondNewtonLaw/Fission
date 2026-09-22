@@ -781,6 +781,13 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         break;
                     }
 
+                    if (conditionalLatch && successor.bTerminator == BlockTerminator::Conditional)
+                        for (const uint32_t headerSucc : successor.successors)
+                            if (headerSucc != conditionalExit && !reachesBefore(headerSucc, block.dwBlockId, successor.dwBlockId)) {
+                                conditionalLatch = nullptr;
+                                break;
+                            }
+
                     if (conditionalLatch) {
                         successor.dwBlockFlags &= ~static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
@@ -910,10 +917,11 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         if (header.bType != BlockType::LoopHeader ||
             (header.dwBlockFlags & static_cast<uint32_t>(LoopBlockFlags::WhileLoop)) == 0 || !header.loopLatch || !header.loopExit)
             continue;
-        if (*header.loopExit >= blocks.size() || blocks[*header.loopExit].bType != BlockType::LoopHeader)
+        if (*header.loopExit >= blocks.size() || blocks[*header.loopExit].bType != BlockType::LoopHeader ||
+            !reachesBefore(*header.loopExit, *header.loopLatch, header.dwBlockId))
             continue;
         for (const uint32_t succ : header.successors) {
-            if (succ == *header.loopExit)
+            if (succ == *header.loopExit || (reachesBefore(succ, *header.loopLatch, header.dwBlockId) && blocks[*header.loopExit].loopExit != succ))
                 continue;
             header.loopExit = succ;
             blocks[*header.loopLatch].loopExit = succ;

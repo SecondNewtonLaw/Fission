@@ -2536,6 +2536,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             LiftedOperand varOp;
                             varOp.type = LiftedOperandType::Register;
                             varOp.value.reg = baseReg + 3 + i;
+                            if (const auto defs = m_defsByInstruction.find(latchTail); defs != m_defsByInstruction.end())
+                                for (const auto &ref : defs->second)
+                                    if (ref.regIndex == varOp.value.reg) {
+                                        varOp.ssaVersion = ref.version;
+                                        break;
+                                    }
                             // a loop variable is a fresh per-iteration binding; always its own name, never
                             // LiftExpression (which inlines a reused register's value -> `for <expr> in ...`,
                             // a syntax error). Mirrors the numeric-for loop-variable handling above.
@@ -3214,8 +3220,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) || (m_definedRegisters.contains(saveWhere.value.reg) && localName)) {
-                if (localName)
+                if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
+                    if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())
+                        for (const auto *user : users->second)
+                            if (user->operation == LiftedOperation::PHI && !user->operands.empty())
+                                m_currentFunction->SetVariableName(user->operands[0].value.reg, user->operands[0].ssaVersion, *localName);
+                }
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 statements.push_back(
@@ -3441,8 +3452,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) || (m_definedRegisters.contains(saveWhere.value.reg) && localName)) {
-                if (localName)
+                if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
+                    if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())
+                        for (const auto *user : users->second)
+                            if (user->operation == LiftedOperation::PHI && !user->operands.empty())
+                                m_currentFunction->SetVariableName(user->operands[0].value.reg, user->operands[0].ssaVersion, *localName);
+                }
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 statements.push_back(

@@ -694,11 +694,13 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
             } else if (inst->operation == LiftedOperation::FORGLOOP && inst->operands.size() > 2) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 int numVars = (inst->operands[2].value.imm.n & 0xFF);
-                NewVersion(baseReg + 2);
+                int32_t stateVersion = NewVersion(baseReg + 2);
                 varsDefinedHere.push_back(baseReg + 2);
+                func.definitionMap[{static_cast<uint8_t>(baseReg + 2), stateVersion}] = inst;
                 for (int i = 0; i < numVars; ++i) {
-                    NewVersion(baseReg + 3 + i);
+                    const int32_t loopVersion = NewVersion(baseReg + 3 + i);
                     varsDefinedHere.push_back(baseReg + 3 + i);
+                    func.definitionMap[{static_cast<uint8_t>(baseReg + 3 + i), loopVersion}] = inst;
                 }
             }
             if (inst == block.lpTail)

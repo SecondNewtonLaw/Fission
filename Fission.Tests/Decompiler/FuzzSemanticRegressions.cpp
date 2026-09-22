@@ -92,6 +92,90 @@ return ok
     CHECK(reconstructed.trace == original.trace);
 }
 
+TEST_CASE("Regress fuzz: adjacent loop boundaries and bindings", "[Decompiler][FuzzRegress][AdjacentLoops]") {
+    EnableLuauFFlagsOnce();
+    const Luau::CompileOptions options{GENERATE(0, 1, 2), GENERATE(0, 2)};
+    std::string source;
+    std::string expectedTrace;
+    SECTION("while exit is another loop header") {
+        expectedTrace = "error: attempt to index function with 'field'\n";
+        source = R"LUA(
+while {print} do
+    local f = tonumber.field
+    f(f)
+end
+while (if -math then 344 else ipairs(nil)) do
+    print()
+end
+)LUA";
+    }
+    SECTION("generic loop follows captured loop variable") {
+        expectedTrace = "1\n1\nreturn: 7\n";
+        source = R"LUA(
+local function iter() return next, {3}, nil end
+for a, b in iter() do
+    local function f() return a end
+    print(f())
+end
+for c in iter() do
+    print(c * c)
+end
+return 7
+)LUA";
+    }
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE(!bytecode.empty());
+    REQUIRE(bytecode.front() != '\0');
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+    const auto compiled = Luau::compile(result.decompilationOutput, options);
+    REQUIRE(!compiled.empty());
+    REQUIRE(compiled.front() != '\0');
+    const auto prelude = Luau::compile("");
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(compiled, prelude);
+    INFO("original: " << original.trace);
+    INFO("reconstructed: " << reconstructed.trace);
+    REQUIRE(original.trace == expectedTrace);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
+TEST_CASE("Regress fuzz: adjacent while loops keep return outside repeat", "[Decompiler][FuzzRegress][AdjacentLoops]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+local v0 = (t.field).field
+local v1, v2, v3 = nil, v0:set(true, "a-b"), (if pairs then tonumber else string)
+local v4 = (v2[v3][{}] * math.field)
+while v2.field:run(v4.field, 399) do
+    local v5 = tostring[65.75][v1(false)]
+    v4((if {k = string, x = 470, nil, true} then {v2, nil, k = ipairs} else obj(true, t)), function(p6, p7) return true, p7 end)
+    ipairs -= print:get(true, obj)
+    if ({data = v4} and true) then break end
+end
+(201.5)(t:run(117), v4.field)
+next()
+while v2.field[{data = "hello", data = string}][(...)][{(if t then t else pairs), [("hello")] = tonumber.field, ..., [{[nil] = 38.25}] = function(p5, p6)
+    string()
+    tonumber(next, t)
+    v0(string)
+    return
+end}] do end
+return #68.75
+)LUA";
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    std::string error;
+    const bool recompiles = Recompiles(result.decompilationOutput, &error);
+    INFO(error);
+    CHECK(recompiles);
+}
+
 static size_t CountOccurrences(const std::string &haystack, const std::string &needle) {
     size_t n = 0;
     for (size_t pos = haystack.find(needle); pos != std::string::npos; pos = haystack.find(needle, pos + needle.size()))
