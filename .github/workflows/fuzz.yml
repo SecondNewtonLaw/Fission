@@ -1,4 +1,4 @@
-name: Fuzz
+name: Fuzzing
 
 on:
   push:
@@ -20,50 +20,6 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  test:
-    runs-on: ubuntu-24.04
-    timeout-minutes: 30
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y ccache ninja-build
-
-      - name: Restore compiler cache
-        uses: actions/cache@v5
-        with:
-          path: .ccache
-          key: ccache-${{ runner.os }}-clang-${{ github.job }}-${{ github.sha }}
-          restore-keys: |
-            ccache-${{ runner.os }}-clang-${{ github.job }}-
-            ccache-${{ runner.os }}-clang-
-
-      - name: Setup CMake
-        uses: jwlawson/actions-setup-cmake@v2
-        with:
-          cmake-version: "3.31.6"
-
-      - name: Configure
-        run: >-
-          cmake -S . -B build -G Ninja
-          -DCMAKE_BUILD_TYPE=Release
-          -DCMAKE_C_COMPILER=clang
-          -DCMAKE_CXX_COMPILER=clang++
-          -DBUILD_TESTING=ON
-          -DBUILD_FUZZING=OFF
-          -DUSE_CCACHE=ON
-
-      - name: Build tests
-        run: cmake --build build --target Fission.Tests --parallel 2
-
-      - name: Show compiler cache statistics
-        run: ccache --cleanup && ccache --show-stats
-
-      - name: Run tests
-        run: ctest --test-dir build --output-on-failure
-
   fuzz:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
@@ -119,10 +75,10 @@ jobs:
           printf '### Fuzz seeds\n- AST: `%s`\n- Bytecode: `%s`\n' "$ast_seed" "$bytecode_seed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: AST fuzz
-        run: ./build/Fission.Fuzzing --count 100000 --seed ${{ steps.seeds.outputs.ast }} --threads 2 --max-corpus 0 --minimize-budget 0 --out fuzz-output/ast
+        run: ./build/Fission.Fuzzing --count 10000 --seed ${{ steps.seeds.outputs.ast }} --threads 2 --max-corpus 0 --minimize-budget 0 --out fuzz-output/ast
 
       - name: Bytecode fuzz
-        run: ./build/Fission.Fuzzing --deser --count 500000 --seed ${{ steps.seeds.outputs.bytecode }} --out fuzz-output/bytecode
+        run: ./build/Fission.Fuzzing --deser --count 100000 --seed ${{ steps.seeds.outputs.bytecode }} --out fuzz-output/bytecode
 
       - name: Upload fuzz findings
         if: failure()

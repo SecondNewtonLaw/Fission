@@ -1,0 +1,103 @@
+name: Decompiler Server
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_MAXSIZE: 1G
+  CCACHE_COMPRESS: "true"
+  CCACHE_NOHASHDIR: "true"
+
+concurrency:
+  group: decompiler-server-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  decompiler-server-test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ccache ninja-build
+
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-clang-${{ github.job }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-clang-${{ github.job }}-
+            ccache-${{ runner.os }}-clang-
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DBUILD_TESTING=OFF
+          -DBUILD_FUZZING=OFF
+          -DUSE_CCACHE=ON
+
+      - name: Build decompiler server
+        run: cmake --build build --target Fission.Server.CLI --parallel 2
+
+      - name: Show compiler cache statistics
+        run: ccache --cleanup && ccache --show-stats
+
+      - name: Test decompiler server
+        shell: bash
+        run: |
+          ./build/Fission.Server --port 18081 >server.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+
+          ready=false
+          for _ in {1..30}; do
+            if curl --fail --silent http://127.0.0.1:18081/health | grep --quiet '"ok":true'; then
+              ready=true
+              break
+            fi
+            sleep 1
+          done
+          if [[ "$ready" != true ]]; then
+            cat server.log
+            exit 1
+          fi
+
+          bytecode='DgMHAWEBYgFjAWQBZQFmAWcAAbgBBwAAAQoAF0EAAAAMAAEAAAAAQAwBAwAAACBADAIFAAAAQEAMAwcAAABgQAwECQAAAIBADAULAAAAoEAMBg0AAADAQBUGAQAVBQAAFQQAABUDAAAVAgAAFQEAABUAAAEWAAEADgMBBAAAAEADAgQAACBAAwMEAABAQAMEBAAAYEADBQQAAIBAAwYEAACgQAMHBAAAwEAAAQABGAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAHAA='
+          response=$(curl --fail-with-body --silent --show-error \
+            --header 'Content-Type: application/json' \
+            --data "{\"mode\":\"vanilla\",\"bytecode\":\"$bytecode\"}" \
+            http://127.0.0.1:18081/decompile)
+          grep --quiet '"ok":true' <<<"$response"
+          grep --quiet '"resultCode":"Success"' <<<"$response"
+
+          status=$(curl --silent --output invalid.json --write-out '%{http_code}' \
+            --header 'Content-Type: application/json' \
+            --data '{"mode":"vanilla","bytecode":"@@@@not-base64"}' \
+            http://127.0.0.1:18081/decompile)
+          [[ "$status" == 400 ]]
+          grep --quiet '"ok":false' invalid.json
+          grep --quiet 'Invalid base64 encoding' invalid.json
+
+          kill "$server_pid"
+          wait "$server_pid" || true
+          ! kill -0 "$server_pid" 2>/dev/null
+          trap - EXIT

@@ -1,0 +1,65 @@
+name: Tests
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CCACHE_DIR: ${{ github.workspace }}/.ccache
+  CCACHE_BASEDIR: ${{ github.workspace }}
+  CCACHE_MAXSIZE: 1G
+  CCACHE_COMPRESS: "true"
+  CCACHE_NOHASHDIR: "true"
+
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: sudo apt-get update && sudo apt-get install -y ccache ninja-build
+
+      - name: Restore compiler cache
+        uses: actions/cache@v5
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-clang-${{ github.job }}-${{ github.sha }}
+          restore-keys: |
+            ccache-${{ runner.os }}-clang-${{ github.job }}-
+            ccache-${{ runner.os }}-clang-
+
+      - name: Setup CMake
+        uses: jwlawson/actions-setup-cmake@v2
+        with:
+          cmake-version: "3.31.6"
+
+      - name: Configure
+        run: >-
+          cmake -S . -B build -G Ninja
+          -DCMAKE_BUILD_TYPE=Release
+          -DCMAKE_C_COMPILER=clang
+          -DCMAKE_CXX_COMPILER=clang++
+          -DBUILD_TESTING=ON
+          -DBUILD_FUZZING=OFF
+          -DUSE_CCACHE=ON
+
+      - name: Build tests
+        run: cmake --build build --target Fission.Tests --parallel 2
+
+      - name: Show compiler cache statistics
+        run: ccache --cleanup && ccache --show-stats
+
+      - name: Run tests
+        run: ctest --test-dir build --output-on-failure
