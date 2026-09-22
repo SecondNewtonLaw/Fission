@@ -422,12 +422,17 @@ return ColorSequence.new({
     ColorSequenceKeypoint.new(2, Color3.fromRGB(7, 8, 9)),
     ColorSequenceKeypoint.new(3, Color3.fromRGB(10, 11, 12)),
     ColorSequenceKeypoint.new(4, Color3.fromRGB(13, 14, 15)),
+    ColorSequenceKeypoint.new(5, Color3.fromRGB(16, 17, 18)),
+    ColorSequenceKeypoint.new(6, Color3.fromRGB(19, 20, 21)),
+    ColorSequenceKeypoint.new(7, Color3.fromRGB(22, 23, 24)),
+    ColorSequenceKeypoint.new(8, Color3.fromRGB(25, 26, 27)),
+    ColorSequenceKeypoint.new(9, Color3.fromRGB(28, 29, 30)),
 })
 )LUA";
     const std::string prelude = R"LUA(
 Color3 = { fromRGB = function(r, g, b) return r + g + b end }
 ColorSequenceKeypoint = { new = function(t, colorValue) return t * 100 + colorValue end }
-ColorSequence = { new = function(values) return #values, values[1], values[5] end }
+ColorSequence = { new = function(values) return #values, values[1], values[10] end }
 )LUA";
     Decompiler decompiler{};
     const auto result = decompiler.DecompileTestCode(source);
@@ -435,7 +440,7 @@ ColorSequence = { new = function(values) return #values, values[1], values[5] en
     INFO("decompiled output:\n" << result.decompilationOutput);
     const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile(prelude)});
     INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
-    CHECK(verdict.original.trace == "return: 5\t6\t442\n");
+    CHECK(verdict.original.trace == "return: 10\t6\t987\n");
     CHECK(verdict.decompiled.trace == verdict.original.trace);
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
 }

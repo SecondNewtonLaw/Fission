@@ -4322,16 +4322,53 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     // register but a different version belongs to a different table (the register
     // was reused) and must not be folded into this constructor.
     int32_t tableVersion = inst.operands[0].ssaVersion;
-    size_t scanLimit = 100;
+    constexpr size_t scanLimit = 100;
     size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
+    const int tableBlock = m_currentFunction->GetBlockId(&inst);
+    size_t blockEnd = inst.instructionIndex + 1;
+    if (tableBlock >= 0 && m_currentFunction->basicBlocks[tableBlock].lpTail)
+        blockEnd = (std::min)(maxIdx, static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex) + 1);
+    size_t scanEnd = (std::min)(maxIdx, inst.instructionIndex + scanLimit);
     bool bFoundSetList = false;
     const LiftedInstruction *deferredSetList = nullptr;
-    for (size_t i = inst.instructionIndex + 1; i < maxIdx && i < inst.instructionIndex + scanLimit; ++i) {
+    for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
         if (candidate.operation == LiftedOperation::SETLIST && candidate.operands.size() > 1 &&
             candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion == tableVersion) {
             deferredSetList = &candidate;
             break;
+        }
+    }
+    if (!deferredSetList && scanEnd < blockEnd) {
+        const LiftedInstruction *distantSetList = nullptr;
+        bool hasFieldStore = false;
+        for (size_t i = inst.instructionIndex + 1; i < blockEnd; ++i) {
+            const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+            if (candidate.operation == LiftedOperation::SETLIST && candidate.operands.size() > 2 && candidate.operands[0].value.reg == tableReg &&
+                candidate.operands[0].ssaVersion == tableVersion) {
+                distantSetList = &candidate;
+                break;
+            }
+            if ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
+                 candidate.operation == LiftedOperation::SETTABLEN) &&
+                candidate.operands.size() > 1 && candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion == tableVersion)
+                hasFieldStore = true;
+        }
+
+        const auto uses = distantSetList ? m_currentFunction->implicitUses.find(distantSetList) : m_currentFunction->implicitUses.end();
+        bool callElements = uses != m_currentFunction->implicitUses.end() && !uses->second.empty();
+        for (size_t i = 0; callElements && i < uses->second.size(); ++i) {
+            LiftedOperand element{};
+            element.type = LiftedOperandType::Register;
+            element.value.reg = distantSetList->operands[1].value.reg + static_cast<int32_t>(i);
+            element.ssaVersion = uses->second[i];
+            const auto *definition = m_currentFunction->GetDefinition(element);
+            callElements = definition && (definition->operation == LiftedOperation::CALL || definition->operation == LiftedOperation::CALLFB ||
+                                           definition->operation == LiftedOperation::NAMECALL);
+        }
+        if (!hasFieldStore && callElements && distantSetList->operands[2].value.imm.n == 0) {
+            deferredSetList = distantSetList;
+            scanEnd = static_cast<size_t>(distantSetList->instructionIndex) + 1;
         }
     }
 
@@ -4519,7 +4556,6 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     // bites when the table itself is a real local (emitted at the NEWTABLE position); an inlined
     // table is rendered at its single, last use, by when every contributing local already exists.
     const int32_t tableIndex = inst.instructionIndex;
-    const int tableBlock = m_currentFunction->GetBlockId(&inst);
     const bool tableIsLocal = !ShouldInline(&inst);
 
     // A register whose def is emitted as its own statement that lands after this table.
@@ -4622,7 +4658,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         return isLaterName(def);
     };
 
-    for (size_t i = inst.instructionIndex + 1; i < inst.instructionIndex + scanLimit && i < maxIdx; ++i) {
+    for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
         if (inst.operation == LiftedOperation::DUPTABLE) {
             if (tableBlock < 0 || i > static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex))
