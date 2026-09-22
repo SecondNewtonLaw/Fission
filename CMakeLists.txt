@@ -378,6 +378,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/IREquivalence.cpp
             Fission.Tests/Decompiler/ClassDeclarations.cpp
             Fission.Tests/Decompiler/ScopeCaptureRegressions.cpp
+            Fission.Tests/Decompiler/FuzzCampaignRegressions.cpp
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
