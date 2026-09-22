@@ -1,6 +1,8 @@
-# Draft release notes
+# Latest build changelog
 
-Comparison: `0.2.0-alpha...dev`
+Build: `696764c`
+
+Comparison: `0.2.0-alpha...696764c`
 
 ## Fission.Server
 
@@ -34,6 +36,7 @@ Comparison: `0.2.0-alpha...dev`
 - Added coverage for class declarations, SSA invariants, scope capture, IR equivalence, complex control flow, and Luau lifting semantics.
 - Added encoded ItemSpawn guard samples and tightened stress-test result handling.
 - Corrected logical-precedence coverage so Clang warning-as-error builds succeed.
+- Isolated a Luau third-party header warning so Linux Clang builds remain warning-clean under `-Werror`.
 
 ## Commits since `0.2.0-alpha`
 
@@ -54,12 +57,19 @@ Comparison: `0.2.0-alpha...dev`
 - `fc20826` fix(decompiler): hoist propagated bindings
 - `41d185e` fix(decompiler): retain long variadic table lists
 - `14e7ca1` test(decompiler): split campaign regressions
+- `cc6435a` docs: draft release notes since 0.2.0-alpha
+- `696764c` fix(tests): suppress Luau header warning
 
 ## Validation
 
-- Windows CTest suite: 496 tests passed.
+- Windows CTest suite: 496 tests passed, 0 failed.
 - Local-register corpus replay: 49 samples passed, 0 failed.
 - Exact RegEx stack-overflow replay: decompiled and recompiled successfully.
 - Exact character-title replay: original and recompiled IR contain 1,727 calls and 145 `SETLIST` operations; no empty call-list constructors remain.
+- Ubuntu 24.04 CI built `Fission.Server`, `Fission.Tests`, and `Fission.Fuzzing` successfully.
+- Ubuntu CTest suite: 496 tests passed, 0 failed.
+- AST fuzzing completed 1,000 cases with random seed `52199019`: 96 IR-stable, 335 semantic matches, 569 semantic checks unavailable, and no reported divergence.
+- Bytecode fuzzing completed 5,000 malformed-input cases with random seed `350527275`: 4,711 completed the pipeline and 289 terminated through caught error paths without crashing the process.
+- Complete Linux workflow finished successfully in 6 minutes 46 seconds.
 
 Raw IR signatures are not byte-for-byte identical for every corpus sample. Remaining differences include materialized moves, branch-polarity reconstruction, and explicit returns replacing jumps to shared exits. These results do not claim Roblox runtime equivalence for scripts requiring Roblox APIs.
