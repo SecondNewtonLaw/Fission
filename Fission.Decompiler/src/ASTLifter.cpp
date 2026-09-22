@@ -2279,9 +2279,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         m_definedRegisters.erase(loopVariableReg);
                 } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
                     auto whileNode = std::make_shared<WhileStatementNode>();
+                    const bool infiniteWhile = block.bTerminator != BlockTerminator::Conditional;
 
                     if (block.loopExit.has_value())
                         exitIdx = block.loopExit.value();
+                    if (infiniteWhile)
+                        exitIdx = latchIdx;
 
                     // A header diamond can precede the actual exit test, including across a nested for-loop.
                     bool compoundHandled = false;
@@ -2385,7 +2388,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             stmts = LiftBlockInstructions(block);
                         uint32_t bodyStart = InvalidBlockId;
                         for (auto s : block.successors)
-                            if (s != exitIdx)
+                            if (infiniteWhile || s != exitIdx)
                                 bodyStart = s;
 
                         std::shared_ptr<Expression> whileOrCondition;
@@ -2432,7 +2435,6 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         // a header with no conditional exit (unconditional back-edge, or fallthrough into
                         // the body) has no test == infinite `while true`; LiftCondition on its
                         // non-comparison tail would yield `false`, rendering `while not false`.
-                        const bool infiniteWhile = block.bTerminator != BlockTerminator::Conditional;
                         if (whileOrCondition)
                             whileNode->condition = whileOrCondition;
                         else if (headerHasBody || infiniteWhile)
@@ -4679,11 +4681,14 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         }
 
         if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF ||
-            candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::RETURN ||
-            candidate.operation == LiftedOperation::BREAK || candidate.operation == LiftedOperation::FORNPREP ||
-            candidate.operation == LiftedOperation::FORNLOOP || candidate.operation == LiftedOperation::FORGLOOP ||
-            candidate.operation == LiftedOperation::FORGPREP || candidate.operation == LiftedOperation::FORGPREP_INEXT ||
-            candidate.operation == LiftedOperation::FORGPREP_NEXT)
+            candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::JUMPIFEQ ||
+            candidate.operation == LiftedOperation::JUMPIFNOTEQ || candidate.operation == LiftedOperation::JUMPIFLE ||
+            candidate.operation == LiftedOperation::JUMPIFNOTLE || candidate.operation == LiftedOperation::JUMPIFLT ||
+            candidate.operation == LiftedOperation::JUMPIFNOTLT || candidate.operation == LiftedOperation::JUMPXEQK ||
+            candidate.operation == LiftedOperation::RETURN || candidate.operation == LiftedOperation::BREAK ||
+            candidate.operation == LiftedOperation::FORNPREP || candidate.operation == LiftedOperation::FORNLOOP ||
+            candidate.operation == LiftedOperation::FORGLOOP || candidate.operation == LiftedOperation::FORGPREP ||
+            candidate.operation == LiftedOperation::FORGPREP_INEXT || candidate.operation == LiftedOperation::FORGPREP_NEXT)
             break;
 
         if (candidate.operation == LiftedOperation::SETLIST) {
@@ -4806,6 +4811,12 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             if (candidate.operands[1].value.reg == tableReg) {
                 if (readsTableReg(candidate.operands[0]) || readsTableReg(candidate.operands[2]))
                     break; // key/value reads table being built; keep source evaluation after declaration
+                diamondVisited.clear();
+                if (dependsOnMaterializedDiamond(candidate.operands[0]))
+                    break;
+                diamondVisited.clear();
+                if (dependsOnMaterializedDiamond(candidate.operands[2]))
+                    break;
                 if (!valueFoldable(candidate.operands[0]))
                     break; // value can't be a constructor field; keep folded elements, emit this and later stores as statements
                 // A closure key is emitted as its own `local function anon_N` statement, so force-inlining it
@@ -4824,7 +4835,9 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
             }
-        } else if (!IsConstructorElement(&candidate) && StaysAsStatement(&candidate)) {
+        } else if (CanOperationRaise(candidate.operation) && !IsConstructorElement(&candidate)) {
+            break;
+        } else if (StaysAsStatement(&candidate)) {
             break;
         }
     }
@@ -4931,6 +4944,43 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     // loop-cond consumer from another block: inlining would move this call into the loop
     if (m_loopCondNoInline.contains(inst))
         return false;
+
+    if (CanOperationRaise(inst->operation) && IsConstructorElement(inst) && inst->operands[0].type == LiftedOperandType::Register) {
+        const SSARef ref{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
+        const auto users = m_currentFunction->users.find(ref);
+        const auto *user = users != m_currentFunction->users.end() && !users->second.empty() &&
+                                   std::ranges::all_of(users->second, [&](const LiftedInstruction *candidate) { return candidate == users->second.front(); })
+                               ? users->second.front()
+                               : nullptr;
+        if (user) {
+            if (m_currentFunction->GetBlockId(inst) != m_currentFunction->GetBlockId(user))
+                return false;
+
+            for (const auto &candidate : m_currentFunction->lpLiftedFunction->instructions) {
+                if (candidate.instructionIndex <= inst->instructionIndex || candidate.instructionIndex >= user->instructionIndex)
+                    continue;
+                if (const auto defs = m_defsByInstruction.find(&candidate); defs != m_defsByInstruction.end())
+                    for (size_t i = 1; i < inst->operands.size(); ++i)
+                        if (inst->operands[i].type == LiftedOperandType::Register &&
+                            std::ranges::any_of(defs->second, [&](const SSARef &defined) { return defined.regIndex == inst->operands[i].value.reg; }))
+                            return false;
+            }
+
+            if (user->operation == LiftedOperation::SETLIST && user->operands.size() > 1 && m_currentFunction->implicitUses.contains(user)) {
+                const auto &versions = m_currentFunction->implicitUses.at(user);
+                const int32_t startReg = user->operands[1].value.reg;
+                for (size_t i = 0; i < versions.size(); ++i) {
+                    LiftedOperand element{};
+                    element.type = LiftedOperandType::Register;
+                    element.value.reg = startReg + static_cast<int32_t>(i);
+                    element.ssaVersion = versions[i];
+                    const auto *def = m_currentFunction->GetDefinition(element);
+                    if (def && def->instructionIndex > inst->instructionIndex && def->instructionIndex < user->instructionIndex && !ShouldInline(def))
+                        return false;
+                }
+            }
+        }
+    }
 
     // A register captured by a closure (VAL or REF) must remain a real local: the
     // closure's upvalue is aliased to this variable's name (no `local uv = source`
@@ -5342,6 +5392,8 @@ bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
             if ((user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB) && user->instructionIndex > e->instructionIndex &&
                 IsConstructorElement(user))
                 continue;
+            if (user->instructionIndex > e->instructionIndex && m_defsByInstruction.contains(user) && IsConstructorElement(user))
+                continue;
             if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
                  user->operation == LiftedOperation::SETTABLEN) &&
                 StoreTargetsFreshTable(user))
@@ -5360,7 +5412,7 @@ bool ASTLifter::StoreTargetsFreshTable(const LiftedInstruction *e) {
     if (e->operands.size() <= tableOp || e->operands[tableOp].type != LiftedOperandType::Register)
         return false;
     const auto *def = m_currentFunction->GetDefinition(e->operands[tableOp]);
-    return def && def->operation == LiftedOperation::NEWTABLE;
+    return def && (def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE);
 }
 
 // True if inlining `def` into its single use `use` would reorder its throw/effect past an instruction
@@ -5883,6 +5935,18 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
     // The shared OR target is the head's jump-to-true edge. Every link of the
     // chain must reach this same block.
     const uint32_t body = head.ifStatementTrue.value();
+    const auto truthyClosure = [&](uint32_t id) -> const LiftedInstruction * {
+        if (id >= blocks.size())
+            return nullptr;
+        const auto &b = blocks[id];
+        if (!b.lpTail || b.lpTail->operands.empty() || b.lpTail->operands[0].type != LiftedOperandType::Register)
+            return nullptr;
+        for (auto *inst = b.lpHead; inst && inst < b.lpTail; ++inst)
+            if ((inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE) && !inst->operands.empty() &&
+                inst->operands[0].type == LiftedOperandType::Register && inst->operands[0].value.reg == b.lpTail->operands[0].value.reg)
+                return inst;
+        return nullptr;
+    };
     const auto isLink = [&](uint32_t id) {
         if (id >= blocks.size())
             return false;
@@ -5890,8 +5954,9 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         if (b.bType != BlockType::IfHeader || !b.ifStatementTrue.has_value() || !b.ifStatementFalse.has_value() ||
             (b.ifStatementTrue.value() != body && b.ifStatementFalse.value() != body))
             return false;
+        const auto *closure = truthyClosure(id);
         for (auto *inst = b.lpHead; inst && inst < b.lpTail; ++inst)
-            if (inst->operation != LiftedOperation::NOP && inst->operation != LiftedOperation::PHI && !ShouldInline(inst))
+            if (inst != closure && inst->operation != LiftedOperation::NOP && inst->operation != LiftedOperation::PHI && !ShouldInline(inst))
                 return false;
         return true;
     };
@@ -5909,6 +5974,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
     uint32_t elseIdx = InvalidBlockId;
     bool complete = false;
     bool invertedFinal = false;
+    bool truthyFinal = false;
 
     while (cur < blocks.size() && !guard.contains(cur)) {
         const auto &b = blocks[cur];
@@ -5929,6 +5995,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
             }
             elseIdx = bf;
             complete = true;
+            truthyFinal = truthyClosure(cur) != nullptr;
             break;
         }
         if (bf == body) {
@@ -5942,7 +6009,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         break; // does not share the body -> end of (non-)chain
     }
 
-    if (!complete || !invertedFinal || links.size() < 2 || elseIdx == InvalidBlockId)
+    if (!complete || (!invertedFinal && !truthyFinal) || links.size() < 2 || elseIdx == InvalidBlockId)
         return std::nullopt;
 
     // Structure confirmed. Lift each link's condition (the condition under which it
@@ -5950,7 +6017,9 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
     std::vector<std::shared_ptr<Expression>> conditions;
     conditions.reserve(links.size());
     for (const auto &lk : links) {
-        auto c = LiftCondition(blocks[lk.blockId].lpTail);
+        auto c = truthyClosure(lk.blockId)
+                     ? std::shared_ptr<Expression>(std::make_shared<BooleanLiteralNode>(blocks[lk.blockId].lpTail->operation == LiftedOperation::JUMPIF))
+                     : LiftCondition(blocks[lk.blockId].lpTail);
         if (lk.invert)
             c = InvertCondition(c);
         conditions.push_back(std::move(c));

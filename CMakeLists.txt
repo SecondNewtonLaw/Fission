@@ -381,6 +381,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/FuzzCampaignRegressions.cpp
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
             Fission.Tests/Decompiler/FuzzRun35678124075Regressions.cpp
+            Fission.Tests/Decompiler/FuzzRun35682025082Regressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp

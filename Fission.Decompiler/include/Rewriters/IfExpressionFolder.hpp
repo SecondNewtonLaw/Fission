@@ -4,6 +4,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <vector>
@@ -110,7 +111,13 @@ class IfExpressionFolder {
                         did && did->identifier && did->identifier->name == name) {
                         std::unordered_set<std::string> names;
                         ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(ifExpr), names);
-                        if (!names.contains(name)) {
+                        const bool shadowsEarlierBinding =
+                            names.contains(name) && std::any_of(stmts.begin(), stmts.begin() + static_cast<std::ptrdiff_t>(i - 1), [&](const auto &statement) {
+                                auto earlier = std::dynamic_pointer_cast<VariableDeclarationNode>(statement);
+                                auto id = earlier ? std::dynamic_pointer_cast<IdentifierExpressionNode>(earlier->identifier) : nullptr;
+                                return id && id->identifier && id->identifier->name == name;
+                            });
+                        if (!names.contains(name) || shadowsEarlierBinding) {
                             stmts[i - 1] = std::make_shared<VariableDeclarationNode>(decl->identifier, ifExpr);
                             stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i));
                             --i;
