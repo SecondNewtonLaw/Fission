@@ -59,10 +59,10 @@ jobs:
           printf '### Fuzz seeds\n- AST: `%s`\n- Bytecode: `%s`\n' "$ast_seed" "$bytecode_seed" >> "$GITHUB_STEP_SUMMARY"
 
       - name: AST fuzz
-        run: ./build/Fission.Fuzzing --count 1000 --seed ${{ steps.seeds.outputs.ast }} --threads 1 --max-corpus 0 --minimize-budget 0 --out fuzz-output/ast
+        run: ./build/Fission.Fuzzing --count 100000 --seed ${{ steps.seeds.outputs.ast }} --threads 2 --max-corpus 0 --minimize-budget 0 --out fuzz-output/ast
 
       - name: Bytecode fuzz
-        run: ./build/Fission.Fuzzing --deser --count 5000 --seed ${{ steps.seeds.outputs.bytecode }} --out fuzz-output/bytecode
+        run: ./build/Fission.Fuzzing --deser --count 500000 --seed ${{ steps.seeds.outputs.bytecode }} --out fuzz-output/bytecode
 
       - name: Upload fuzz findings
         if: failure()
