@@ -341,6 +341,10 @@ class ScopeBlockIntroducer {
             ScanCallOrExpr(std::dynamic_pointer_cast<Expression>(stmt), refs, captures);
             return;
         }
+        if (auto expr = std::dynamic_pointer_cast<Expression>(stmt)) {
+            ScanExpr(expr, refs, captures);
+            return;
+        }
         if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
             for (const auto &v : ret->returnValues)
                 ScanExpr(v, refs, captures);

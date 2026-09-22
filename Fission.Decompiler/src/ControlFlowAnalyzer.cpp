@@ -788,6 +788,11 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                                 break;
                             }
 
+                    if (conditionalLatch && conditionalExit < blocks.size() && blocks[conditionalExit].bTerminator == BlockTerminator::Unconditional &&
+                        blocks[conditionalExit].lpTail &&
+                        GetJumpOffset(blocks[conditionalExit].lpTail) > 0)
+                        conditionalLatch = nullptr;
+
                     if (conditionalLatch) {
                         successor.dwBlockFlags &= ~static_cast<uint32_t>(LoopBlockFlags::WhileLoop);
                         successor.dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);

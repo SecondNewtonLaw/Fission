@@ -5141,8 +5141,37 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
 
     // Keep raising operations at their original position so error order matches bytecode evaluation.
     const bool bareImport = inst->operation == LiftedOperation::GETIMPORT && (inst->operands.size() < 3 || (inst->operands[2].value.imm.u >> 30) < 2);
-    if ((CanOperationRaise(inst->operation) || inst->operation == LiftedOperation::NOT) && !bareImport &&
-        inst->operands[0].type == LiftedOperandType::Register && singleUse) {
+    const auto inlineTreeCanRaise = [&](auto &&self, const LiftedInstruction *node, int depth) -> bool {
+        if (!node)
+            return false;
+        if (depth >= 64)
+            return true;
+        if (CanOperationRaise(node->operation) || node->operation == LiftedOperation::CALL || node->operation == LiftedOperation::CALLFB ||
+            node->operation == LiftedOperation::NAMECALL || node->operation == LiftedOperation::NAMECALLUDATA)
+            return true;
+        if (node->operation != LiftedOperation::MOVE && node->operation != LiftedOperation::NOT && node->operation != LiftedOperation::AND &&
+            node->operation != LiftedOperation::ANDK && node->operation != LiftedOperation::OR && node->operation != LiftedOperation::ORK)
+            return false;
+        for (size_t i = 1; i < node->operands.size(); ++i) {
+            if (node->operands[i].type != LiftedOperandType::Register)
+                continue;
+            const auto *input = m_currentFunction->GetDefinition(node->operands[i]);
+            if (input && ShouldInline(input) && self(self, input, depth + 1))
+                return true;
+        }
+        return false;
+    };
+    bool mayMoveRaisingInput = inst->operation == LiftedOperation::NOT;
+    if (inst->operation == LiftedOperation::AND || inst->operation == LiftedOperation::ANDK || inst->operation == LiftedOperation::OR ||
+        inst->operation == LiftedOperation::ORK) {
+        for (size_t i = 1; !mayMoveRaisingInput && i < inst->operands.size(); ++i) {
+            if (inst->operands[i].type != LiftedOperandType::Register)
+                continue;
+            const auto *input = m_currentFunction->GetDefinition(inst->operands[i]);
+            mayMoveRaisingInput = input && ShouldInline(input) && inlineTreeCanRaise(inlineTreeCanRaise, input, 0);
+        }
+    }
+    if ((CanOperationRaise(inst->operation) || mayMoveRaisingInput) && !bareImport && inst->operands[0].type == LiftedOperandType::Register && singleUse) {
         const SSARef ref{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
         if (const auto *user = onlyUser(ref); user && InliningReordersEffect(inst, user))
             return false;
@@ -5203,7 +5232,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         // the same expression (so order is preserved), is fine.
         // GETIMPORT only raises on an index path (depth >= 2 -> GETGLOBAL + GETTABLEKS in non-safeenv);
         // a bare global import (`require`, `print`) never throws and must inline for the naming passes.
-        const bool defCanRaise = CanOperationRaise(inst->operation) &&
+        const bool defCanRaise = (CanOperationRaise(inst->operation) || mayMoveRaisingInput) &&
                                  !(inst->operation == LiftedOperation::GETIMPORT && (inst->operands.size() < 3 || (inst->operands[2].value.imm.u >> 30) < 2));
         if (defCanRaise) {
             const SSARef ref{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
