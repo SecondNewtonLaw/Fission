@@ -5,7 +5,14 @@
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/RootNode.hpp"
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
+#endif
 #include "Luau/Compiler.h"
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 #include "Rewriters/ScopeAwareRenamer.hpp"
 #include "Rewriters/ScopeBlockIntroducer.hpp"
 #include "SourceGenerator/Generator.hpp"
