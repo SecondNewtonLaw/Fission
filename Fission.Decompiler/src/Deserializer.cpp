@@ -4,6 +4,7 @@
 
 #include "Deserializer.hpp"
 #include <cstring>
+#include <limits>
 #include <sstream>
 
 std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string &bytecode) {
@@ -358,7 +359,11 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
 
             auto lastline = 0;
             for (size_t j = 0; j < intervals; ++j) {
-                lastline += reader.Read<int32_t>();
+                const auto delta = reader.Read<int32_t>();
+                if (reader.HasFailed() || (delta > 0 && lastline > std::numeric_limits<int>::max() - delta) ||
+                    (delta < 0 && lastline < std::numeric_limits<int>::min() - delta))
+                    return std::nullopt;
+                lastline += delta;
                 abslineinfo[j] = lastline;
             }
             if (reader.HasFailed())

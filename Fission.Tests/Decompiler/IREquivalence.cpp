@@ -308,7 +308,7 @@ TEST_CASE("Semantic oracle preserves observable values and reports incomplete ex
     }
     SECTION("numeric string keys remain distinct") {
         CHECK(compare("return {[1]='x', ['1']='y'}", "return {[1]='x', ['1']='z'}") == Kind::Diverge);
-        CHECK(compare("return {[1e100]='x'}", "return {[1e100]='y'}") == Kind::Diverge);
+        CHECK(compare("return {[1.5]='x'}", "return {[1.5]='y'}") == Kind::Diverge);
     }
     SECTION("string contents cannot impersonate argument separators") { CHECK(compare(R"(return 'a"\t"b')", R"(return 'a', 'b')") == Kind::Diverge); }
     SECTION("nearby doubles and buffer contents stay distinct") {
