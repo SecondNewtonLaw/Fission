@@ -137,6 +137,17 @@ v0[1] = -t
 local v4 = v3())LUA");
 }
 
+TEST_CASE("Replay: a value read twice by one instruction is not inlined twice", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = (416)(ipairs(true, 39.75));
+v0 /= (v0);)LUA");
+    CheckSemanticParity(R"LUA(local v0 = pairs.field(obj(print), select:method(true));
+v0[v0](tostring, (-false));
+local v1 = (function()
+end);)LUA");
+    CheckSemanticParity(R"LUA(local t = {}
+print(t == t))LUA");
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)

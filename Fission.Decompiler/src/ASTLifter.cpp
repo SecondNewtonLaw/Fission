@@ -5541,7 +5541,8 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                 if (user->operation == LiftedOperation::MOVE)
                     // MOVE instructions points to the table being reused. It cannot be inlined because of this.
                     return false;
-                realUsers.insert(user);
+                if (!realUsers.insert(user).second && user->operation != LiftedOperation::SETLIST)
+                    return false;
             }
             if (realUsers.size() != 1)
                 return false;
@@ -5607,6 +5608,10 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         // leak as a standalone `local` alongside the folded constructor.
         const auto &rawUsers = m_currentFunction->users[usedRef];
         std::unordered_set<const LiftedInstruction *> users(rawUsers.begin(), rawUsers.end());
+        if (users.size() == 1 && rawUsers.size() > 1 && (*users.begin())->operation != LiftedOperation::SETLIST) {
+            ExplainKeep(inst, "call result is read more than once by its consumer", *users.begin());
+            return false;
+        }
         if (users.size() == 1) {
             auto op = (*users.begin())->operation;
             if (op == LiftedOperation::RETURN || op == LiftedOperation::CALL || op == LiftedOperation::CALLFB || op == LiftedOperation::NAMECALL ||
