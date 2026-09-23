@@ -6421,8 +6421,9 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
     const auto &blocks = m_currentFunction->basicBlocks;
     if (start >= blocks.size() || stop >= blocks.size() || start == stop)
         return std::nullopt;
-    // small, forward-only, entered only through `start`, and ending at `stop` or a return
+    // small, forward-only, entered only through `start`, and ending at `stop`, a return, or a `break` out of the innermost loop
     constexpr size_t kMaxBlocks = 6, kMaxInstructions = 64;
+    const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
     std::vector<uint32_t> region;
     boost::unordered_flat_set<uint32_t> inRegion;
     std::vector<uint32_t> pending{start};
@@ -6430,7 +6431,7 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
     while (!pending.empty()) {
         const uint32_t id = pending.back();
         pending.pop_back();
-        if (id == stop)
+        if (id == stop || id == loopExit)
             continue;
         if (id >= blocks.size())
             return std::nullopt;
@@ -6581,13 +6582,14 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
                 }
                 if (succ == m)
                     reached = true;
-                else if (continuesLoop(block, succ))
-                    continue;
+                else if (continuesLoop(block, succ) || succ == loopExit)
+                    continue; // `continue` and `break` leave the region without flowing into any merge
                 else
                     stack.push_back(succ);
             }
-            if (block.successors.empty())
-                return false; // an exit is reachable from x without passing through M
+            // an exit is reachable from x without passing through M; inside a loop a `return` leaves like `break`
+            if (block.successors.empty() && (loopExit == InvalidBlockId || block.bType != BlockType::Return))
+                return false;
         }
         return reached;
     };

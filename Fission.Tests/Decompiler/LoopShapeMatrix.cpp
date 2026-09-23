@@ -100,6 +100,10 @@ namespace {
         "g += 1 if g % 2 == 0 and h % 3 == 0 then break elseif g % 7 == 0 then continue end h += 1",
         "g += 1 local t = g % 4 if t == 0 then g += 3 elseif t == 1 then g += 2 elseif t == 2 then h += 1 else h += 2 end",
         "g += 1 if (g % 2 == 0 and h > 1) or g % 5 == 0 then h += 2 end print(g, h)",
+        "g += 1 if g % 2 == 0 then else if h > 3 then break end end h += 1 print(g)",
+        "g += 1 if g % 3 == 0 then else if h % 2 == 1 then h += 1 continue end end h += 2",
+        "g += 1 if g % 2 == 1 then h += 1 else if g > 24 then return g end end print(g, h)",
+        "g += 1 if g % 4 ~= 0 then if h > 5 then break elseif h > 2 then h += 3 end end h += 1",
     };
     constexpr const char *kNestings[] = {"{LOOP}", "for k = 1, 2 do\n{LOOP}\nh += k\nend"};
 
