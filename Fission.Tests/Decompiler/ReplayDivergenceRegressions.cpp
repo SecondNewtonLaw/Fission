@@ -304,6 +304,19 @@ end
 print("after"))LUA");
 }
 
+TEST_CASE("Replay: continue runs the statements that build the until condition", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    if ... then
+    else
+        if (math) then
+            continue
+        end
+    end
+    while { y = "hello", print, x = 289, data = "x" } do
+    end
+until { y = print["x"], [table:get(false)] = nil, {  }, field = print.field };)LUA");
+}
+
 TEST_CASE("Replay: an arm that is the enclosing join stays empty", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(string = (if ((tonumber) or (if pairs then "key" else true)) then table(print) else ...);
 if (nil) then

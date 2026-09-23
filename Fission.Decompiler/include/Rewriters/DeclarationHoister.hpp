@@ -881,8 +881,45 @@ class DeclarationHoister {
                     names.push_back(name);
                 }
             }
+            for (auto &s : body) {
+                if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
+                    AssignContinueDeclarations(iff->thenBranch, loop->condition);
+                    AssignContinueDeclarations(iff->elseBranch, loop->condition);
+                } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
+                    AssignContinueDeclarations(blk, loop->condition);
+                }
+            }
             for (auto name = names.rbegin(); name != names.rend(); ++name)
                 body.insert(body.begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(*name)));
+        }
+    }
+
+    // A latch duplicated ahead of `continue` redeclares the until-condition locals in a nested scope; assign them instead.
+    void AssignContinueDeclarations(const std::shared_ptr<BlockStatementNode> &block, const std::shared_ptr<Expression> &condition) {
+        if (!block || !std::ranges::any_of(block->body, ContinuesLoop))
+            return;
+        const bool continuesHere = std::ranges::any_of(block->body, [](const auto &s) { return s && s->nodeKind == ASTNodeKind::ContinueStatement; });
+        const auto named = [&](const std::string &name) { return continuesHere && !name.empty() && ExprMentions(condition, name); };
+        for (auto &s : block->body) {
+            if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
+                if (named(DeclName(decl)))
+                    s = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : std::make_shared<NilLiteralNode>());
+            } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s); fn && fn->bIsLocalDeclaration) {
+                if (named(fn->functionName))
+                    fn->bIsLocalDeclaration = false;
+            } else if (auto call = LocalDeclCall(s)) {
+                bool multi = false;
+                const auto name = call->nodeKind == ASTNodeKind::CallExpression
+                                      ? SingleRetName(std::static_pointer_cast<CallExpressionNode>(call)->rets, multi)
+                                      : SingleRetName(std::static_pointer_cast<NameCallExpressionNode>(call)->rets, multi);
+                if (named(name))
+                    DemoteLocal(s);
+            } else if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
+                AssignContinueDeclarations(iff->thenBranch, condition);
+                AssignContinueDeclarations(iff->elseBranch, condition);
+            } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
+                AssignContinueDeclarations(blk, condition);
+            }
         }
     }
 

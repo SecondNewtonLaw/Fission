@@ -1549,6 +1549,18 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         }
         // reaching the latch before this region ends skips the rest of the iteration
         if (currentBlockId != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(currentBlockId)) {
+            // `continue` skips what the source places before the loop test, so the latch's own statements run here too
+            const auto &latchBlock = m_currentFunction->basicBlocks[currentBlockId];
+            const auto definedBefore = m_definedRegisters;
+            const auto processedBefore = m_processedInstructions;
+            const auto inlineConsumedBefore = m_inlineConsumedDefs;
+            const auto foldConsumedBefore = m_foldConsumedDefs;
+            auto latchStmts = LiftBlockInstructions(latchBlock);
+            m_definedRegisters = definedBefore;
+            m_processedInstructions = processedBefore;
+            m_inlineConsumedDefs = inlineConsumedBefore;
+            m_foldConsumedDefs = foldConsumedBefore;
+            nodes.insert(nodes.end(), latchStmts.begin(), latchStmts.end());
             nodes.push_back(std::make_shared<ContinueStatementNode>());
             break;
         }
