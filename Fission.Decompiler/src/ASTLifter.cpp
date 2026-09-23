@@ -6626,7 +6626,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
             }
             const auto &block = blocks[cur];
             for (const uint32_t succ : block.successors) {
-                if (succ <= cur)
+                // the walk skips `break` edges, so the loop exit would trivially post-dominate a body that falls into it
+                if (succ <= cur || (succ == loopExit && succ != branchA))
                     continue;
                 if (visited.insert(succ).second)
                     q.push(succ);

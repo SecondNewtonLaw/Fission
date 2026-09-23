@@ -777,7 +777,53 @@ end
 print("done", n))LUA");
 }
 
-TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
+TEST_CASE("Loop audit: an arm holding a breaking inner loop merges before the tail", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n, log = 0, {}
+local function g()
+    n += 1
+    return n % 2 == 0
+end
+local function h()
+    return n > 6
+end
+local function f0()
+    return n > 8
+end
+repeat
+    if g() then
+        repeat
+        until n > 0
+        if h() then
+            break
+        end
+    end
+    table.insert(log, n)
+    if f0() then
+        break
+    end
+until n > 10
+print(table.concat(log, ",")))LUA");
+    CheckSemanticParity(R"LUA(local function f0(p1, p2)
+end
+repeat
+    repeat
+        if { [160] = select, y = ipairs, tonumber, x = nil } then
+            repeat
+            until (pairs);
+            if ... then
+                break
+            end
+        end
+        select = (if obj["value"] then f0.field else function(p1, p2, p3)
+end);
+        if f0(table, true) then
+            break
+        end
+    until ...;
+until (if f0.field then { k = f0.field, tostring[table], "hello", f0.field } else (-("value" ~= ("" and tostring))));)LUA");
+}
+
+TEST_CASE("Replay: shared short-circuit arms run on every path","[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
     CheckSemanticParity(R"LUA(if ((string and (if select then false else 0)) or tonumber(table, 0)) then
