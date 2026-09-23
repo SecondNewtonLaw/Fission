@@ -580,6 +580,21 @@ end)LUA";
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.output, &source));
 }
 
+TEST_CASE("Replay: an until-condition value merges both of its arms", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n = 0
+repeat
+    n += 1
+until (if n > 2 then {  } else (n > 5))
+for i0 = n, 5 do
+    print(i0)
+end)LUA");
+    CheckSemanticParity(R"LUA(repeat
+until (if function(p0)
+end then {  } else (...));
+for i0 = ((nil) + ...), ..., print do
+end)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

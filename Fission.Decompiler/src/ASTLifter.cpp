@@ -6567,7 +6567,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
                 continue;
             const auto &block = blocks[cur];
             for (const uint32_t succ : block.successors) {
-                if (block.bType == BlockType::LoopLatch && succ < cur) {
+                // block ids follow instruction order, so a backward edge continues a loop (bridges and latches alike)
+                if (succ <= cur) {
                     if (succ < x)
                         return false; // the enclosing loop's next iteration is reached without passing M
                     continue;         // an inner loop's back-edge: ignore to keep the walk acyclic
@@ -6611,7 +6612,7 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
             }
             const auto &block = blocks[cur];
             for (const uint32_t succ : block.successors) {
-                if (block.bType == BlockType::LoopLatch && succ < cur)
+                if (succ <= cur)
                     continue;
                 if (visited.insert(succ).second)
                     q.push(succ);
