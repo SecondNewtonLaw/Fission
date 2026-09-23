@@ -841,6 +841,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_capturedRegisters.clear();
     this->m_processedInstructions.clear();
     this->m_inlineConsumedDefs.clear();
+    this->m_foldConsumedDefs.clear();
     this->m_pendingClasses.clear();
     this->m_phiConsumers.clear();
     this->m_deferToConditionInline.clear();
@@ -3160,6 +3161,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                               inst.operands[2].value.imm.n == 0;
         if (ShouldInline(&inst) && (!forceDefinitions || m_deferToConditionInline.contains(&inst) || openCall || inst.operation == LiftedOperation::GETVARARGS))
             continue;
+        if (forceDefinitions && m_foldConsumedDefs.contains(inst.instructionIndex))
+            continue; // already rendered inside a folded table constructor
 
         switch (inst.operation) {
         case LiftedOperation::GETVARARGS: {
@@ -5307,14 +5310,13 @@ void ASTLifter::ConsumeInlinedDefs(const LiftedOperand &operand) {
     if (operand.type != LiftedOperandType::Register)
         return;
     auto *def = m_currentFunction->GetDefinition(operand);
-    if (!def || def->operation == LiftedOperation::PHI || m_inlineConsumedDefs.contains(def->instructionIndex))
+    if (!def || def->operation == LiftedOperation::PHI || m_foldConsumedDefs.contains(def->instructionIndex))
         return;
     // a method setup is part of the call expression that consumes it
     const bool callSetup = def->operation == LiftedOperation::NAMECALL || def->operation == LiftedOperation::NAMECALLUDATA;
     if (!callSetup && !ShouldInline(def))
         return;
-    m_processedInstructions.insert(def->instructionIndex);
-    m_inlineConsumedDefs.insert(def->instructionIndex);
+    m_foldConsumedDefs.insert(def->instructionIndex);
     ConsumeInlinedInputs(*def);
 }
 

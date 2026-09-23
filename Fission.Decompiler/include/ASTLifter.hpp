@@ -48,6 +48,8 @@ class ASTLifter {
 
     // Tail duplication must re-inline pure reads that never emitted a declaration.
     boost::unordered_flat_set<int32_t> m_inlineConsumedDefs;
+    // defs rendered inside a folded constructor; force-materialized headers must not emit them again
+    boost::unordered_flat_set<int32_t> m_foldConsumedDefs;
 
     struct PinnedRegisterScope {
         ASTLifter *m_lpLifter;
