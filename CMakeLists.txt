@@ -392,6 +392,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/FuzzRun35682025082Regressions.cpp
             Fission.Tests/Decompiler/FuzzRun35687267534Regressions.cpp
             Fission.Tests/Decompiler/ReplayDivergenceRegressions.cpp
+            Fission.Tests/Decompiler/LoopShapeMatrix.cpp
         Fission.Tests/Decompiler/PlacementMatrix.cpp
         Fission.Tests/Decompiler/SemanticOracleRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
