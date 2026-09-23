@@ -332,23 +332,29 @@ struct AnalyzedFunction {
         // Cache auto-shaped globals once; PopulateNames can run once per closure reference.
         if (!this->globalCollisionsComputed) {
             this->globalCollisionsComputed = true;
-            const auto &consts = lpDeserialized->constants;
-            auto addIfShaped = [&](int kidx) {
-                if (kidx < 0 || static_cast<size_t>(kidx) >= consts.size())
-                    return;
-                const auto &k = consts[static_cast<size_t>(kidx)];
-                if (k.kType != LUA_TSTRING)
-                    return;
-                const auto &s = std::get<std::string>(k.constantData);
-                if (IsAutoNameShaped(s))
-                    this->globalAutoNameCollisions.insert(s);
+            // a global read by a nested closure is in the lexical scope of this function's locals too
+            std::function<void(const LiftedFunction &)> collect = [&](const LiftedFunction &function) {
+                const auto &consts = function.lpDeserialized->constants;
+                auto addIfShaped = [&](int kidx) {
+                    if (kidx < 0 || static_cast<size_t>(kidx) >= consts.size())
+                        return;
+                    const auto &k = consts[static_cast<size_t>(kidx)];
+                    if (k.kType != LUA_TSTRING)
+                        return;
+                    const auto &s = std::get<std::string>(k.constantData);
+                    if (IsAutoNameShaped(s))
+                        this->globalAutoNameCollisions.insert(s);
+                };
+                for (const auto &inst : function.instructions) {
+                    if ((inst.operation == LiftedOperation::GETGLOBAL || inst.operation == LiftedOperation::SETGLOBAL) && inst.operands.size() >= 2)
+                        addIfShaped(inst.operands[1].value.imm.k);
+                    else if (inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() >= 3)
+                        addIfShaped(static_cast<int>(inst.operands[2].value.imm.u >> 20) & 1023); // id0 = import root
+                }
+                for (const auto &nested : function.subfunctions)
+                    collect(nested);
             };
-            for (const auto &inst : this->lpLiftedFunction->instructions) {
-                if ((inst.operation == LiftedOperation::GETGLOBAL || inst.operation == LiftedOperation::SETGLOBAL) && inst.operands.size() >= 2)
-                    addIfShaped(inst.operands[1].value.imm.k);
-                else if (inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() >= 3)
-                    addIfShaped(static_cast<int>(inst.operands[2].value.imm.u >> 20) & 1023); // id0 = import root
-            }
+            collect(*this->lpLiftedFunction);
         }
 
         int32_t uIdx = 0;

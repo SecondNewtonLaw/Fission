@@ -1066,6 +1066,30 @@ return (#function(p1, p2, p3, ...)
 end);)LUA");
 }
 
+TEST_CASE("Loop audit: a generated local never captures a global a nested closure reads", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    if (if ... then (-nil) else { [ipairs] = false }) then
+        local function f1(p2, ...)
+            v0();
+        end
+        f1();
+        if function(p2)
+end then
+        end
+    end
+    while (-tostring) do
+        if select then
+        end
+    end
+until (if t:get() then ((true) and (632 * 241)) else pairs:set(true));
+local function f0()
+end
+((if (not tonumber) then (103.75) else function(p1, p2)
+end))();
+f0(select.field, function(p1, p2, p3)
+end);)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
