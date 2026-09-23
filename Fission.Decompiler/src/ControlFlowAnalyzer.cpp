@@ -589,6 +589,26 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return std::nullopt;
     };
 
+    // True when `start` re-enters `header` through another back-edge without first passing an enclosing loop's
+    // header (which precedes it): the loops share this header, so `start` is inside the outer one, not an exit.
+    auto returnsToSharedHeader = [&](uint32_t start, const BasicBlock &header, const BasicBlock &latch) {
+        std::vector<bool> seen(blocks.size());
+        std::vector<uint32_t> pending{start};
+        while (!pending.empty()) {
+            const uint32_t current = pending.back();
+            pending.pop_back();
+            if (current >= blocks.size() || seen[current] || current == latch.dwBlockId || current < header.dwBlockId)
+                continue;
+            seen[current] = true;
+            for (const uint32_t next : blocks[current].successors) {
+                if (next == header.dwBlockId)
+                    return true;
+                pending.push_back(next);
+            }
+        }
+        return false;
+    };
+
     // A break can bypass an otherwise predecessor-free back-edge in `while true`.
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Continue)
@@ -636,9 +656,10 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         Explain(header, "structure: B{} backward JUMP targets this block; provisional while header", blk.dwBlockId);
 
         // lifting reads the exit as a header successor; only a header that never exits itself takes the post-latch block
+        // a successor that returns to the header through a sibling back-edge is still inside a loop
         std::optional<uint32_t> loopExit;
         for (const uint32_t succ : header.successors) {
-            if (!reachesBefore(succ, blk.dwBlockId, header.dwBlockId)) {
+            if (!reachesBefore(succ, blk.dwBlockId, header.dwBlockId) && !returnsToSharedHeader(succ, header, blk)) {
                 loopExit = succ;
                 break;
             }
@@ -1039,7 +1060,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
                     std::optional<uint32_t> loopExit;
                     for (const uint32_t succId : successor.successors)
-                        if (!reachesBefore(succId, block.dwBlockId, successor.dwBlockId)) {
+                        if (!reachesBefore(succId, block.dwBlockId, successor.dwBlockId) && !returnsToSharedHeader(succId, successor, block)) {
                             loopExit = succId;
                             break;
                         }

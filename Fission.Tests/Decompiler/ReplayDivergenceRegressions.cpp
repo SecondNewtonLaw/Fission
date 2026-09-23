@@ -595,6 +595,33 @@ for i0 = ((nil) + ...), ..., print do
 end)LUA");
 }
 
+TEST_CASE("Loop: a header arm that loops back through a sibling back-edge is not an exit", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    while true do
+        for i0 = t.field, (if pairs then false else table), function(p0, p1, p2, ...)
+end do
+            while tostring("x") do
+            end
+        end
+    end
+until function()
+end;)LUA");
+    CheckSemanticParity(R"LUA(local n, k = 0, 0
+repeat
+    while true do
+        local limit = if n % 2 == 0 then 2 else 3
+        for i = 1, limit do
+            k += i
+        end
+        n += 1
+        if n > 4 then
+            break
+        end
+    end
+until k > 0
+print(n, k))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
