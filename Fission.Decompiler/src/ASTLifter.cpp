@@ -5784,12 +5784,9 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         // a bare global import (`require`, `print`) never throws and must inline for the naming passes.
         const bool defCanRaise = (CanOperationRaise(inst->operation) || mayMoveRaisingInput) &&
                                  !(inst->operation == LiftedOperation::GETIMPORT && (inst->operands.size() < 3 || (inst->operands[2].value.imm.u >> 30) < 2));
-        if (defCanRaise) {
-            const SSARef ref{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
-            if (const auto *user = onlyUser(ref); user)
-                if (InliningReordersEffect(inst, user))
-                    return false;
-        }
+        const SSARef ref{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
+        if (const auto *user = onlyUser(ref); user && (defCanRaise ? InliningReordersEffect(inst, user) : InputRebound(inst, user, -1, false)))
+            return false;
         return true;
     }
 
@@ -5921,6 +5918,64 @@ bool ASTLifter::StoreTargetsFreshTable(const LiftedInstruction *e) {
 // same call expression (`v[1]:Cross(v[2])` loads the arg before the NAMECALL), not a separate effect,
 // so it is excluded. Comparison branches always count: whether an if-condition or a materialised bool,
 // they evaluate in place and can raise.
+bool ASTLifter::InputRebound(const LiftedInstruction *def, const LiftedInstruction *use, int32_t skipIndex, bool sameRegister) {
+    const int32_t defIdx = def->instructionIndex;
+    const int32_t useIdx = use->instructionIndex;
+    if (useIdx <= defIdx + 1)
+        return false;
+
+    // Inputs of already-inlined operands are read at the use site too.
+    std::vector<LiftedOperand> inputs;
+    std::vector<const LiftedInstruction *> pending{def};
+    std::unordered_set<const LiftedInstruction *> seen{def};
+    while (!pending.empty() && inputs.size() < 64) {
+        const auto *reader = pending.back();
+        pending.pop_back();
+        for (size_t i = 0; i < reader->operands.size(); ++i) {
+            const auto &input = reader->operands[i];
+            if (input.type != LiftedOperandType::Register)
+                continue;
+            const auto access = SSABuilder::GetRegisterAccess(*reader, i);
+            if (access != AccessType::Read && access != AccessType::ReadWrite)
+                continue;
+            inputs.push_back(input);
+            // single-use stands in for "inlined here"; asking ShouldInline would recurse back into this check
+            const auto *inputDef = m_currentFunction->GetDefinition(input);
+            if (inputDef && inputDef->operation != LiftedOperation::PHI && inputDef->instructionIndex < defIdx && m_currentFunction->IsSingleUse(input) &&
+                seen.insert(inputDef).second)
+                pending.push_back(inputDef);
+        }
+    }
+    if (inputs.empty())
+        return false;
+
+    const auto &insts = m_currentFunction->lpLiftedFunction->instructions;
+    for (int32_t k = defIdx + 1; k < useIdx && static_cast<size_t>(k) < insts.size(); ++k) {
+        if (k == skipIndex)
+            continue;
+        const auto outputs = m_defsByInstruction.find(&insts[k]);
+        if (outputs == m_defsByInstruction.end() || ShouldInline(&insts[k]))
+            continue;
+        for (const auto &input : inputs) {
+            const auto inputName = m_currentFunction->GetVarName(input.value.reg, input.ssaVersion);
+            for (const auto &output : outputs->second) {
+                LiftedOperand written{};
+                written.type = LiftedOperandType::Register;
+                written.value.reg = output.regIndex;
+                written.ssaVersion = output.version;
+                // without the register rule only a phi-merged variable is one binding; other reuses get fresh names
+                if (!sameRegister && !m_currentFunction->IsConsumedByPhi(written))
+                    continue;
+                if ((sameRegister && output.regIndex == input.value.reg) || m_currentFunction->GetVarName(output.regIndex, output.version) == inputName) {
+                    ExplainKeep(def, "an input binding is overwritten before its use", use, &insts[k]);
+                    return true;
+                }
+            }
+        }
+    }
+    return false;
+}
+
 bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const LiftedInstruction *use) {
     if (!def || !use)
         return false;
@@ -5965,44 +6020,12 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         }
     }
 
-    // Inputs of already-inlined operands are read at the use site too.
-    std::vector<LiftedOperand> inputs;
-    {
-        std::vector<const LiftedInstruction *> pending{def};
-        std::unordered_set<const LiftedInstruction *> seen{def};
-        while (!pending.empty() && inputs.size() < 64) {
-            const auto *reader = pending.back();
-            pending.pop_back();
-            for (size_t i = 0; i < reader->operands.size(); ++i) {
-                const auto &input = reader->operands[i];
-                if (input.type != LiftedOperandType::Register)
-                    continue;
-                const auto access = SSABuilder::GetRegisterAccess(*reader, i);
-                if (access != AccessType::Read && access != AccessType::ReadWrite)
-                    continue;
-                inputs.push_back(input);
-                // single-use stands in for "inlined here"; asking ShouldInline would recurse back into this check
-                const auto *inputDef = m_currentFunction->GetDefinition(input);
-                if (inputDef && inputDef->operation != LiftedOperation::PHI && inputDef->instructionIndex < defIdx && m_currentFunction->IsSingleUse(input) &&
-                    seen.insert(inputDef).second)
-                    pending.push_back(inputDef);
-            }
-        }
-    }
+    if (InputRebound(def, use, useOwnNameCall))
+        return true;
 
     for (int32_t k = defIdx + 1; k < useIdx && static_cast<size_t>(k) < insts.size(); ++k) {
         if (k == useOwnNameCall)
             continue;
-        if (const auto outputs = m_defsByInstruction.find(&insts[k]); outputs != m_defsByInstruction.end() && !ShouldInline(&insts[k])) {
-            for (const auto &input : inputs) {
-                const auto inputName = m_currentFunction->GetVarName(input.value.reg, input.ssaVersion);
-                for (const auto &output : outputs->second)
-                    if (output.regIndex == input.value.reg || m_currentFunction->GetVarName(output.regIndex, output.version) == inputName) {
-                        ExplainKeep(def, "an input binding is overwritten before its use", use, &insts[k]);
-                        return true;
-                    }
-            }
-        }
         if (defIsCallCallee && (insts[k].operation == LiftedOperation::CALL || insts[k].operation == LiftedOperation::CALLFB)) {
             ExplainKeep(def, "callee must be evaluated before argument calls", use, &insts[k]);
             return true; // callee evaluation precedes every argument call, even when that argument later spills.

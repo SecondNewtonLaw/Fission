@@ -163,6 +163,8 @@ class ASTLifter {
     bool StoreTargetsFreshTable(const LiftedInstruction *e);
     bool IsConstructorElement(const LiftedInstruction *e);
     bool InliningReordersEffect(const LiftedInstruction *def, const LiftedInstruction *use);
+    // True when a binding `def` reads is reassigned before `use`, so inlining would read the new value.
+    bool InputRebound(const LiftedInstruction *def, const LiftedInstruction *use, int32_t skipIndex = -1, bool sameRegister = true);
     uint32_t FindBlockForInstruction(const LiftedInstruction *inst) const;
     std::string ResolveVariableName(const LiftedOperand &op, bool markDefined = true);
     void SeedEnclosingNames(AnalyzedFunction &target) const;

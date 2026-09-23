@@ -165,6 +165,14 @@ local v1 = (nil).field
 local v2 = { v1 } + v0)LUA");
 }
 
+TEST_CASE("Replay: a value is not inlined past a reassignment of its merged input", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local a, b, c = ...
+print((if a then true else "x") or "y", if c then 1 else 2))LUA");
+    CheckSemanticParity(
+        R"LUA(pairs((if -53i then true else "a-b") or (if "x\n]" then "\nhello" else 142i), if t then { "x", true, ipairs } else ipairs(false, 228)))LUA"
+    );
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)
