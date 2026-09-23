@@ -416,6 +416,26 @@ TEST_CASE("Replay: an infinite loop sharing a repeat header keeps its wrapper", 
         ipairs(next);
     end
 end)LUA");
+    CheckSemanticParity(R"LUA(local n = 0
+for i = 1, 3 do
+    repeat
+        while n < i do
+            n += 1
+        end
+        print(n)
+    until { }
+    print("after", i)
+end)LUA");
+    CheckSemanticParity(R"LUA(local n = 0
+for i = 1, 3 do
+    repeat
+        while n < i do
+            n += 1
+        end
+        print(n)
+    until n > i - 1
+    print("after", i)
+end)LUA");
 }
 
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {

@@ -1984,6 +1984,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             std::optional<uint32_t> infiniteWhileLatch;
             if (block.loopLatch.has_value() && !sharedOuterRepeatLatch)
                 infiniteWhileLatch = DetectInfiniteWhileLatch(currentBlockId, *block.loopLatch);
+            // around a repeat, only a back-edge the code after `until` flows into is an enclosing loop; others are inner loops
+            if (infiniteWhileLatch && isRepeatHeader &&
+                (!block.loopExit || !CanReach(*block.loopExit, *infiniteWhileLatch, currentBlockId, {currentBlockId})))
+                infiniteWhileLatch.reset();
             if (infiniteWhileLatch)
                 Explain(block, "wrap inner loop in while true because enclosing latch B{} returns to this shared header", *infiniteWhileLatch);
             const size_t loopNodesStart = nodes.size();
@@ -3044,9 +3048,31 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 // as a trailing if-return or fall-through to the latch. without this the wrap looks
                 // genuinely infinite and the until-check/return is silently dropped.
                 std::vector<std::shared_ptr<Statement>> tail;
+                // a tail branch that can no longer reach the back-edge leaves the wrap (a `repeat` test lifted as this shape)
+                uint32_t wrapExit = InvalidBlockId;
                 if (nextBlockId != InvalidBlockId && nextBlockId < m_currentFunction->basicBlocks.size() && nextBlockId != *infiniteWhileLatch) {
+                    boost::unordered_flat_set<uint32_t> seen{nextBlockId};
+                    std::vector<uint32_t> pending{nextBlockId};
+                    while (!pending.empty() && wrapExit == InvalidBlockId && seen.size() < 256) {
+                        const uint32_t id = pending.back();
+                        pending.pop_back();
+                        for (const uint32_t succ : m_currentFunction->basicBlocks[id].successors) {
+                            if (succ == *infiniteWhileLatch || succ == currentBlockId || succ >= m_currentFunction->basicBlocks.size() || !seen.insert(succ).second)
+                                continue;
+                            if (m_currentFunction->basicBlocks[succ].bType != BlockType::Return &&
+                                !CanReach(succ, *infiniteWhileLatch, currentBlockId, {currentBlockId})) {
+                                wrapExit = succ;
+                                break;
+                            }
+                            pending.push_back(succ);
+                        }
+                    }
+                    if (wrapExit != InvalidBlockId)
+                        m_loopExitStack.push_back(wrapExit);
                     auto tailVisited = visited;
                     tail = co_await LiftControlFlow(nextBlockId, *infiniteWhileLatch, tailVisited);
+                    if (wrapExit != InvalidBlockId)
+                        m_loopExitStack.pop_back();
                 }
                 std::vector<std::shared_ptr<Statement>> loopBody(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
                 loopBody.insert(loopBody.end(), tail.begin(), tail.end());
@@ -3055,7 +3081,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
                 whileNode->body = CreateBlock(loopBody);
                 nodes.push_back(whileNode);
-                nextBlockId = InvalidBlockId; // wrap is infinite by construction; everything reachable folded in above.
+                nextBlockId = wrapExit;
             }
             break;
         }
