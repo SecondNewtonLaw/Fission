@@ -159,6 +159,12 @@ end then next() else -({
 })[v0[false]])LUA");
 }
 
+TEST_CASE("Replay: a raising read stays before a later constructor's elements", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = (("x")[119] and 525 // 51).value
+local v1 = (nil).field
+local v2 = { v1 } + v0)LUA");
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)

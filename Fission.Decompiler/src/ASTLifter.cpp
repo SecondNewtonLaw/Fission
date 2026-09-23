@@ -5943,6 +5943,13 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
             calleeDef = m_currentFunction->GetDefinition(calleeDef->operands[1]);
     }
     const bool defIsCallCallee = calleeDef == def;
+    // a constructor element renders inside its `{ ... }`; that keeps it after `def` only when `def` feeds a constructor too
+    const bool useBuildsConstructor = def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE ||
+                                      use->operation == LiftedOperation::SETLIST ||
+                                      ((use->operation == LiftedOperation::SETTABLE || use->operation == LiftedOperation::SETTABLEKS ||
+                                        use->operation == LiftedOperation::SETTABLEN) &&
+                                       StoreTargetsFreshTable(use)) ||
+                                      IsConstructorElement(use);
 
     int32_t useOwnNameCall = -1;
     if (useIdx < static_cast<int32_t>(insts.size()) &&
@@ -6032,7 +6039,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
             ExplainKeep(def, "intervening call would execute first", use, &insts[k]);
             return true;
         }
-        if (CanOperationRaise(insts[k].operation) && !IsConstructorElement(&insts[k])) {
+        if (CanOperationRaise(insts[k].operation) && !(useBuildsConstructor && IsConstructorElement(&insts[k]))) {
             ExplainKeep(def, "intervening evaluation can raise", use, &insts[k]);
             return true;
         }
