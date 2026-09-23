@@ -4,6 +4,7 @@
 
 #include "../../Fission.Fuzzing/include/FuzzOracle.hpp"
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
+#include <array>
 #include <catch2/catch_test_macros.hpp>
 #include <string>
 #include <vector>
@@ -101,7 +102,66 @@ namespace {
         "g += 1 if (g % 2 == 0 and h > 1) or g % 5 == 0 then h += 2 end print(g, h)",
     };
     constexpr const char *kNestings[] = {"{LOOP}", "for k = 1, 2 do\n{LOOP}\nh += k\nend"};
+
+    constexpr const char *kValueTemplates[] = {
+        "A and B",
+        "A or B",
+        "A and B or C",
+        "(A or B) and C",
+        "not A or B",
+        "A and (B or C)",
+        "(A and B) or (C and D)",
+        "if A then B else C",
+        "if A then B elseif C then D else nil",
+        "not (A and B)",
+    };
+    // Operands mix locals, side-effecting calls, table reads, constants and comparisons.
+    constexpr std::array<std::array<const char *, 4>, 4> kValueOperands = {{
+        {"x", "f(2)", "t.k", "nil"},
+        {"f(false)", "x", "f(3)", "(x == 0)"},
+        {"(x == 0)", "nil", "x", "f(4)"},
+        {"t.k", "f(false)", "(x == 0)", "x"},
+    }};
+    constexpr const char *kValueContexts[] = {
+        "local v = {E}\nprint(v)",
+        "print({E})",
+        "if {E} then print(\"yes\") else print(\"no\") end",
+        "local n = 0\nwhile ({E}) and n < 2 do n += 1 print(\"loop\", n) end",
+        "return {E}",
+        "t.r = {E}\nprint(t.r)",
+    };
+
+    std::string FillOperands(std::string expression, const std::array<const char *, 4> &operands) {
+        std::string out;
+        for (const char c : expression) {
+            if (c >= 'A' && c <= 'D')
+                out += operands[c - 'A'];
+            else
+                out += c;
+        }
+        return out;
+    }
 } // namespace
+
+TEST_CASE("Value shapes: short-circuit values keep semantics in every context", "[Decompiler][ValueShapes][Semantics]") {
+    fuzz::EnableLuauFlags();
+    std::vector<std::string> failures;
+    for (const char *context : kValueContexts)
+        for (const char *expression : kValueTemplates)
+            for (const auto &operands : kValueOperands) {
+                const std::string body = Fill(context, "{E}", FillOperands(expression, operands));
+                const std::string source = "local calls = 0\n"
+                                           "local function f(n) calls += 1 print(\"f\", n, calls) return n end\n"
+                                           "local t = { k = 4 }\n"
+                                           "local function probe(x)\n" +
+                                           body + "\nend\nprint(probe(nil)) print(probe(false)) print(probe(0)) print(probe(3))";
+                if (const auto decompiled = Divergence(source); !decompiled.empty())
+                    failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
+            }
+    for (const auto &failure : failures)
+        UNSCOPED_INFO(failure);
+    CHECK(failures.empty());
+}
 
 TEST_CASE("Loop shapes: branches inside loops keep semantics", "[Decompiler][LoopShapes][Semantics]") {
     fuzz::EnableLuauFlags();

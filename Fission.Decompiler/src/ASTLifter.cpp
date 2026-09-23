@@ -1462,6 +1462,16 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     // true only for the first block of this call (the branch/region entry). A visited block met here is
     // a shared branch arm; met later in the linear walk it is a genuine convergence that must stop.
     bool atEntryBlock = true;
+    // blocks this walk has lifted; a visited block outside it was lifted by another arm
+    boost::unordered_flat_set<uint32_t> walked;
+    const auto blockHasEffect = [&](uint32_t id) {
+        const auto &candidate = m_currentFunction->basicBlocks[id];
+        for (const LiftedInstruction *instruction = candidate.lpHead; instruction && instruction <= candidate.lpTail; ++instruction)
+            if (CanOperationRaise(instruction->operation) || instruction->operation == LiftedOperation::CALL ||
+                instruction->operation == LiftedOperation::CALLFB || StaysAsStatement(instruction))
+                return true;
+        return false;
+    };
     const auto isReturnOnly = [&](uint32_t id) {
         const auto &candidate = m_currentFunction->basicBlocks[id];
         return candidate.bType == BlockType::Return && std::all_of(candidate.lpHead, candidate.lpTail + 1, [](const LiftedInstruction &instruction) {
@@ -1579,6 +1589,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 // convergence and still stops.
                 constexpr uint32_t kMaxValueArmDuplications = 8192;
                 const bool canDup = atEntryBlock && m_valueArmDuplications < kMaxValueArmDuplications;
+                // a sibling arm lifted this forward-entered block: it is a tail shared by exclusive paths, not a convergence
+                const auto &visitedBlock = m_currentFunction->basicBlocks[currentBlockId];
+                const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && m_valueArmDuplications < kMaxValueArmDuplications &&
+                                         std::ranges::all_of(visitedBlock.predecessors, [&](uint32_t p) { return p < currentBlockId; });
                 if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
                     // single pure value block whose successor IS the merge: fall through and re-lift inline.
                     ++m_valueArmDuplications;
@@ -1595,7 +1609,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
                     break;
-                } else if (const auto region = canDup ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt) {
+                } else if (auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt;
+                           // a pure tail reached through pure tests folds back into one short-circuit value
+                           region && (canDup || std::ranges::any_of(*region, blockHasEffect) || std::ranges::any_of(walked, blockHasEffect))) {
                     // a small effectful tail shared by two exclusive branch edges: each path runs it once,
                     // so emitting it in both branches keeps every effect single. clear its processed marks
                     // (as for shared return blocks) so the second copy is complete.
@@ -1617,6 +1633,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
         if (!visited.contains(currentBlockId))
             visited.insert(currentBlockId); // prevent double insertion product of block above.
+        walked.insert(currentBlockId);
 
         auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
