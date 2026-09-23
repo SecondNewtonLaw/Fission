@@ -296,6 +296,30 @@ else
         end
     until v2();
 end)LUA");
+    CheckSemanticParity(R"LUA(local function f0(p1)
+end
+repeat
+    f0 = function()
+end;
+until (if (if 568 then "a-b" else 801) then ("a-b" > pairs) else (next));
+repeat
+    while { true, tonumber, tonumber } do
+        if (376 >= false) then
+            break
+        end
+    end
+    if f1:set() then
+    end
+    if ... then
+        break
+    end
+until ("x"):get((-(-"hello")), f0:get(15));
+for g1_0 in tonumber() do
+    for i3 = false, (if "value" then tonumber else ipairs) do
+        if f0[f0] then
+        end
+    end
+end)LUA");
 }
 
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
