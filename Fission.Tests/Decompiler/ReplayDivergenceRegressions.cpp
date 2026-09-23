@@ -537,6 +537,49 @@ end
 print("done", n))LUA");
 }
 
+TEST_CASE("Replay: a generic-for variable is not live on its loop's entry edge", "[Decompiler][ReplayRegress][SSA]") {
+    fuzz::EnableLuauFlags();
+    const std::string source = R"LUA(for g0_0 in next(((not tonumber)), ...) do
+    (false).field(function(p1, p2, p3)
+end);
+    local v1 = tonumber[function(p1, p2)
+end];
+    local v2 = (if tostring.field[math["x"]] then v1[true][function(p2, p3, p4)
+end] else ((tonumber / next)));
+    if table.field[(not g0_0(false))] then
+    end
+end
+if print[next:run(ipairs)].field then
+    for g0_0 in (234.75)("value") do
+        for g1_0, g1_1 in pairs() do
+            for i3 = select, false, nil do
+            end
+        end
+        for i1 = g0_0[g0_0], obj do
+            if (if table then g0_0 else "key") then
+            end
+        end
+    end
+end
+local v0 = obj;
+while { (983 ^ function(p1, ...)
+end), v0(ipairs), [v0] = v0 } do
+    for g1_0, g1_1 in print[table](v0["a-b"]) do
+        repeat
+            while (if 604 then g1_0 else v0) do
+            end
+        until function(p3, p4, p5)
+g1_1(next, 517);
+end;
+    end
+end)LUA";
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    // the captured loop variable's name used to reach an unrelated `obj` read of the same register through loop-entry phis
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.output, &source));
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

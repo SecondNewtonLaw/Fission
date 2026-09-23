@@ -205,6 +205,18 @@ static bool IsLoopPrep(LiftedOperation operation) {
            operation == LiftedOperation::FORGPREP_NEXT;
 }
 
+// FORGLOOP assigns a generic-for's variables before every body run, so the header's entry edge carries none of them.
+static bool IsGenericForVariable(const AnalyzedFunction &func, const BasicBlock &header, int reg) {
+    if (!header.loopLatch || *header.loopLatch >= func.basicBlocks.size())
+        return false;
+    const auto *latchTail = func.basicBlocks[*header.loopLatch].lpTail;
+    if (!latchTail || latchTail->operation != LiftedOperation::FORGLOOP || latchTail->operands.size() < 3)
+        return false;
+    const int base = latchTail->operands[0].value.reg;
+    const int numVars = latchTail->operands[2].value.imm.n & 0xFF;
+    return reg >= base + 3 && reg < base + 3 + numVars;
+}
+
 // The CFG routes the loop latch back into the FOR*PREP block, but the VM runs the prep once: its reads
 // happen on entry edges only. `liveInNormal` omits those reads and is what the latch edge observes.
 static void ComputeLiveness(
@@ -332,6 +344,8 @@ static void ComputeLiveness(
                     if (succ >= liveIn.size())
                         continue; // hostile bytecode: wild jump target
                     const bool latchEdge = func->basicBlocks[succ].loopLatch == bid;
+                    if (!latchEdge && IsGenericForVariable(*func, func->basicBlocks[succ], r))
+                        continue;
                     if ((latchEdge ? liveInNormal : liveIn)[succ][r]) {
                         isLiveOut = true;
                         break;
