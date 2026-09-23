@@ -2949,6 +2949,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         if (hasBreakTarget)
                             m_loopExitStack.push_back(exitIdx);
                         const auto definedBeforeLoopBody = m_definedRegisters;
+                        // the loop variables are bound by the `for`; a write in the body assigns them
+                        for (int i = 0; i < numVars; ++i)
+                            m_definedRegisters.insert(baseReg + 3 + i);
                         forNode->body = CreateBlock(co_await LiftControlFlow(bodyIdx, *block.loopLatch, visited));
                         m_definedRegisters = definedBeforeLoopBody;
                         if (hasBreakTarget)

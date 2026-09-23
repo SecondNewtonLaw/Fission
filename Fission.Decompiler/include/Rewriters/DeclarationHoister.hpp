@@ -130,7 +130,7 @@ class DeclarationHoister {
     }
 
     void RecordScopedBinding(const std::string &name, int scopeId) {
-        if (IsOwnedRegisterName(name))
+        if (IsTrackedBinding(name))
             m_scopedBindings[name].insert(scopeId);
     }
 

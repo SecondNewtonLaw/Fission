@@ -147,6 +147,7 @@ namespace {
         "local v = i fns[#fns + 1] = function() return v end if v > 2 then break end",
         "local v = i local g = function() return v end v = v * 3 fns[#fns + 1] = g",
         "local v = i if v % 2 == 0 then continue end fns[#fns + 1] = function() return v + 1 end",
+        "fns[#fns + 1] = function() return i end for j = 1, 2 do i = i + 100 end print(i)",
     };
 
     constexpr const char *kMergeStatements[] = {
