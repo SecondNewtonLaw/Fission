@@ -410,6 +410,14 @@ end
 return (if (false ~= nil) then pairs:get(table) else tostring:run());)LUA");
 }
 
+TEST_CASE("Replay: an infinite loop sharing a repeat header keeps its wrapper", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(while "value" do
+    while (... or t(t, 603)) do
+        ipairs(next);
+    end
+end)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

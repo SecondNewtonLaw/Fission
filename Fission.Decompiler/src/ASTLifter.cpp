@@ -1982,8 +1982,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             // `while <const> do <inner loop> end`: the testless outer shares this header with the inner
             // loop (only a back-edge). detect it so the inner loop wraps in `while true`, else it's dropped.
             std::optional<uint32_t> infiniteWhileLatch;
-            if (block.loopLatch.has_value() &&
-                (block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) != LoopBlockFlags::RepeatUntilLoop)
+            if (block.loopLatch.has_value() && !sharedOuterRepeatLatch)
                 infiniteWhileLatch = DetectInfiniteWhileLatch(currentBlockId, *block.loopLatch);
             if (infiniteWhileLatch)
                 Explain(block, "wrap inner loop in while true because enclosing latch B{} returns to this shared header", *infiniteWhileLatch);
