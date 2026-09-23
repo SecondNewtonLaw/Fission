@@ -940,6 +940,42 @@ local v1 = if 640 >= v0 or v0(57i) then nil else table(607) / 720)LUA");
 until { [898] = tostring, data = tostring, [nil] = obj, field = true };)LUA");
 }
 
+TEST_CASE("Loop audit: a compound condition with a large body keeps the body on every path", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local log = {}
+local function f(x)
+    return x
+end
+local function p1(a, b, c)
+    if a or f(b and c) then
+        for i = 1, 2 do
+            table.insert(log, "p1" .. i)
+        end
+        for _, v in ipairs({ 7 }) do
+            table.insert(log, v)
+        end
+        table.insert(log, "p1")
+    end
+    table.insert(log, "end1")
+end
+local function p3(a, b, c)
+    if (b and c) or a then
+        for i = 1, 2 do
+            table.insert(log, "p3" .. i)
+        end
+        for _, v in ipairs({ 7 }) do
+            table.insert(log, v)
+        end
+        table.insert(log, "p3")
+    else
+        table.insert(log, "else3")
+    end
+end
+for _, t in ipairs({ { nil, nil, nil }, { nil, true, nil }, { nil, true, 1 }, { 1, nil, nil }, { 1, true, 1 } }) do
+    p1(t[1], t[2], t[3]) p3(t[1], t[2], t[3])
+end
+print(table.concat(log, ",")))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

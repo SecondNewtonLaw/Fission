@@ -6822,18 +6822,36 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
                    return inst.operation == LiftedOperation::NOP || inst.operation == LiftedOperation::RETURN;
                });
     };
-    uint32_t body = *leaves.begin(), exit = *leaves.rbegin();
-    if (bareReturn(body))
-        std::swap(body, exit);
-    const auto &action = blocks[body];
-    if (!bareReturn(exit) || !action.phiNodes.empty() || action.bType != BlockType::Standard || action.successors.size() != 1 ||
-        action.successors.front() != exit)
-        return std::nullopt;
     for (const auto id : headers)
         if (id != headerId)
             for (const auto pred : blocks[id].predecessors)
                 if (!headers.contains(pred))
                     return std::nullopt;
+    // a def folded into the condition no longer reaches a phi that reads it on the path out of its test
+    for (const auto leaf : leaves)
+        for (const auto &phi : blocks[leaf].phiNodes)
+            for (size_t i = 1; i < phi.operands.size(); ++i)
+                if (const auto *def = phi.operands[i].type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(phi.operands[i]) : nullptr) {
+                    const int defBlock = m_currentFunction->GetBlockId(def);
+                    if (defBlock >= 0 && static_cast<uint32_t>(defBlock) != headerId && headers.contains(static_cast<uint32_t>(defBlock)))
+                        return std::nullopt;
+                }
+
+    uint32_t body = *leaves.begin(), exit = *leaves.rbegin();
+    const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
+    const bool exitLeavesIteration =
+        exit == loopExit || (loopExit != InvalidBlockId && blocks[exit].bType == BlockType::LoopLatch &&
+                             std::ranges::find(blocks[exit].successors, loopExit) != blocks[exit].successors.end());
+    if (bareReturn(body) || exitLeavesIteration)
+        std::swap(body, exit);
+    // pure value arms fold into one short-circuit value expression further up
+    if (const int32_t join = FindMergeBlock(body, exit); join >= 0) {
+        const auto pureArm = [&](uint32_t arm) {
+            return arm == static_cast<uint32_t>(join) || IsDuplicableValueArm(arm, join) || IsDuplicablePureRegion(arm, join);
+        };
+        if (pureArm(body) && pureArm(exit))
+            return std::nullopt;
+    }
 
     using Expr = std::shared_ptr<Expression>;
     const auto binary = [](const char *op, const Expr &lhs, const Expr &rhs) -> Expr { return std::make_shared<BinaryExpressionNode>(op, lhs, rhs); };
