@@ -941,12 +941,6 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             }
                         }
 
-                    if (conditionalLatch && conditionalExit < blocks.size() && blocks[conditionalExit].bType == BlockType::LoopHeader &&
-                        successor.loopExit == conditionalExit) {
-                        Explain(block, "structure: reject repeat candidate B{}; proposed exit B{} is another loop header", conditionalLatch->dwBlockId, conditionalExit);
-                        conditionalLatch = nullptr;
-                    }
-
                     if (conditionalLatch && conditionalExit < blocks.size() && blocks[conditionalExit].bTerminator == BlockTerminator::Unconditional &&
                         blocks[conditionalExit].lpTail && blocks[conditionalExit].lpTail->operation == LiftedOperation::JUMP &&
                         GetJumpOffset(blocks[conditionalExit].lpTail) > 0) {
