@@ -127,6 +127,8 @@ class ASTLifter {
 
     // Branches to the innermost loop exit become break statements.
     std::vector<uint32_t> m_loopExitStack;
+    // Blocks whose lifting is still in progress up the call chain; a shared tail must not re-enter them.
+    std::vector<uint32_t> m_liftingBlocks;
 
     ControlFlowTask LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, boost::unordered_flat_set<uint32_t> &visited);
     std::string GetFunctionName(DeserializedFunction *lpDeserialized) {

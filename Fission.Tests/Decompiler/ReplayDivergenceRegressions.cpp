@@ -875,6 +875,54 @@ return function(p1, ...)
 end;)LUA");
 }
 
+TEST_CASE("Loop audit: a loop shared by both arms of a short-circuit runs on each", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function probe(a, b, c)
+    local n = 0
+    if a or (if b then c else 5) then
+        while n < 2 do
+            n += 1
+            print("body", n)
+        end
+    end
+    print("after", n)
+end
+probe(nil, nil, nil) probe(nil, true, nil) probe(nil, true, 1) probe(1, nil, nil))LUA");
+    CheckSemanticParity(R"LUA(if (obj.field or (if (not tonumber) then (not 436) else (if "key" then math else "key"))) then
+    while ({ [181] = obj } >= { y = 416, true }) do
+    end
+end
+for i0 = string[92.5].field, math.field["hello"] do
+end
+for i1 = (true), v0(146), (not false) do
+    if (tostring // next) then
+    end
+end)LUA");
+    CheckSemanticParity(R"LUA(while ... do
+    if {  } then
+        if pairs(nil, next) then
+            local v0 = string:get(select);
+            if (string // nil) then
+                continue
+            end
+        end
+        for i0 = function(...)
+end, select[false] do
+            local function f1(...)
+            end
+        end
+        if "x" then
+            continue
+        end
+        if (#(if true then false else tonumber)) then
+        end
+    end
+    while tostring[ipairs(table, 100.25)][{ [nil] = "key" }] do
+        local v0, v1, v2 = obj, "x", function(p0, p1)
+end;
+    end
+end)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

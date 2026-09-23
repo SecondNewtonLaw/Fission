@@ -1622,12 +1622,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     // so emitting it in both branches keeps every effect single. clear its processed marks
                     // (as for shared return blocks) so the second copy is complete.
                     ++m_valueArmDuplications;
+                    // blocks outside the region stay visited so flow leaving it (a loop's exit) is not lifted again
+                    auto regionVisited = visited;
                     for (const uint32_t id : *region) {
+                        regionVisited.erase(id);
                         const auto &regionBlock = m_currentFunction->basicBlocks[id];
                         for (const LiftedInstruction *instruction = regionBlock.lpHead; instruction && instruction <= regionBlock.lpTail; ++instruction)
                             m_processedInstructions.erase(instruction->instructionIndex);
                     }
-                    boost::unordered_flat_set<uint32_t> regionVisited;
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
                     break;
@@ -1640,6 +1642,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         if (!visited.contains(currentBlockId))
             visited.insert(currentBlockId); // prevent double insertion product of block above.
         walked.insert(currentBlockId);
+        struct LiftingScope {
+            std::vector<uint32_t> &stack;
+            ~LiftingScope() { stack.pop_back(); }
+        };
+        m_liftingBlocks.push_back(currentBlockId);        const LiftingScope liftingScope{m_liftingBlocks};
 
         auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
@@ -6444,16 +6451,19 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
         if (!inRegion.insert(id).second)
             continue;
         const auto &block = blocks[id];
-        if (inRegion.size() > kMaxBlocks || !block.lpHead ||
-            (block.bType != BlockType::Standard && block.bType != BlockType::IfHeader && block.bType != BlockType::Return) ||
-            (block.successors.empty() && block.bType != BlockType::Return))
+        if (inRegion.size() > kMaxBlocks || !block.lpHead || (block.successors.empty() && block.bType != BlockType::Return) ||
+            std::ranges::find(m_liftingBlocks, id) != m_liftingBlocks.end())
             return std::nullopt;
         instructions += static_cast<size_t>(block.lpTail - block.lpHead) + 1;
         if (instructions > kMaxInstructions)
             return std::nullopt;
         for (const uint32_t successor : block.successors) {
-            if (successor <= id)
-                return std::nullopt;
+            // a loop wholly inside the tail is copied with it; a back-edge out of the region is not
+            if (successor <= id) {
+                if (!inRegion.contains(successor))
+                    return std::nullopt;
+                continue;
+            }
             pending.push_back(successor);
         }
         region.push_back(id);
