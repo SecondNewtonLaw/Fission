@@ -339,6 +339,22 @@ for g1_0 in tonumber() do
 end)LUA");
 }
 
+TEST_CASE("Replay: an empty while over a short-circuit condition keeps its exit", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(while (t or (next or t)) do
+end
+local function f0(p1, p2, p3)
+end
+print((f0 < 161.75)))LUA");
+    CheckSemanticParity(R"LUA(while (string[false] or math:set(nil, "hello")) do
+end
+select[table]((if pairs[function(...)
+end] then ... else (select.field)));)LUA");
+    CheckSemanticParity(R"LUA(local v1 = ((if next.field then (next) else ...));
+while (v0[nil][tostring.field] or (v1 or 286)) do
+end
+return (if (false ~= nil) then pairs:get(table) else tostring:run());)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

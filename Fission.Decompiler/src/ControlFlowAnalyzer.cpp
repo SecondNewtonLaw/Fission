@@ -916,14 +916,14 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         continue;
                     }
 
-                    // A conditional header that jumps straight to the latch is a repeat-until body.
+                    // A conditional header that jumps straight to the latch is a repeat-until body, unless its other arm
+                    // stays in the loop (a multi-block `a or b` condition whose exit test comes later).
                     bool isRepeatUntil = false;
-                    if (successor.bTerminator == BlockTerminator::Conditional) {
-                        for (uint32_t headerSucc : successor.successors) {
-                            if (headerSucc == block.dwBlockId) {
-                                isRepeatUntil = true;
-                                break;
-                            }
+                    if (successor.bTerminator == BlockTerminator::Conditional && successor.successors.size() == 2) {
+                        const auto direct = std::find(successor.successors.begin(), successor.successors.end(), block.dwBlockId);
+                        if (direct != successor.successors.end()) {
+                            const uint32_t other = successor.successors[0] == block.dwBlockId ? successor.successors[1] : successor.successors[0];
+                            isRepeatUntil = other != block.dwBlockId && !reachesBefore(other, block.dwBlockId, successor.dwBlockId);
                         }
                     }
 
