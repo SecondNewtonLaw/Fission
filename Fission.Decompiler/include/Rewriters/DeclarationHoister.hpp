@@ -573,6 +573,9 @@ class DeclarationHoister {
             if (scopeIt == m_declScope.end() || accIt == m_access.end())
                 continue;
             const int declScope = scopeIt->second;
+            // earlier reads bind to the enclosing loop variable of the same name, not to this shadowing local
+            if (IsWithinScopedBinding(name, declScope))
+                continue;
 
             int lca = *accIt->second.begin();
             for (int s : accIt->second)

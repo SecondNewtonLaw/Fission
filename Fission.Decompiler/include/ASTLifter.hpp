@@ -10,9 +10,12 @@
 #include "lua.h"
 
 #include <boost/unordered/unordered_flat_set.hpp>
+#include <map>
 #include <memory>
+#include <optional>
 #include <set>
 #include <string>
+#include <tuple>
 #include <unordered_set>
 #include <vector>
 
@@ -111,7 +114,8 @@ class ASTLifter {
     uint64_t m_blockLiftsPerformed = 0;
 
     // FindMergeBlock is pure over a fixed CFG.
-    std::unordered_map<uint64_t, int32_t> m_mergeCache;
+    // (branchA, branchB, innermost loop exit) -> merge
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, int32_t> m_mergeCache;
 
     // Reverse definition map keeps ShouldInline lookup constant-time.
     std::unordered_map<const LiftedInstruction *, std::vector<SSARef>> m_defsByInstruction;
@@ -142,6 +146,9 @@ class ASTLifter {
     // Identify calls that require truncation when inlined into a spread-tail position.
     bool IsMultretCall(const LiftedInstruction &callDef, int32_t callDefIndex) const;
     bool ShouldInline(const LiftedInstruction *inst);
+    // Mark the def chain of a value lifted inline so block lifting does not emit it again.
+    void ConsumeInlinedDefs(const LiftedOperand &operand);
+    void ConsumeInlinedInputs(const LiftedInstruction &def);
     bool ShouldInlineImpl(const LiftedInstruction *inst);
     // ShouldInline inputs remain fixed during a function lift.
     std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
@@ -162,6 +169,8 @@ class ASTLifter {
     bool IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) const;
     // Extend safe re-lifting across pure short-circuit regions that reconverge at one merge.
     bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
+    // Blocks of a small forward region entered only at `start` and ending at `stop` or a return.
+    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop) const;
     // Cap value-arm re-lifts for pathological CFGs.
     uint32_t m_valueArmDuplications = 0;
 

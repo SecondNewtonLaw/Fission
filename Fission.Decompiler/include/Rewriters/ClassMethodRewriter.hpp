@@ -225,6 +225,9 @@ class ClassMethodRewriter : public ASTRewriter {
                     if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(asn->right))
                         return std::make_pair(j, fn);
             }
+            // the nearest binding is not a closure; an older closure is no longer the value read
+            if (StatementRedefinesIdentifier(s, name))
+                return std::nullopt;
         }
         return std::nullopt;
     }
@@ -279,6 +282,10 @@ class ClassMethodRewriter : public ASTRewriter {
             auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
             return id && id->identifier && id->identifier->name == name;
         }
+        if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(stmt)) {
+            auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(compound->left);
+            return id && id->identifier && id->identifier->name == name;
+        }
         return false;
     }
 
@@ -304,9 +311,10 @@ class ClassMethodRewriter : public ASTRewriter {
         if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt))
             return ExpressionReadsIdentifier(r->condition, name) || BlockReadsIdentifier(r->body, name);
         if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt))
-            return BlockReadsIdentifier(fnum->lpLoopBody, name);
+            return ExpressionReadsIdentifier(fnum->startVariable, name) || ExpressionReadsIdentifier(fnum->maxIncreased, name) ||
+                   ExpressionReadsIdentifier(fnum->increaseBy, name) || BlockReadsIdentifier(fnum->lpLoopBody, name);
         if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt))
-            return BlockReadsIdentifier(fgen->body, name);
+            return ExpressionReadsIdentifier(fgen->generator, name) || BlockReadsIdentifier(fgen->body, name);
         if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
             // A bare-identifier LHS (`v42 = ...`) is a write, not a read, and
             // doesn't extend `name`'s live range. Only descend when the LHS is
@@ -327,6 +335,8 @@ class ClassMethodRewriter : public ASTRewriter {
                     return true;
             return false;
         }
+        if (auto expr = std::dynamic_pointer_cast<Expression>(stmt))
+            return ExpressionReadsIdentifier(expr, name);
         return false;
     }
 
@@ -366,6 +376,11 @@ class ClassMethodRewriter : public ASTRewriter {
         }
         if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr))
             return ExpressionReadsIdentifier(bin->left, name) || ExpressionReadsIdentifier(bin->right, name);
+        if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr))
+            return ExpressionReadsIdentifier(compound->left, name) || ExpressionReadsIdentifier(compound->right, name);
+        if (auto ifExpr = std::dynamic_pointer_cast<IfExpressionNode>(expr))
+            return ExpressionReadsIdentifier(ifExpr->condition, name) || ExpressionReadsIdentifier(ifExpr->thenExpr, name) ||
+                   ExpressionReadsIdentifier(ifExpr->elseExpr, name);
         if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr))
             return ExpressionReadsIdentifier(un->operand, name);
         if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
@@ -450,6 +465,8 @@ class ClassMethodRewriter : public ASTRewriter {
                 RenameIdentifiersInExpression(v, from, to);
             return;
         }
+        if (auto expr = std::dynamic_pointer_cast<Expression>(stmt))
+            RenameIdentifiersInExpression(expr, from, to);
     }
 
     static void RenameIdentifiersInExpression(const std::shared_ptr<Expression> &expr, const std::string &from, const std::string &to) {
@@ -485,6 +502,17 @@ class ClassMethodRewriter : public ASTRewriter {
         if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
             RenameIdentifiersInExpression(bin->left, from, to);
             RenameIdentifiersInExpression(bin->right, from, to);
+            return;
+        }
+        if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
+            RenameIdentifiersInExpression(compound->left, from, to);
+            RenameIdentifiersInExpression(compound->right, from, to);
+            return;
+        }
+        if (auto ifExpr = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
+            RenameIdentifiersInExpression(ifExpr->condition, from, to);
+            RenameIdentifiersInExpression(ifExpr->thenExpr, from, to);
+            RenameIdentifiersInExpression(ifExpr->elseExpr, from, to);
             return;
         }
         if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {

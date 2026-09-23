@@ -1,0 +1,245 @@
+//
+// Created by Dottik on 22/9/2026.
+//
+
+#include "../../Fission.Fuzzing/include/FuzzOracle.hpp"
+#include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
+#include <catch2/catch_test_macros.hpp>
+#include <string>
+
+namespace {
+    constexpr Luau::CompileOptions kOptions{fuzz::kOpt, fuzz::kDebug};
+
+    void CheckSemanticParity(const std::string &source) {
+        fuzz::EnableLuauFlags();
+        const auto result = fuzz::FullDecompile(source);
+        REQUIRE(result.code == DecompileResult::Success);
+        INFO(result.output);
+        const auto originalBytecode = Luau::compile(source, kOptions);
+        const auto reconstructedBytecode = Luau::compile(result.output, kOptions);
+        for (size_t i = 0; i < fuzz::kSemPreludeCount; ++i) {
+            INFO("fixture " << i);
+            const auto prelude = Luau::compile(fuzz::kSemPreludes[i], kOptions);
+            const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
+            const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
+            CHECK(reconstructed.status == original.status);
+            CHECK(reconstructed.trace == original.trace);
+        }
+    }
+} // namespace
+
+TEST_CASE("Replay: auto-shaped upvalue names do not alias another register", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = "hello"
+local v1 = v0
+v1[{  }] = not t
+local v2 = (0).x
+return function()
+    return { "end", ["end"] = 0, ["a\nb"] = v1 }
+end)LUA");
+    CheckSemanticParity(R"LUA(local v0 = { true }
+local v1 = v0
+v1[(if (if v0 then 0 else "\n") then 0 else 71i)] = ipairs
+math()
+next[(function()
+    return v1
+end).y] = v1(false))LUA");
+    CheckSemanticParity(R"LUA(local v0 = function()
+end
+v0[{ ["end"] = false, nil, true, v0 }] = v0(true, "")[v0[true]]
+local v1 = v0
+local v4 = function()
+    return v1
+end)LUA");
+    CheckSemanticParity(R"LUA(local v0 = "x\n]"
+v0[{
+    function()
+    end,
+}] = ({ 0, v0, ["x"] = nil, ["end"] = "x" })
+local v2 = v0
+v2[table((111i).y)] = function()
+    return (v2[ipairs])
+end)LUA");
+    CheckSemanticParity(R"LUA(local v0 = tostring
+local v1 = v0
+local v3 = {
+    ["\n"] = function()
+    end,
+    ["x\n]"] = function()
+        return v1
+    end,
+    v0("x"),
+}
+pairs[(#(true).field[(true)["a-b"]])] = (nil).y[((v2))][(("a-b"))])LUA");
+}
+
+TEST_CASE("Replay: captured parameter keeps one name before and after the capture", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function f0(p1, p2)
+    p1, p2 = t("x"), p1("", print);
+    local v3 = ((function(p3, p4, p5)
+p1(table, false);
+end));
+end
+(f0("a-b", ""))(function(p1, p2, ...)
+end);)LUA");
+}
+
+TEST_CASE("Replay: method rewrite never splices a closure past a rebinding", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function f0(p1, p2, ...)
+end
+f0 /= { [0] = pairs };
+f0 = { ["key"] = obj, x = {  }, [string.field] = v1:method(math, 0), y = { x = f0 } };
+if (((-(-function(p2, p3)
+return table, f0;
+end)))) then
+else
+end)LUA");
+    CheckSemanticParity(R"LUA(for i0 = (function(p0, ...)
+end), {  } do
+end
+local function f0(p1, p2, ...)
+end
+local v1, v2, v3 = (-(-(#0))), { [string.field] = ..., function(p1, p2, p3)
+end, f0:run(f0) }, nil;
+v1, v2 = { 0, 0, field = v2, [next] = nil }, v1:run();)LUA");
+}
+
+TEST_CASE("Replay: constructor folding stops at stores into other tables", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = { ["a\nb"] = nil, ["data"] = false, 87i, ["end"] = 0 }
+local v1 = (false)
+v1[nil] = 0
+v0[(nil).y] = {  })LUA");
+}
+
+TEST_CASE("Replay: folded constructor elements are evaluated once in a repeat header", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    local v0 = { [t.field] = (tonumber), ["hello"] = "value" };
+    v0 = (-(-v0:set(0, pairs)));
+until table[{ [false] = true, 0, [false] = 0, field = select }][true];)LUA");
+    CheckSemanticParity(R"LUA(repeat
+until { t:set(313), field = string(48.25), [obj] = next[ipairs], { data = pairs } };
+pairs();)LUA");
+}
+
+TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
+    g0_0, g0_0 = (function(p2, p3, ...)
+end), g0_0["value"].field;
+end)LUA");
+}
+
+TEST_CASE("Replay: a closure condition is tested by its own value", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0, v1 = true, tonumber;
+repeat
+    if (function()
+end).field then
+        if v0[v1].field then
+            break
+        end
+    end
+until obj.field[t:method(ipairs, 0)](ipairs[function(...)
+end], ((tonumber)));)LUA");
+}
+
+TEST_CASE("Replay: loop exits on the false edge keep their polarity", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    if function(p0, p1, p2, ...)
+end then
+        select(math, t);
+        if 0 then
+            break
+        end
+    else
+    end
+    table(0);
+until nil;)LUA");
+    CheckSemanticParity(R"LUA(while ({ x = nil, true, x = false, data = tonumber } or ((nil))) do
+    repeat
+        select(tostring, "key");
+    until function(p0, p1, p2)
+end;
+end
+for g0_0 in next(ipairs.field, ipairs(true)) do
+end)LUA");
+    CheckSemanticParity(R"LUA(repeat
+    if function(p0, p1, p2, ...)
+end then
+        if true then
+            break
+        end
+    end
+    local v0 = obj;
+    v0("", nil);
+until ((not 0));
+local v0, v1, v2 = (obj)((nil * "value"), ...), select:run(), ((-(-0)));)LUA");
+    CheckSemanticParity(R"LUA(while (((if (if tostring then tostring else 0) then ipairs:set() else t("", nil)))) do
+    local v1 = (string)[(-(-false))];
+    if tonumber then
+        break
+    end
+end)LUA");
+}
+
+TEST_CASE("Replay: a conditional jump to the latch lifts as continue", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = function(...)
+end;
+repeat
+    if (v0) then
+    else
+        if (-(-function(p4, p5, p6)
+end)) then
+            continue
+        end
+    end
+    (...)(next:run());
+until next;
+table[print](false, ...);)LUA");
+}
+
+TEST_CASE("Replay: value branches inside repeat bodies keep their merge", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+until (if { true, v0, true, field = "key" } then true else { tostring, ["key"] = next });
+for g1_0 in v0((-(-nil)), ipairs.field) do
+end)LUA");
+    CheckSemanticParity(R"LUA(repeat
+    table(((if string then false else t)));
+    tonumber[false][function(...)
+end]((if function(p0, p1, ...)
+end then (-(-0)) else select[ipairs]));
+until math:set((not { k = nil, select, k = 0 }));
+for i2 = 0, v0(nil) do
+end)LUA");
+    CheckSemanticParity(R"LUA(local v0 = pairs;
+repeat
+    tonumber((if string then next else select));
+    v0.field(..., {  });
+    local v1 = ({ [pairs] = v0 } >= v0[v0]);
+until ({ field = string, x = next, ["value"] = "", nil } // (0));
+repeat
+    for i1 = ipairs, nil do
+    end
+until v0:get();)LUA");
+}
+
+TEST_CASE("Replay: inline-order checks terminate on mutually dependent defs", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function f0()
+    repeat
+        math(81.75);
+        if (#"hello") then
+            continue
+        end
+    until table();
+    local v4 = t(string, nil);
+    return {  }, v4:set();
+end
+return f0)LUA");
+}
+
+TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
+end else print((true <= false)));)LUA");
+    CheckSemanticParity(R"LUA(if ((string and (if select then false else 0)) or tonumber(table, 0)) then
+else
+end
+for g0_0 in string({ pairs, [t] = pairs, false, [0] = 0 }) do
+end)LUA");
+}

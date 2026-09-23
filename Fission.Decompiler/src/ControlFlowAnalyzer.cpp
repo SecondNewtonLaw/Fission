@@ -1070,6 +1070,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
         int32_t innermostHeader = -1;
         int32_t innermostExit = -1;
+        int32_t innermostLatch = -1;
         for (const auto &b : blocks) {
             if (b.bType != BlockType::LoopHeader || !b.loopLatch)
                 continue;
@@ -1084,18 +1085,36 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             if (deeper) {
                 innermostHeader = b.dwBlockId;
                 innermostExit = blocks[*b.loopLatch].loopExit.value_or(-1);
+                innermostLatch = static_cast<int32_t>(*b.loopLatch);
             }
         }
 
         if (innermostHeader < 0)
             continue; // not inside any loop
 
+        // A jump over an else-arm to a merge inside the body is plain structure; only reaching the
+        // latch (possibly through empty jump blocks) skips the rest of the iteration.
+        const auto reachesLatchDirectly = [&](int32_t id) {
+            for (int hops = 0; hops < 8 && id >= 0 && static_cast<size_t>(id) < blocks.size(); ++hops) {
+                if (id == innermostLatch)
+                    return true;
+                const auto &b = blocks[id];
+                if (b.successors.size() != 1 || !b.lpHead)
+                    return false;
+                for (const LiftedInstruction *inst = b.lpHead; inst <= b.lpTail; ++inst)
+                    if (inst->operation != LiftedOperation::NOP && inst->operation != LiftedOperation::JUMP)
+                        return false;
+                id = static_cast<int32_t>(b.successors[0]);
+            }
+            return false;
+        };
+
         if (innermostExit >= 0 && targetId == innermostExit) {
             blk.bType = BlockType::Break;
             Explain(blk, "structure: forward JUMP targets innermost loop exit B{}; classify break", targetId);
-        } else if (dominates(innermostHeader, targetId)) {
+        } else if (dominates(innermostHeader, targetId) && reachesLatchDirectly(targetId)) {
             blk.bType = BlockType::Continue;
-            Explain(blk, "structure: forward JUMP stays inside loop header B{} dominance region; classify continue", innermostHeader);
+            Explain(blk, "structure: forward JUMP reaches loop latch B{} of header B{}; classify continue", innermostLatch, innermostHeader);
         }
     }
 

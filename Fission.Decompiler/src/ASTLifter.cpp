@@ -995,6 +995,31 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         const auto &instrs = analyzedFunction.lpLiftedFunction->instructions;
         const auto &constants = analyzedFunction.lpLiftedFunction->lpDeserialized->constants;
         const auto &subs = analyzedFunction.lpLiftedFunction->lpDeserialized->subfunctions;
+        // Lifted locals lose their `do` scope, so a debug name shared with a global would capture it.
+        std::unordered_set<std::string> globalNames;
+        const std::function<void(const LiftedFunction &)> collectGlobals = [&](const LiftedFunction &function) {
+            const auto &functionConstants = function.lpDeserialized->constants;
+            auto add = [&](int32_t index) {
+                if (index >= 0 && static_cast<size_t>(index) < functionConstants.size() && functionConstants[index].kType == LUA_TSTRING)
+                    globalNames.insert(std::get<std::string>(functionConstants[index].constantData));
+            };
+            for (const auto &global : function.instructions)
+                if ((global.operation == LiftedOperation::GETGLOBAL || global.operation == LiftedOperation::SETGLOBAL) && global.operands.size() >= 2)
+                    add(global.operands[1].value.imm.k);
+                else if (global.operation == LiftedOperation::GETIMPORT && global.operands.size() >= 3)
+                    add(static_cast<int32_t>(global.operands[2].value.imm.u >> 20) & 1023);
+            for (const auto &child : function.subfunctions)
+                collectGlobals(child);
+        };
+        collectGlobals(*analyzedFunction.lpLiftedFunction);
+        const auto localName = [&](const std::string &name, uint8_t reg) {
+            if (!globalNames.contains(name))
+                return name;
+            std::string renamed = std::format("{}_{}", name, reg);
+            for (int index = 2; globalNames.contains(renamed); ++index)
+                renamed = std::format("{}_{}_{}", name, reg, index);
+            return renamed;
+        };
         for (size_t i = 0; i < instrs.size(); ++i) {
             const auto &inst = instrs[i];
             LuauProto proto = nullptr;
@@ -1017,16 +1042,20 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 const bool srcIsRegister = cap.operands.size() >= 2 && cap.operands[1].type == LiftedOperandType::Register;
                 if ((mode == 0 || mode == 1) && srcIsRegister) {
                     m_capturedRegisters.insert(cap.operands[1].value.reg);
-                    if (proto->upvalueNames.size() > capIdx) {
-                        analyzedFunction.ssaOverrides[SSARef{static_cast<uint8_t>(cap.operands[1].value.reg), cap.operands[1].ssaVersion}] =
-                            proto->upvalueNames[capIdx];
+                    // An auto-shaped debug name (`v1`, from recompiled output) would alias another register's default name.
+                    if (proto->upvalueNames.size() > capIdx && !AnalyzedFunction::IsAutoNameShaped(proto->upvalueNames[capIdx])) {
+                        const std::string name = localName(proto->upvalueNames[capIdx], cap.operands[1].value.reg);
+                        analyzedFunction.ssaOverrides[SSARef{static_cast<uint8_t>(cap.operands[1].value.reg), cap.operands[1].ssaVersion}] = name;
+                        // a parameter is one local for the whole body; reads before the capture must agree
+                        if (cap.operands[1].value.reg < analyzedFunction.lpLiftedFunction->lpDeserialized->numparams && IsValidLuauIdent(name))
+                            analyzedFunction.SetGlobalName(cap.operands[1].value.reg, name);
                         if (mode == 1)
                             for (const auto &local : analyzedFunction.lpLiftedFunction->lpDeserialized->locvars)
                                 if (local.reg == cap.operands[1].value.reg && local.startpc <= cap.instructionIndex && cap.instructionIndex < local.endpc)
                                     for (const auto &[ref, definition] : analyzedFunction.definitionMap)
                                         if (ref.regIndex == local.reg && definition && local.startpc <= definition->instructionIndex &&
                                             definition->instructionIndex < local.endpc)
-                                            analyzedFunction.ssaOverrides[ref] = proto->upvalueNames[capIdx];
+                                            analyzedFunction.ssaOverrides[ref] = name;
                     }
                 }
             }
@@ -1496,6 +1525,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         return reachesContinuation && reachesReturn && hasEffect;
     };
 
+    // the innermost loop's latch is the one exiting to the innermost loop exit
+    const auto isInnermostLatch = [&](uint32_t id) {
+        if (m_loopExitStack.empty() || id >= m_currentFunction->basicBlocks.size())
+            return false;
+        const auto &latch = m_currentFunction->basicBlocks[id];
+        return latch.bType == BlockType::LoopLatch && std::ranges::find(latch.successors, m_loopExitStack.back()) != latch.successors.end();
+    };
+
     // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
     // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
     while (true) {
@@ -1506,6 +1543,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // don't mark visited; exit is still lifted once after the loop.
         if (!m_loopExitStack.empty() && currentBlockId == m_loopExitStack.back()) {
             nodes.push_back(std::make_shared<BreakStatementNode>());
+            break;
+        }
+        // reaching the latch before this region ends skips the rest of the iteration
+        if (currentBlockId != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(currentBlockId)) {
+            nodes.push_back(std::make_shared<ContinueStatementNode>());
             break;
         }
 
@@ -1535,6 +1577,20 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     // duplicates no store, call, or raising op; semantically a no-op. bounded by the
                     // region-size cap in IsDuplicablePureRegion plus the global duplication cap.
                     ++m_valueArmDuplications;
+                    boost::unordered_flat_set<uint32_t> regionVisited;
+                    auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
+                    nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
+                    break;
+                } else if (const auto region = canDup ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt) {
+                    // a small effectful tail shared by two exclusive branch edges: each path runs it once,
+                    // so emitting it in both branches keeps every effect single. clear its processed marks
+                    // (as for shared return blocks) so the second copy is complete.
+                    ++m_valueArmDuplications;
+                    for (const uint32_t id : *region) {
+                        const auto &regionBlock = m_currentFunction->basicBlocks[id];
+                        for (const LiftedInstruction *instruction = regionBlock.lpHead; instruction && instruction <= regionBlock.lpTail; ++instruction)
+                            m_processedInstructions.erase(instruction->instructionIndex);
+                    }
                     boost::unordered_flat_set<uint32_t> regionVisited;
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
@@ -1605,6 +1661,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 // Nested short-circuit diamonds can use the enclosing return join as one arm. Return arms
                 // have no merge of their own, but the enclosing stop remains the real shared join.
                 if (mergeIdx == InvalidBlockId && stopBlockId != InvalidBlockId && !isReturnOnly(stopBlockId) &&
+                    (trueIdx == stopBlockId || falseIdx == stopBlockId))
+                    mergeIdx = stopBlockId;
+                // one arm ends this region while the other jumps into the latch: join at the region end and
+                // let the latch edge lift as `continue`
+                if (mergeIdx != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(mergeIdx) &&
                     (trueIdx == stopBlockId || falseIdx == stopBlockId))
                     mergeIdx = stopBlockId;
 
@@ -2778,7 +2839,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (headerHasBody) {
                                 // header body -> `if <exit cond> then break end` -> rest of body.
                                 auto breakIf = std::make_shared<IfStatementNode>();
-                                breakIf->condition = LiftCondition(block.lpTail);
+                                const bool exitOnFalse = block.ifStatementFalse.has_value() && block.ifStatementFalse.value() == exitIdx;
+                                breakIf->condition = exitOnFalse ? InvertCondition(LiftCondition(block.lpTail)) : LiftCondition(block.lpTail);
                                 breakIf->thenBranch = CreateBlock({std::make_shared<BreakStatementNode>()});
                                 bodyStmts.insert(bodyStmts.begin(), breakIf);
                             }
@@ -4638,6 +4700,7 @@ std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstructio
                 expr = LiftExpression(itemOp, true);
                 this->m_processedInstructions.insert(lpDef->instructionIndex);
                 this->m_inlineConsumedDefs.insert(lpDef->instructionIndex);
+                ConsumeInlinedInputs(*lpDef);
             } else {
                 expr = LiftExpression(itemOp, false);
             }
@@ -5025,8 +5088,23 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         return isLaterName(def);
     };
 
+    // A store into another table is an effect (and can raise) unless that table is a nested
+    // constructor built inside this fold window.
+    auto storesIntoForeignTable = [&](const LiftedInstruction &candidate, size_t tableOperand) {
+        if (candidate.operands.size() <= tableOperand || candidate.operands[tableOperand].value.reg == tableReg)
+            return false;
+        const auto *target = m_currentFunction->GetDefinition(candidate.operands[tableOperand]);
+        return !target || (target->operation != LiftedOperation::NEWTABLE && target->operation != LiftedOperation::DUPTABLE) ||
+               target->instructionIndex <= inst.instructionIndex;
+    };
+
     for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+        if ((candidate.operation == LiftedOperation::SETLIST && storesIntoForeignTable(candidate, 0)) ||
+            ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
+              candidate.operation == LiftedOperation::SETTABLEN) &&
+             storesIntoForeignTable(candidate, 1)))
+            break;
         if (inst.operation == LiftedOperation::DUPTABLE) {
             if (tableBlock < 0 || i > static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex))
                 break;
@@ -5146,6 +5224,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
+                ConsumeInlinedDefs(candidate.operands[0]);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEN) {
             if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
@@ -5169,6 +5248,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 
                 elements.push_back(std::make_shared<BinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
+                ConsumeInlinedDefs(candidate.operands[0]);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
             if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
@@ -5201,6 +5281,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 
                 elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
                 candidatesIndexes.emplace_back(candidate.instructionIndex);
+                ConsumeInlinedDefs(candidate.operands[0]);
+                ConsumeInlinedDefs(candidate.operands[2]);
             }
         } else if (CanOperationRaise(candidate.operation) && !IsConstructorElement(&candidate)) {
             break;
@@ -5219,6 +5301,36 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     else
         return std::make_shared<TableLiteralNode>(); // the list is likely instantiated and then added to. This can cause some malformations in some cases,
                                                      // reject inlining.
+}
+
+void ASTLifter::ConsumeInlinedDefs(const LiftedOperand &operand) {
+    if (operand.type != LiftedOperandType::Register)
+        return;
+    auto *def = m_currentFunction->GetDefinition(operand);
+    if (!def || def->operation == LiftedOperation::PHI || m_inlineConsumedDefs.contains(def->instructionIndex))
+        return;
+    // a method setup is part of the call expression that consumes it
+    const bool callSetup = def->operation == LiftedOperation::NAMECALL || def->operation == LiftedOperation::NAMECALLUDATA;
+    if (!callSetup && !ShouldInline(def))
+        return;
+    m_processedInstructions.insert(def->instructionIndex);
+    m_inlineConsumedDefs.insert(def->instructionIndex);
+    ConsumeInlinedInputs(*def);
+}
+
+void ASTLifter::ConsumeInlinedInputs(const LiftedInstruction &def) {
+    const bool call = def.operation == LiftedOperation::CALL || def.operation == LiftedOperation::CALLFB;
+    for (size_t i = call ? 0 : 1; i < def.operands.size(); ++i)
+        if (SSABuilder::GetRegisterAccess(def, i) == AccessType::Read || SSABuilder::GetRegisterAccess(def, i) == AccessType::ReadWrite)
+            ConsumeInlinedDefs(def.operands[i]);
+    if (const auto implicit = m_currentFunction->implicitUses.find(&def); call && implicit != m_currentFunction->implicitUses.end())
+        for (size_t k = 0; k < implicit->second.size(); ++k) {
+            LiftedOperand argument{};
+            argument.type = LiftedOperandType::Register;
+            argument.value.reg = def.operands[0].value.reg + 1 + static_cast<int32_t>(k);
+            argument.ssaVersion = implicit->second[k];
+            ConsumeInlinedDefs(argument);
+        }
 }
 
 // Cached wrapper. ShouldInline is pure w.r.t. the analysis state that is fixed for the whole lift of
@@ -5820,17 +5932,36 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         }
     }
 
+    // Inputs of already-inlined operands are read at the use site too.
+    std::vector<LiftedOperand> inputs;
+    {
+        std::vector<const LiftedInstruction *> pending{def};
+        std::unordered_set<const LiftedInstruction *> seen{def};
+        while (!pending.empty() && inputs.size() < 64) {
+            const auto *reader = pending.back();
+            pending.pop_back();
+            for (size_t i = 0; i < reader->operands.size(); ++i) {
+                const auto &input = reader->operands[i];
+                if (input.type != LiftedOperandType::Register)
+                    continue;
+                const auto access = SSABuilder::GetRegisterAccess(*reader, i);
+                if (access != AccessType::Read && access != AccessType::ReadWrite)
+                    continue;
+                inputs.push_back(input);
+                // single-use stands in for "inlined here"; asking ShouldInline would recurse back into this check
+                const auto *inputDef = m_currentFunction->GetDefinition(input);
+                if (inputDef && inputDef->operation != LiftedOperation::PHI && inputDef->instructionIndex < defIdx && m_currentFunction->IsSingleUse(input) &&
+                    seen.insert(inputDef).second)
+                    pending.push_back(inputDef);
+            }
+        }
+    }
+
     for (int32_t k = defIdx + 1; k < useIdx && static_cast<size_t>(k) < insts.size(); ++k) {
         if (k == useOwnNameCall)
             continue;
         if (const auto outputs = m_defsByInstruction.find(&insts[k]); outputs != m_defsByInstruction.end() && !ShouldInline(&insts[k])) {
-            for (size_t i = 0; i < def->operands.size(); ++i) {
-                const auto &input = def->operands[i];
-                if (input.type != LiftedOperandType::Register)
-                    continue;
-                const auto access = SSABuilder::GetRegisterAccess(*def, i);
-                if (access != AccessType::Read && access != AccessType::ReadWrite)
-                    continue;
+            for (const auto &input : inputs) {
                 const auto inputName = m_currentFunction->GetVarName(input.value.reg, input.ssaVersion);
                 for (const auto &output : outputs->second)
                     if (output.regIndex == input.value.reg || m_currentFunction->GetVarName(output.regIndex, output.version) == inputName) {
@@ -6159,6 +6290,48 @@ bool ASTLifter::IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) con
     return feedsMergePhi;
 }
 
+std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop) const {
+    const auto &blocks = m_currentFunction->basicBlocks;
+    if (start >= blocks.size() || stop >= blocks.size() || start == stop)
+        return std::nullopt;
+    // small, forward-only, entered only through `start`, and ending at `stop` or a return
+    constexpr size_t kMaxBlocks = 6, kMaxInstructions = 64;
+    std::vector<uint32_t> region;
+    boost::unordered_flat_set<uint32_t> inRegion;
+    std::vector<uint32_t> pending{start};
+    size_t instructions = 0;
+    while (!pending.empty()) {
+        const uint32_t id = pending.back();
+        pending.pop_back();
+        if (id == stop)
+            continue;
+        if (id >= blocks.size())
+            return std::nullopt;
+        if (!inRegion.insert(id).second)
+            continue;
+        const auto &block = blocks[id];
+        if (inRegion.size() > kMaxBlocks || !block.lpHead ||
+            (block.bType != BlockType::Standard && block.bType != BlockType::IfHeader && block.bType != BlockType::Return) ||
+            (block.successors.empty() && block.bType != BlockType::Return))
+            return std::nullopt;
+        instructions += static_cast<size_t>(block.lpTail - block.lpHead) + 1;
+        if (instructions > kMaxInstructions)
+            return std::nullopt;
+        for (const uint32_t successor : block.successors) {
+            if (successor <= id)
+                return std::nullopt;
+            pending.push_back(successor);
+        }
+        region.push_back(id);
+    }
+    for (const uint32_t id : region)
+        if (id != start)
+            for (const uint32_t predecessor : blocks[id].predecessors)
+                if (!inRegion.contains(predecessor))
+                    return std::nullopt;
+    return region;
+}
+
 bool ASTLifter::IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const {
     const auto &blocks = m_currentFunction->basicBlocks;
     if (startId >= blocks.size() || stopBlockId >= blocks.size() || startId == stopBlockId)
@@ -6243,11 +6416,18 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
     if (branchA == branchB)
         return static_cast<int32_t>(branchA);
 
-    const uint64_t cacheKey = (static_cast<uint64_t>(branchA) << 32) | static_cast<uint64_t>(branchB);
+    const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
+    const auto cacheKey = std::make_tuple(branchA, branchB, loopExit);
     if (const auto it = m_mergeCache.find(cacheKey); it != m_mergeCache.end())
         return it->second;
 
     const auto &blocks = m_currentFunction->basicBlocks;
+    // a conditional jump into the innermost loop's latch is a `continue`, not flow into the merge
+    const auto continuesLoop = [&](const BasicBlock &from, uint32_t to) {
+        if (loopExit == InvalidBlockId || from.bTerminator != BlockTerminator::Conditional || blocks[to].bType != BlockType::LoopLatch)
+            return false;
+        return std::ranges::find(blocks[to].successors, loopExit) != blocks[to].successors.end();
+    };
 
     // true iff every forward path from x hits M before an exit (back-edges skipped to stay acyclic). The
     // merge must post-dominate both branches; a non-post-dominator causes exponential shared-tail re-lift.
@@ -6270,6 +6450,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
                     continue; // back-edge: ignore to keep the walk acyclic
                 if (succ == m)
                     reached = true;
+                else if (continuesLoop(block, succ))
+                    continue;
                 else
                     stack.push_back(succ);
             }
@@ -6338,7 +6520,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
             return nullptr;
         for (auto *inst = b.lpHead; inst && inst < b.lpTail; ++inst)
             if ((inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE) && !inst->operands.empty() &&
-                inst->operands[0].type == LiftedOperandType::Register && inst->operands[0].value.reg == b.lpTail->operands[0].value.reg)
+                inst->operands[0].type == LiftedOperandType::Register && inst->operands[0].value.reg == b.lpTail->operands[0].value.reg &&
+                inst->operands[0].ssaVersion == b.lpTail->operands[0].ssaVersion)
                 return inst;
         return nullptr;
     };
@@ -6404,8 +6587,16 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         break; // does not share the body -> end of (non-)chain
     }
 
-    if (!complete || (!invertedFinal && !truthyFinal) || links.size() < 2 || elseIdx == InvalidBlockId)
+    if (!complete || links.size() < 2 || elseIdx == InvalidBlockId)
         return std::nullopt;
+    if (!invertedFinal && !truthyFinal) {
+        // Every link jumps to `body`: an `and` guard, read as `not a or not b`. Only when `body` is a real
+        // arm that joins `elseIdx` later; if `body` is itself the join, this is a folded `x = a and b` value.
+        const int32_t join = FindMergeBlock(body, elseIdx);
+        if (join < 0 || static_cast<uint32_t>(join) == body || static_cast<uint32_t>(join) == elseIdx ||
+            CanReach(elseIdx, body, static_cast<uint32_t>(join), {headerId}))
+            return std::nullopt;
+    }
 
     // Structure confirmed. Lift each link's condition (the condition under which it
     // reaches `body`) and OR-fold left to right.
