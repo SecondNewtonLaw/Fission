@@ -579,13 +579,32 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     auto exitAfterLatch = [&](const BasicBlock &latch, const BasicBlock &header) -> std::optional<uint32_t> {
         if (!latch.lpTail || !header.lpHead || latch.lpTail < header.lpHead)
             return std::nullopt;
-        const auto afterIndex = static_cast<size_t>(latch.lpTail - firstInstruction) + 1;
-        if (afterIndex >= blockAtLeader.size() || blockAtLeader[afterIndex] < 0)
+        const auto &instructions = func.lpLiftedFunction->instructions;
+        auto afterIndex = static_cast<size_t>(latch.lpTail - firstInstruction) + 1;
+        // Luau threads a jump to the loop end through the forward JUMPs that follow it (the skip over an enclosing else)
+        const auto exitAt = [&](size_t index) -> std::optional<uint32_t> {
+            if (index >= blockAtLeader.size() || blockAtLeader[index] < 0)
+                return std::nullopt;
+            const auto &after = blocks[blockAtLeader[index]];
+            for (const uint32_t pred : after.predecessors)
+                if (pred < blocks.size() && blocks[pred].lpHead && blocks[pred].lpHead >= header.lpHead && blocks[pred].lpTail <= latch.lpTail)
+                    return after.dwBlockId;
             return std::nullopt;
-        const auto &after = blocks[blockAtLeader[afterIndex]];
-        for (const uint32_t pred : after.predecessors)
-            if (pred < blocks.size() && blocks[pred].lpHead && blocks[pred].lpHead >= header.lpHead && blocks[pred].lpTail <= latch.lpTail)
-                return after.dwBlockId;
+        };
+        for (int hops = 0; hops < 8 && afterIndex < instructions.size(); ++hops) {
+            if (const auto exit = exitAt(afterIndex))
+                return exit;
+            // a zero-length jump is lifted as NOP; the exit starts after it
+            size_t next = afterIndex;
+            while (next < instructions.size() && instructions[next].operation == LiftedOperation::NOP)
+                ++next;
+            if (next != afterIndex)
+                if (const auto exit = exitAt(next))
+                    return exit;
+            if (next >= instructions.size() || instructions[next].operation != LiftedOperation::JUMP || GetJumpOffset(&instructions[next]) <= 0)
+                break;
+            afterIndex = next + static_cast<size_t>(GetJumpOffset(&instructions[next]));
+        }
         return std::nullopt;
     };
 

@@ -684,6 +684,99 @@ end
 print(v0))LUA");
 }
 
+TEST_CASE("Loop audit: a break or return arm keeps the statements after its if", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n = 0
+while n < 5 do
+    n += 1
+    if n % 2 == 0 then
+    else
+        if n > 3 then
+            break
+        end
+    end
+    print("tail", n)
+end
+print("done", n))LUA");
+    CheckSemanticParity(R"LUA(local g, h = 0, 0
+while g < 30 do
+    g += 1
+    if g % 2 == 1 then
+        h += 1
+    else
+        if g > 24 then
+            return g
+        end
+    end
+    print(g, h)
+end)LUA");
+    CheckSemanticParity(R"LUA(local g, h = 0, 0
+for k = 1, 2 do
+    while true do
+        g += 1
+        if g % 3 == 0 then
+        else
+            if h % 2 == 1 then
+                h += 1
+                continue
+            end
+        end
+        h += 2
+        if g > 30 then
+            break
+        end
+    end
+    h += k
+end
+print("end", g, h))LUA");
+}
+
+TEST_CASE("Loop audit: a compound condition inside a loop merges after its body", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local g, h = 0, 0
+while g < 30 do
+    g += 1
+    if (g % 2 == 0 and h > 1) or g % 5 == 0 then
+        h += 2
+    end
+    print(g, h)
+end
+print("end", g, h))LUA");
+}
+
+TEST_CASE("Loop audit: a shared tail after a short-circuit runs on every path", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function f(n) print("f", n) return n end
+local function probe(x)
+    return (f(false) or x) and f(3)
+end
+print(probe(nil)) print(probe(false)) print(probe(0)))LUA");
+    CheckSemanticParity(R"LUA(local function f(n) print("f", n) return n end
+local t = { k = 4 }
+local function probe(x)
+    return (x or f(2)) and t.k
+end
+print(probe(nil)) print(probe(false)) print(probe(0)))LUA");
+}
+
+TEST_CASE("Loop audit: a loop exit threaded past an enclosing else still breaks", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(if { [pairs] = 1.25 } then
+    while (if pairs then nil else pairs) do
+        ipairs(nil, 432);
+    end
+else
+end
+ipairs -= tostring.field:get(function(p1, p2, p3)
+end, "key");)LUA");
+    CheckSemanticParity(R"LUA(local n, p = 0, ...
+if n == 0 then
+    while (if p then nil else n < 3) do
+        n += 1
+        print(n)
+    end
+else
+    print("else")
+end
+print("done", n))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
