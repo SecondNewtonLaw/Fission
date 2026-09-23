@@ -79,3 +79,42 @@ TEST_CASE("Loop shapes: nested loop matrix keeps semantics", "[Decompiler][LoopS
         UNSCOPED_INFO(failure);
     CHECK(failures.empty());
 }
+
+namespace {
+    constexpr const char *kBranchLoops[] = {
+        "while g < 30 do\n{BODY}\nend",
+        "while true do\n{BODY}\nif g > 30 then break end\nend",
+        "repeat\n{BODY}\nuntil g > 30",
+        "while g < 30 or h < 2 do\n{BODY}\nend",
+        "for i = 1, 12 do\n{BODY}\nend",
+        "for _, v in ipairs({ 1, 2, 3, 4, 5, 6 }) do\n{BODY}\nend",
+    };
+    // Every body advances `g` first so each loop terminates whichever branch it takes.
+    constexpr const char *kBranchBodies[] = {
+        "g += 1 if g % 2 == 0 then g += 1 elseif g % 3 == 0 then h += 1 else g += 2 end",
+        "g += 1 if g % 2 == 0 then g += 1 if h > 3 then break end end h += 1",
+        "g += 1 if g % 5 == 0 then g += 1 continue end h += 1",
+        "g += 1 if g > 20 then return g end h += 1",
+        "g += 1 if g % 2 == 0 or h % 3 == 0 then g += 1 else h += 1 end",
+        "g += 1 if g % 2 == 0 and h % 3 == 0 then break elseif g % 7 == 0 then continue end h += 1",
+        "g += 1 local t = g % 4 if t == 0 then g += 3 elseif t == 1 then g += 2 elseif t == 2 then h += 1 else h += 2 end",
+        "g += 1 if (g % 2 == 0 and h > 1) or g % 5 == 0 then h += 2 end print(g, h)",
+    };
+    constexpr const char *kNestings[] = {"{LOOP}", "for k = 1, 2 do\n{LOOP}\nh += k\nend"};
+} // namespace
+
+TEST_CASE("Loop shapes: branches inside loops keep semantics", "[Decompiler][LoopShapes][Semantics]") {
+    fuzz::EnableLuauFlags();
+    std::vector<std::string> failures;
+    for (const char *nesting : kNestings)
+        for (const char *loop : kBranchLoops)
+            for (const char *body : kBranchBodies) {
+                const std::string code = Fill(nesting, "{LOOP}", Fill(loop, "{BODY}", body));
+                const std::string source = "local g, h = 0, 0\n" + code + "\nprint(\"end\", g, h)";
+                if (const auto decompiled = Divergence(source); !decompiled.empty())
+                    failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
+            }
+    for (const auto &failure : failures)
+        UNSCOPED_INFO(failure);
+    CHECK(failures.empty());
+}
