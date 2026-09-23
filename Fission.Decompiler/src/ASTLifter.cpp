@@ -5994,6 +5994,18 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         case LiftedOperation::JUMPXEQK:
             ExplainKeep(def, "control-flow boundary", use, &insts[k]);
             return true;
+        case LiftedOperation::SETTABLE:
+        case LiftedOperation::SETTABLEKS:
+        case LiftedOperation::SETTABLEN:
+        case LiftedOperation::SETLIST:
+            if (StoreTargetsFreshTable(&insts[k])) {
+                const auto *tableDef = m_currentFunction->GetDefinition(insts[k].operands[insts[k].operation == LiftedOperation::SETLIST ? 0 : 1]);
+                if (tableDef && tableDef->instructionIndex < defIdx) {
+                    ExplainKeep(def, "store into a table built before the definition", use, &insts[k]);
+                    return true;
+                }
+            }
+            break;
         default:
             break;
         }

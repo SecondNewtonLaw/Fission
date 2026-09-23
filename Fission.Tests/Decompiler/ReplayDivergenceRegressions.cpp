@@ -120,6 +120,23 @@ until { t:set(313), field = string(48.25), [obj] = next[ipairs], { data = pairs 
 pairs();)LUA");
 }
 
+TEST_CASE("Replay: a raising read stays before stores into an earlier table", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = {  }
+local v1 = false
+local v2 = (if next then v0 else 913)[55]
+local v3 = v1 or (-3i)["a-b"]
+v0[-9i] = (true)[([[a
+b]])[(- (-1i))]]
+local v4 = v3()[v1(v2, 149i)]
+return [[a
+b]], (false)[v0] / (if false then 148i else false))LUA");
+    CheckSemanticParity(R"LUA(local t = ...
+local v0 = {}
+local v3 = t.x
+v0[1] = -t
+local v4 = v3())LUA");
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)
