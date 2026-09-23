@@ -275,8 +275,8 @@ namespace {
         ControlFlowAnalyzer cfa{};
         AnalyzedFunction fn = cfa.DetermineBasicBlocks(&lifted);
         cfa.OptimizeGraph(fn);
-        cfa.IdentifyStructures(fn);
         cfa.PruneUnreachable(fn);
+        cfa.IdentifyStructures(fn);
 
         SSABuilder ssa{};
         ssa.Build(fn);
@@ -500,8 +500,8 @@ TEST_CASE("SSA: FORNLOOP defines only a fresh control-variable version", "[SSA][
     ControlFlowAnalyzer cfa{};
     AnalyzedFunction function = cfa.DetermineBasicBlocks(&lifted);
     cfa.OptimizeGraph(function);
-    cfa.IdentifyStructures(function);
     cfa.PruneUnreachable(function);
+    cfa.IdentifyStructures(function);
     SSABuilder ssa{};
     ssa.Build(function);
 

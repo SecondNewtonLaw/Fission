@@ -109,10 +109,10 @@ namespace fuzz {
             auto cf = cfa.DetermineBasicBlocks(&lifted);
             stage = "OptimizeGraph";
             cfa.OptimizeGraph(cf);
-            stage = "IdentifyStructures";
-            cfa.IdentifyStructures(cf);
             stage = "PruneUnreachable";
             cfa.PruneUnreachable(cf);
+            stage = "IdentifyStructures";
+            cfa.IdentifyStructures(cf);
 
             stage = "SSABuilder";
             SSABuilder ssa{};

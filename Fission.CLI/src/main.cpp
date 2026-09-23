@@ -140,8 +140,8 @@ int main(int argc, char **argv) {
             ControlFlowAnalyzer cfa{};
             AnalyzedFunction fn = cfa.DetermineBasicBlocks(&lifted);
             cfa.OptimizeGraph(fn);
-            cfa.IdentifyStructures(fn);
             cfa.PruneUnreachable(fn);
+            cfa.IdentifyStructures(fn);
             SSABuilder ssa{};
             ssa.Build(fn);
 

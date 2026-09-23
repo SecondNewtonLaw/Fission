@@ -391,8 +391,8 @@ int main(int argc, char **argv) {
                 ControlFlowAnalyzer cfa{};
                 auto analyzed = cfa.DetermineBasicBlocks(&lifted);
                 cfa.OptimizeGraph(analyzed);
-                cfa.IdentifyStructures(analyzed);
                 cfa.PruneUnreachable(analyzed);
+                cfa.IdentifyStructures(analyzed);
                 SSABuilder{}.Build(analyzed);
                 report = fuzz::CheckSSAAgainstVM(analyzed);
             } catch (...) {
@@ -823,10 +823,10 @@ int main(int argc, char **argv) {
         auto cf = cfa.DetermineBasicBlocks(&lifted);
         step("OptimizeGraph");
         cfa.OptimizeGraph(cf);
-        step("IdentifyStructures");
-        cfa.IdentifyStructures(cf);
         step("PruneUnreachable");
         cfa.PruneUnreachable(cf);
+        step("IdentifyStructures");
+        cfa.IdentifyStructures(cf);
         step("SSABuilder.Build");
         SSABuilder ssa{};
         ssa.Build(cf);
@@ -903,8 +903,8 @@ int main(int argc, char **argv) {
                 ControlFlowAnalyzer cfa{&debugNotes};
                 auto cf = cfa.DetermineBasicBlocks(&lifted);
                 cfa.OptimizeGraph(cf);
-                cfa.IdentifyStructures(cf);
                 cfa.PruneUnreachable(cf);
+                cfa.IdentifyStructures(cf);
                 SSABuilder ssa{};
                 ssa.SetDebugNotes(&debugNotes);
                 ssa.Build(cf);
@@ -988,10 +988,10 @@ int main(int argc, char **argv) {
                 auto cf = cfa.DetermineBasicBlocks(&lifted);
                 step("OptimizeGraph");
                 cfa.OptimizeGraph(cf);
-                step("IdentifyStructures");
-                cfa.IdentifyStructures(cf);
                 step("PruneUnreachable");
                 cfa.PruneUnreachable(cf);
+                step("IdentifyStructures");
+                cfa.IdentifyStructures(cf);
                 step("SSABuilder");
                 SSABuilder ssa{};
                 ssa.Build(cf);

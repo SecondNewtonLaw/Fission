@@ -787,13 +787,14 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
     const auto optimizeGraphEnd = std::chrono::steady_clock::now();
 
-    const auto identifyLoopStructuresStart = std::chrono::steady_clock::now();
-    controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
-    const auto identifyLoopStructuresEnd = std::chrono::steady_clock::now();
-
+    // Dead code after an infinite loop must not contribute back-edges or exits to live loops.
     const auto unreachablePruningStart = std::chrono::steady_clock::now();
     controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
     const auto unreachablePruningEnd = std::chrono::steady_clock::now();
+
+    const auto identifyLoopStructuresStart = std::chrono::steady_clock::now();
+    controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
+    const auto identifyLoopStructuresEnd = std::chrono::steady_clock::now();
     const auto controlFlowAnalyzeEnd = std::chrono::steady_clock::now();
     m_debugNotes.Add(FissionDebugStage::Pipeline, "CFA retained {} root blocks", controlFlowAnalyzedFunction.basicBlocks.size());
 
@@ -807,8 +808,8 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         while (Fission::ConstantPropagation{}.Run(controlFlowAnalyzedFunction).Changed()) {
             controlFlowAnalyzedFunction = controlFlowAnalyzer.DetermineBasicBlocks(&liftedBytecode);
             controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
-            controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
             controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
+            controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
             ssaBuilder.Build(controlFlowAnalyzedFunction);
         }
     }

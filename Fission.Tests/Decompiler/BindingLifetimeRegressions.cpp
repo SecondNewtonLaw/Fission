@@ -27,8 +27,8 @@ namespace BindingLifetimeRegressions {
             ControlFlowAnalyzer analyzer;
             auto analyzed = analyzer.DetermineBasicBlocks(&function);
             analyzer.OptimizeGraph(analyzed);
-            analyzer.IdentifyStructures(analyzed);
             analyzer.PruneUnreachable(analyzed);
+            analyzer.IdentifyStructures(analyzed);
             SSABuilder{}.Build(analyzed);
             auto ast = ASTLifter{}.Lift(analyzed);
             DeclarationHoister{}.Run(ast.statements);
