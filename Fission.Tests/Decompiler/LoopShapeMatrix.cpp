@@ -50,24 +50,31 @@ namespace {
         "repeat g += 1 h += 1 until g % 4 == 0 or h > 30",
         "repeat g += 1 h += 1 if h > 45 then break end until g % 2 == 0",
         "while true do g += 1 h += 1 if g % 3 == 0 then break end end",
+        "while g % 3 ~= 0 do g += 1 if g % 2 == 0 then continue end h += 1 end",
+        "repeat g += 1 if g % 2 == 1 then continue end h += 1 until g % 3 == 0",
     };
     constexpr const char *kTails[] = {
         "g += 1",
         "g += 1 print(g, h)",
         "g += 1 if h % 2 == 0 then print(\"even\", g) else print(\"odd\", h) end",
+        "g += 1 if g % 4 == 0 then continue end print(g)",
     };
+    // An empty prefix makes the inner loop open the outer body, sharing its header.
+    constexpr const char *kPrefixes[] = {"", "h += 1\n"};
 } // namespace
 
 TEST_CASE("Loop shapes: nested loop matrix keeps semantics", "[Decompiler][LoopShapes][Semantics]") {
     fuzz::EnableLuauFlags();
     std::vector<std::string> failures;
     for (const char *outer : kOuterLoops)
-        for (const char *inner : kInnerLoops)
-            for (const char *tail : kTails) {
-                const std::string source = "local g, h = 0, 0\n" + Fill(Fill(outer, "{INNER}", inner), "{TAIL}", tail) + "\nprint(\"end\", g, h)";
-                if (const auto decompiled = Divergence(source); !decompiled.empty())
-                    failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
-            }
+        for (const char *prefix : kPrefixes)
+            for (const char *inner : kInnerLoops)
+                for (const char *tail : kTails) {
+                    const std::string body = Fill(Fill(outer, "{INNER}", std::string(prefix) + inner), "{TAIL}", tail);
+                    const std::string source = "local g, h = 0, 0\n" + body + "\nprint(\"end\", g, h)";
+                    if (const auto decompiled = Divergence(source); !decompiled.empty())
+                        failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
+                }
     for (const auto &failure : failures)
         UNSCOPED_INFO(failure);
     CHECK(failures.empty());
