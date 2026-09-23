@@ -923,6 +923,23 @@ end;
 end)LUA");
 }
 
+TEST_CASE("Loop audit: or-chain terms keep their comparison and single evaluation", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v0 = function()
+end
+local v1 = if 640 >= v0 or v0(57i) then nil else table(607) / 720)LUA");
+    CheckSemanticParity(R"LUA(repeat
+    if string.field then
+    else
+        if ipairs then
+            continue
+        end
+    end
+    if next() then
+        break
+    end
+until { [898] = tostring, data = tostring, [nil] = obj, field = true };)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

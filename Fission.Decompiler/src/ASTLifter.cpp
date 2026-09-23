@@ -6666,7 +6666,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         if (id >= blocks.size())
             return nullptr;
         const auto &b = blocks[id];
-        if (!b.lpTail || b.lpTail->operands.empty() || b.lpTail->operands[0].type != LiftedOperandType::Register)
+        if (!b.lpTail || (b.lpTail->operation != LiftedOperation::JUMPIF && b.lpTail->operation != LiftedOperation::JUMPIFNOT) ||
+            b.lpTail->operands.empty() || b.lpTail->operands[0].type != LiftedOperandType::Register)
             return nullptr;
         for (auto *inst = b.lpHead; inst && inst < b.lpTail; ++inst)
             if ((inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE) && !inst->operands.empty() &&
@@ -6717,7 +6718,9 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         if (bt == body) {
             links.push_back({cur, false});
             guard.insert(cur);
-            if (isLink(bf) && !guard.contains(bf)) {
+            // a test also reached from outside the chain is a join of the enclosing code, not the next term
+            const bool enteredFromChain = bf < blocks.size() && std::ranges::all_of(blocks[bf].predecessors, [&](uint32_t p) { return guard.contains(p); });
+            if (isLink(bf) && !guard.contains(bf) && enteredFromChain) {
                 cur = bf; // fall-through is the next link
                 continue;
             }
