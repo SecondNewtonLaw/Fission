@@ -632,7 +632,8 @@ class SourceGenerator : public Visitor {
             if (IsAssociative(cur->op)) {
                 if (auto rb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->right); rb && rb->op == cur->op)
                     rightMin = prec;
-                if (auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->left); lb && lb->op == cur->op)
+                // `(a .. b) .. c` concatenates `a .. b` first; without parentheses it would reparse as `a .. (b .. c)`
+                if (auto lb = std::dynamic_pointer_cast<BinaryExpressionNode>(cur->left); lb && lb->op == cur->op && !rightAssoc)
                     leftMin = prec;
             }
             spine.push_back({cur, leftMin, rightMin, wrap});

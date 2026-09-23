@@ -622,6 +622,22 @@ until k > 0
 print(n, k))LUA");
 }
 
+TEST_CASE("Replay: concatenation keeps its grouping", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local mt = {}
+mt.__concat = function(a, b)
+    print("concat", type(a), type(b))
+    return setmetatable({}, mt)
+end
+local t = setmetatable({}, mt)
+local u = (t .. "a") .. "b"
+local w = t .. "a" .. "b"
+local z = "a" .. (t .. "b")
+local s = "p"
+s ..= t .. "q"
+print(type(u), type(w), type(z), type(s)))LUA");
+    CheckSemanticParity(R"LUA(local v1 = (-((145 .. obj) .. nil)))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

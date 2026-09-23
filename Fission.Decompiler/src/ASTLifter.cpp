@@ -4418,11 +4418,14 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             }
         }
 
+        // one CONCAT over a range groups like the source it came from: `a .. (b .. c)`, `..` being right-associative
+        std::vector<std::shared_ptr<Expression>> parts;
+        parts.reserve(operands.size());
+        for (const auto &op : operands)
+            parts.push_back(LiftExpression(op));
         std::shared_ptr<Expression> expr = nullptr;
-        for (const auto &op : operands) {
-            auto part = LiftExpression(op);
-            expr = expr ? std::make_shared<BinaryExpressionNode>("..", expr, part) : part;
-        }
+        for (auto part = parts.rbegin(); part != parts.rend(); ++part)
+            expr = expr ? std::make_shared<BinaryExpressionNode>("..", *part, expr) : *part;
         return expr ? expr : std::make_shared<StringLiteralNode>("");
     }
 
