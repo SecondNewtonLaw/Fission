@@ -4131,6 +4131,9 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     while (true) {
         if (operand.type != LiftedOperandType::Register)
             break;
+        if (const auto overridden = m_valueTermOverrides.find(SSARef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion});
+            overridden != m_valueTermOverrides.end())
+            return overridden->second;
         if (m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion}))
             return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
         SSARef closureRef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion};
@@ -6787,15 +6790,213 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
 
 std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t headerId) {
     const auto &blocks = m_currentFunction->basicBlocks;
-    std::set<uint32_t> headers, leaves;
+    using Expr = std::shared_ptr<Expression>;
+
+    // Luau computes a condition term other than and/or/not/comparison into one register and tests it once
+    // (compileConditionValue -> compileExprAuto): a single-entry region whose paths join at a test block
+    // holding the only phi, for that register.
+    struct ValueTerm {
+        uint32_t test;
+        std::set<uint32_t> region;
+    };
+    // rebuilds the value flowing from `x` into `join`; with build == false it only checks the shape
+    std::map<std::pair<uint32_t, uint32_t>, Expr> valueMemo;
+    std::function<std::optional<Expr>(const ValueTerm &, uint32_t, uint32_t, bool)> valueOf;
+    const auto edgeValue = [&](uint32_t from, uint32_t join, bool build) -> std::optional<Expr> {
+        const auto &target = blocks[join];
+        const auto at = std::ranges::find(target.predecessors, from);
+        const auto index = static_cast<size_t>(at - target.predecessors.begin()) + 1;
+        if (at == target.predecessors.end() || target.phiNodes.size() != 1 || index >= target.phiNodes.front().operands.size())
+            return std::nullopt;
+        return build ? LiftExpression(target.phiNodes.front().operands[index], true) : Expr{};
+    };
+    const auto diamond = [&](const ValueTerm &term, uint32_t x, uint32_t join, bool build) -> std::optional<Expr> {
+        const auto &block = blocks[x];
+        const uint32_t yesArm = *block.ifStatementTrue, noArm = *block.ifStatementFalse;
+        const auto arm = [&](uint32_t target) { return target == join ? edgeValue(x, join, build) : valueOf(term, target, join, build); };
+        const auto *tail = block.lpTail;
+        // `r = a; JUMPIF(NOT) r -> join` keeps `a` as the value on that edge: `a or rest` / `a and rest`
+        if ((tail->operation == LiftedOperation::JUMPIF || tail->operation == LiftedOperation::JUMPIFNOT) && !tail->operands.empty() &&
+            tail->operands[0].type == LiftedOperandType::Register && (yesArm == join || noArm == join)) {
+            const auto &target = blocks[join];
+            const auto at = std::ranges::find(target.predecessors, x);
+            const auto index = static_cast<size_t>(at - target.predecessors.begin()) + 1;
+            if (at != target.predecessors.end() && target.phiNodes.size() == 1 && index < target.phiNodes.front().operands.size()) {
+                const auto &input = target.phiNodes.front().operands[index];
+                if (input.type == LiftedOperandType::Register && input.value.reg == tail->operands[0].value.reg &&
+                    input.ssaVersion == tail->operands[0].ssaVersion) {
+                    const bool truthyToJoin = (tail->operation == LiftedOperation::JUMPIF) == (yesArm == join);
+                    Expr left = build ? LiftExpression(tail->operands[0], true) : Expr{};
+                    const auto rest = arm(yesArm == join ? noArm : yesArm);
+                    if (!rest)
+                        return std::nullopt;
+                    return build ? Expr(std::make_shared<BinaryExpressionNode>(truthyToJoin ? "or" : "and", left, *rest)) : Expr{};
+                }
+            }
+        }
+        Expr condition = build ? LiftCondition(tail) : Expr{};
+        const auto yes = arm(yesArm);
+        const auto no = yes ? arm(noArm) : std::nullopt;
+        if (!yes || !no)
+            return std::nullopt;
+        if (!build)
+            return Expr{};
+        if (const auto negated = std::dynamic_pointer_cast<UnaryExpressionNode>(condition); negated && negated->op == "not ")
+            return Expr(std::make_shared<IfExpressionNode>(negated->operand, *no, *yes));
+        return Expr(std::make_shared<IfExpressionNode>(condition, *yes, *no));
+    };
+    valueOf = [&](const ValueTerm &term, uint32_t x, uint32_t join, bool build) -> std::optional<Expr> {
+        if (x == join || !term.region.contains(x))
+            return std::nullopt;
+        if (build)
+            if (const auto memo = valueMemo.find({x, join}); memo != valueMemo.end())
+                return memo->second;
+        const auto &block = blocks[x];
+        std::optional<Expr> result;
+        if (block.bTerminator == BlockTerminator::Conditional) {
+            if (!block.ifStatementTrue || !block.ifStatementFalse)
+                return std::nullopt;
+            const int32_t inner = FindMergeBlock(*block.ifStatementTrue, *block.ifStatementFalse);
+            if (inner < 0)
+                return std::nullopt;
+            if (static_cast<uint32_t>(inner) == join) {
+                result = diamond(term, x, join, build);
+            } else {
+                // an inner value (a nested if-expression or and/or) joins first; its phi reads as that value
+                const auto innerId = static_cast<uint32_t>(inner);
+                if (!term.region.contains(innerId) || blocks[innerId].phiNodes.size() != 1)
+                    return std::nullopt;
+                const auto innerValue = diamond(term, x, innerId, build);
+                if (!innerValue)
+                    return std::nullopt;
+                if (build) {
+                    const auto &out = blocks[innerId].phiNodes.front().operands[0];
+                    m_valueTermOverrides[SSARef{static_cast<uint8_t>(out.value.reg), out.ssaVersion}] = *innerValue;
+                }
+                result = valueOf(term, innerId, join, build);
+            }
+        } else {
+            if (block.successors.size() != 1)
+                return std::nullopt;
+            const uint32_t next = block.successors.front();
+            result = next == join ? edgeValue(x, join, build) : valueOf(term, next, join, build);
+        }
+        if (build && result)
+            valueMemo[{x, join}] = *result;
+        return result;
+    };
+    const auto detectValueTerm = [&](uint32_t entryId) -> std::optional<ValueTerm> {
+        const auto &entry = blocks[entryId];
+        if (entry.bTerminator != BlockTerminator::Conditional || !entry.ifStatementTrue || !entry.ifStatementFalse)
+            return std::nullopt;
+        const int32_t join = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse);
+        if (join < 0 || static_cast<uint32_t>(join) <= entryId)
+            return std::nullopt;
+        const auto testId = static_cast<uint32_t>(join);
+        const auto &test = blocks[testId];
+        if (test.bType != BlockType::IfHeader || !test.ifStatementTrue || !test.ifStatementFalse || test.phiNodes.size() != 1 || !test.lpTail ||
+            test.bTerminator != BlockTerminator::Conditional)
+            return std::nullopt;
+        const auto &phiOut = test.phiNodes.front().operands[0];
+        const int32_t valueReg = phiOut.value.reg;
+        ValueTerm term{testId, {}};
+        std::vector<uint32_t> walk{entryId};
+        while (!walk.empty()) {
+            const uint32_t id = walk.back();
+            walk.pop_back();
+            if (id == testId || term.region.contains(id))
+                continue;
+            if (id < entryId || id > testId || term.region.size() >= 16)
+                return std::nullopt;
+            const auto &block = blocks[id];
+            if (!block.lpHead || block.successors.empty() || block.phiNodes.size() > 1 ||
+                (block.phiNodes.size() == 1 && block.phiNodes.front().operands[0].value.reg != valueReg))
+                return std::nullopt;
+            for (const uint32_t successor : block.successors) {
+                if (successor <= id)
+                    return std::nullopt;
+                walk.push_back(successor);
+            }
+            term.region.insert(id);
+        }
+        // entered only through the entry, left only through the test
+        for (const uint32_t id : term.region)
+            if (id != entryId)
+                for (const uint32_t pred : blocks[id].predecessors)
+                    if (!term.region.contains(pred))
+                        return std::nullopt;
+        for (const uint32_t pred : test.predecessors)
+            if (!term.region.contains(pred))
+                return std::nullopt;
+        // the joined value is read only by the test
+        if (const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(valueReg), phiOut.ssaVersion}); users != m_currentFunction->users.end())
+            for (const auto *user : users->second)
+                if (m_currentFunction->GetBlockId(user) != join)
+                    return std::nullopt;
+        // every write of the value register is a value the expression reads; everything else inlines into it
+        std::set<int32_t> readVersions;
+        for (const uint32_t id : term.region) {
+            for (const auto &phi : blocks[id].phiNodes)
+                for (size_t i = 1; i < phi.operands.size(); ++i)
+                    readVersions.insert(phi.operands[i].ssaVersion);
+            const auto *tail = blocks[id].lpTail;
+            if ((tail->operation == LiftedOperation::JUMPIF || tail->operation == LiftedOperation::JUMPIFNOT) && !tail->operands.empty() &&
+                tail->operands[0].type == LiftedOperandType::Register && tail->operands[0].value.reg == valueReg)
+                readVersions.insert(tail->operands[0].ssaVersion);
+        }
+        for (size_t i = 1; i < test.phiNodes.front().operands.size(); ++i)
+            readVersions.insert(test.phiNodes.front().operands[i].ssaVersion);
+        std::vector<uint32_t> checked(term.region.begin(), term.region.end());
+        checked.push_back(testId);
+        for (const uint32_t id : checked) {
+            const auto &block = blocks[id];
+            for (const LiftedInstruction *inst = block.lpHead; inst && inst <= block.lpTail; ++inst) {
+                if (inst->operation == LiftedOperation::NOP || inst->operation == LiftedOperation::PHI)
+                    continue;
+                if (inst == block.lpTail && (block.bTerminator == BlockTerminator::Conditional || inst->operation == LiftedOperation::JUMP))
+                    continue;
+                if (!inst->operands.empty() && inst->operands[0].type == LiftedOperandType::Register && inst->operands[0].value.reg == valueReg && id != testId) {
+                    if (!readVersions.contains(inst->operands[0].ssaVersion))
+                        return std::nullopt;
+                    continue;
+                }
+                if (!ShouldInline(inst))
+                    return std::nullopt;
+            }
+        }
+        if (!valueOf(term, entryId, testId, false))
+            return std::nullopt;
+        return term;
+    };
+
+    std::set<uint32_t> headers, leaves, termBlocks;
+    std::map<uint32_t, ValueTerm> valueTerms; // by entry
+    std::map<uint32_t, uint32_t> termEntryOf; // test -> entry
     std::vector<uint32_t> pending{headerId};
     while (!pending.empty()) {
         const auto id = pending.back();
         pending.pop_back();
         if (id >= blocks.size() || id < headerId || headers.size() > 24 || leaves.size() > 2)
             return std::nullopt;
-        if (headers.contains(id) || leaves.contains(id))
+        if (headers.contains(id) || leaves.contains(id) || valueTerms.contains(id))
             continue;
+        if (id != headerId && !termBlocks.contains(id))
+            if (auto term = detectValueTerm(id)) {
+                const uint32_t testId = term->test;
+                if (headers.contains(testId) || termBlocks.contains(testId))
+                    return std::nullopt;
+                termBlocks.insert(term->region.begin(), term->region.end());
+                termBlocks.insert(testId);
+                headers.insert(testId);
+                termEntryOf[testId] = id;
+                for (const auto successor : {*blocks[testId].ifStatementTrue, *blocks[testId].ifStatementFalse}) {
+                    if (successor <= testId)
+                        return std::nullopt;
+                    pending.push_back(successor);
+                }
+                valueTerms.emplace(id, std::move(*term));
+                continue;
+            }
         const auto &block = blocks[id];
         bool conditionOnly = block.bType == BlockType::IfHeader && block.ifStatementTrue && block.ifStatementFalse && block.phiNodes.empty();
         if (conditionOnly && id != headerId)
@@ -6823,17 +7024,22 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
                });
     };
     for (const auto id : headers)
-        if (id != headerId)
+        if (id != headerId && !termEntryOf.contains(id))
             for (const auto pred : blocks[id].predecessors)
                 if (!headers.contains(pred))
                     return std::nullopt;
+    for (const auto &[entry, term] : valueTerms)
+        for (const auto pred : blocks[entry].predecessors)
+            if (!headers.contains(pred))
+                return std::nullopt;
     // a def folded into the condition no longer reaches a phi that reads it on the path out of its test
     for (const auto leaf : leaves)
         for (const auto &phi : blocks[leaf].phiNodes)
             for (size_t i = 1; i < phi.operands.size(); ++i)
                 if (const auto *def = phi.operands[i].type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(phi.operands[i]) : nullptr) {
                     const int defBlock = m_currentFunction->GetBlockId(def);
-                    if (defBlock >= 0 && static_cast<uint32_t>(defBlock) != headerId && headers.contains(static_cast<uint32_t>(defBlock)))
+                    if (defBlock >= 0 && static_cast<uint32_t>(defBlock) != headerId &&
+                        (headers.contains(static_cast<uint32_t>(defBlock)) || termBlocks.contains(static_cast<uint32_t>(defBlock))))
                         return std::nullopt;
                 }
 
@@ -6853,13 +7059,19 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             return std::nullopt;
     }
 
-    using Expr = std::shared_ptr<Expression>;
     const auto binary = [](const char *op, const Expr &lhs, const Expr &rhs) -> Expr { return std::make_shared<BinaryExpressionNode>(op, lhs, rhs); };
     std::map<uint32_t, Expr> conditions;
     conditions[body] = std::make_shared<BooleanLiteralNode>(true);
     conditions[exit] = std::make_shared<BooleanLiteralNode>(false);
+    const auto overridesBefore = m_valueTermOverrides;
     for (auto it = headers.rbegin(); it != headers.rend(); ++it) {
         const auto &block = blocks[*it];
+        const auto termEntry = termEntryOf.find(*it);
+        if (termEntry != termEntryOf.end()) {
+            const auto &out = block.phiNodes.front().operands[0];
+            m_valueTermOverrides[SSARef{static_cast<uint8_t>(out.value.reg), out.ssaVersion}] =
+                *valueOf(valueTerms.at(termEntry->second), termEntry->second, *it, true);
+        }
         auto condition = LiftCondition(block.lpTail);
         auto yes = conditions.at(*block.ifStatementTrue), no = conditions.at(*block.ifStatementFalse);
         const auto yesBool = std::dynamic_pointer_cast<BooleanLiteralNode>(yes);
@@ -6880,6 +7092,11 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         else
             result = std::make_shared<IfExpressionNode>(condition, yes, no);
         conditions[*it] = result;
+        if (termEntry != termEntryOf.end())
+            conditions[termEntry->second] = result;
     }
-    return OrChainInfo{conditions.at(headerId), body, exit, {headers.begin(), headers.end()}};
+    m_valueTermOverrides = overridesBefore;
+    std::vector<uint32_t> chainBlocks(headers.begin(), headers.end());
+    chainBlocks.insert(chainBlocks.end(), termBlocks.begin(), termBlocks.end());
+    return OrChainInfo{conditions.at(headerId), body, exit, std::move(chainBlocks)};
 }

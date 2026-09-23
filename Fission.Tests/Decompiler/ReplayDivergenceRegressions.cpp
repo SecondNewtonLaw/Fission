@@ -976,6 +976,37 @@ end
 print(table.concat(log, ",")))LUA");
 }
 
+TEST_CASE("Loop audit: a condition term computed by an if-expression folds into the condition", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local log = {}
+local function probe(a, b, c)
+    local n = 0
+    if a or (if b then c else 5) then
+        for i = 1, 2 do
+            local x = i * 2
+            local function get()
+                return x + n
+            end
+            table.insert(log, get())
+        end
+        for k, v in ipairs({ 7, 8 }) do
+            local y = k + v
+            table.insert(log, y)
+        end
+        repeat
+            n += 1
+            local z = n
+            if z == 2 then
+                continue
+            end
+            table.insert(log, z)
+        until n > 3
+    end
+    table.insert(log, "after" .. n)
+end
+probe(nil, nil, nil) probe(nil, true, nil) probe(nil, true, 1) probe(1, nil, nil)
+print(table.concat(log, ",")))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

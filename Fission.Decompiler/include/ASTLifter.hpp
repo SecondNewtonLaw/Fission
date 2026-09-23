@@ -129,6 +129,8 @@ class ASTLifter {
     std::vector<uint32_t> m_loopExitStack;
     // Blocks whose lifting is still in progress up the call chain; a shared tail must not re-enter them.
     std::vector<uint32_t> m_liftingBlocks;
+    // Phi outputs of a condition's value term, read as the term's rebuilt expression while the condition is lifted.
+    boost::unordered_flat_map<SSARef, std::shared_ptr<Expression>, std::hash<SSARef>> m_valueTermOverrides;
 
     ControlFlowTask LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, boost::unordered_flat_set<uint32_t> &visited);
     std::string GetFunctionName(DeserializedFunction *lpDeserialized) {
