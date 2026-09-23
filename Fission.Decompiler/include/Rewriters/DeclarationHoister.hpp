@@ -215,7 +215,7 @@ class DeclarationHoister {
             return;
         switch (e->nodeKind) {
         case ASTNodeKind::IdentifierExpression:
-            if (auto id = std::static_pointer_cast<IdentifierExpressionNode>(e); id->identifier)
+            if (auto id = std::static_pointer_cast<IdentifierExpressionNode>(e); id->identifier && !id->identifier->bIsGlobal)
                 RecordAccess(id->identifier->name, scopeId);
             break;
         case ASTNodeKind::Identifier:
@@ -321,7 +321,8 @@ class DeclarationHoister {
             return;
         }
         if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s)) {
-            if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left); id && id->identifier && IsOwnedRegisterName(id->identifier->name)) {
+            if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
+                id && id->identifier && !id->identifier->bIsGlobal && IsOwnedRegisterName(id->identifier->name)) {
                 m_bareAssigned.insert(id->identifier->name);
                 m_bareAssignmentScopes[id->identifier->name].insert(scopeId);
             }
@@ -331,7 +332,7 @@ class DeclarationHoister {
         }
         if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(s)) {
             if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(compound->left);
-                id && id->identifier && IsOwnedRegisterName(id->identifier->name)) {
+                id && id->identifier && !id->identifier->bIsGlobal && IsOwnedRegisterName(id->identifier->name)) {
                 m_bareAssigned.insert(id->identifier->name);
                 m_bareAssignmentScopes[id->identifier->name].insert(scopeId);
             }

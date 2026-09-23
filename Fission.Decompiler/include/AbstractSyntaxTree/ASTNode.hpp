@@ -175,6 +175,8 @@ class FunctionArgumentExpression : public Statement {
 class Identifier : public Declaration {
   public:
     std::string name{};
+    // A global read or write; its name can match a generated local's (`v0`) without being one.
+    bool bIsGlobal = false;
     explicit Identifier(std::string name) : name(std::move(name)) { this->nodeKind = ASTNodeKind::Identifier; }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };

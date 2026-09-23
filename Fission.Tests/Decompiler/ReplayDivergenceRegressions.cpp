@@ -638,6 +638,52 @@ print(type(u), type(w), type(z), type(s)))LUA");
     CheckSemanticParity(R"LUA(local v1 = (-((145 .. obj) .. nil)))LUA");
 }
 
+TEST_CASE("Replay: code after an infinite loop is not lifted", "[Decompiler][ReplayRegress]") {
+    fuzz::EnableLuauFlags();
+    for (const std::string &source : {std::string(R"LUA(repeat
+    while ("x") do
+        local v0 = (if ipairs.field then {  } else string.field);
+    end
+    if function(p0, p1, p2)
+while false do
+end
+end then
+    end
+until t:set();
+local v0, v1 = t:run(print, nil), math(ipairs);)LUA"),
+                                     std::string(R"LUA(repeat
+    repeat
+        if pairs[string] then
+        end
+        v0 = (nil >= 228);
+    until false;
+until { [v0] = function(p1, p2, p3, ...)
+end, ..., (math + nil), x = ... };
+local function f1(p2)
+end
+return (select .. print:get());)LUA")}) {
+        const auto result = fuzz::FullDecompile(source);
+        REQUIRE(result.code == DecompileResult::Success);
+        INFO(result.output);
+        CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.output, &source));
+        CHECK(result.output.find(":run(") == std::string::npos);
+        CHECK(result.output.find(":get(") == std::string::npos);
+    }
+}
+
+TEST_CASE("Replay: a global named like a generated local stays global", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function set(x)
+    v0 = x
+    v1 = v0 and x + 1
+end
+set(3)
+print(v0, v1)
+for i = 1, 2 do
+    v0 = (v0 or 0) + i
+end
+print(v0))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

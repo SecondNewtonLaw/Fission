@@ -51,6 +51,12 @@ constexpr uint32_t InvalidBlockId = static_cast<uint32_t>(-1);
 static void FoldShortCircuitChain(std::vector<std::shared_ptr<Statement>> &stmts);
 static bool IsSelfAssign(const std::shared_ptr<Statement> &stmt);
 
+static std::shared_ptr<Identifier> GlobalIdentifier(std::string name) {
+    auto identifier = std::make_shared<Identifier>(std::move(name));
+    identifier->bIsGlobal = true;
+    return identifier;
+}
+
 static std::shared_ptr<VectorNode> LiftVectorConstant(const LuauConstant &constant) {
     const auto &vector = std::get<LuauVectorConstant>(constant.constantData);
     return std::visit([](const auto &components) { return std::make_shared<VectorNode>(components); }, vector.components);
@@ -3260,7 +3266,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         }
         case LiftedOperation::SETGLOBAL: {
             const auto &k = ConstantAt(inst.operands[1].value.imm.k);
-            auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(k.constantData)));
+            auto left = std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(k.constantData)));
             statements.push_back(std::make_shared<AssignmentStatementNode>(left, LiftExpression(inst.operands[0])));
             break;
         }
@@ -4440,7 +4446,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
 
     case LiftedOperation::GETGLOBAL: {
         const auto &k = ConstantAt(def->operands[1].value.imm.k);
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(std::get<std::string>(k.constantData)));
+        return std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(k.constantData)));
     }
     case LiftedOperation::GETUPVAL: {
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(this->m_currentFunction->GetUpvalueName(def->operands[1].value.imm.n)));
@@ -4464,7 +4470,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         if (parts.empty())
             return std::make_shared<NilLiteralNode>();
 
-        std::shared_ptr<Expression> curr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(parts[0]));
+        std::shared_ptr<Expression> curr = std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(parts[0]));
         for (size_t i = 1; i < parts.size(); ++i)
             curr = std::make_shared<MemberExpressionNode>(curr, parts[i]);
         return curr;
