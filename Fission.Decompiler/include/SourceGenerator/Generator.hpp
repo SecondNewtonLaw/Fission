@@ -513,6 +513,10 @@ class SourceGenerator : public Visitor {
             node->Accept(this);
             if (!std::dynamic_pointer_cast<CommentNode>(node))
                 first = false;
+            // a block must end at break/continue/return; anything after is unreachable
+            if (node->nodeKind == ASTNodeKind::BreakStatement || node->nodeKind == ASTNodeKind::ContinueStatement ||
+                std::dynamic_pointer_cast<ReturnStatementNode>(node))
+                break;
         }
         if (asDo) {
             this->DecreaseIndentation();

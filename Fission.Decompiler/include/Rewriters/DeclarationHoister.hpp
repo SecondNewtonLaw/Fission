@@ -47,6 +47,8 @@ class DeclarationHoister {
             InsertMultiDeclarationFallbacks();
             for (auto &scope : m_scopes)
                 CoalesceAdjacentDeclarations(*scope.body);
+            for (auto &scope : m_scopes)
+                PredeclareRepeatConditionLocals(*scope.body);
             functions.insert(functions.end(), m_nestedFunctions.begin(), m_nestedFunctions.end());
         }
     }
@@ -826,6 +828,61 @@ class DeclarationHoister {
         }
         default:
             return true;
+        }
+    }
+
+    static bool ContinuesLoop(const std::shared_ptr<Statement> &s) {
+        if (!s)
+            return false;
+        if (s->nodeKind == ASTNodeKind::ContinueStatement)
+            return true;
+        const auto anyIn = [](const std::shared_ptr<BlockStatementNode> &block) {
+            return block && std::ranges::any_of(block->body, ContinuesLoop);
+        };
+        if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s))
+            return anyIn(iff->thenBranch) || anyIn(iff->elseBranch);
+        if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s))
+            return anyIn(blk);
+        return false; // nested loops own their continues; functions have their own bodies
+    }
+
+    // Luau rejects `continue` jumping over a local that the `until` condition reads. Declare such
+    // locals ahead of the first continue; each iteration still starts them fresh.
+    void PredeclareRepeatConditionLocals(std::vector<std::shared_ptr<Statement>> &stmts) {
+        for (auto &stmt : stmts) {
+            auto loop = std::dynamic_pointer_cast<RepeatStatementNode>(stmt);
+            if (!loop || !loop->body)
+                continue;
+            auto &body = loop->body->body;
+            const auto firstContinue = std::ranges::find_if(body, ContinuesLoop);
+            if (firstContinue == body.end())
+                continue;
+            std::vector<std::string> names;
+            for (auto it = firstContinue + 1; it != body.end(); ++it) {
+                if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(*it)) {
+                    const auto name = DeclName(decl);
+                    if (name.empty() || !ExprMentions(loop->condition, name))
+                        continue;
+                    *it = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : std::make_shared<NilLiteralNode>());
+                    names.push_back(name);
+                } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(*it); fn && fn->bIsLocalDeclaration) {
+                    if (!ExprMentions(loop->condition, fn->functionName))
+                        continue;
+                    fn->bIsLocalDeclaration = false;
+                    names.push_back(fn->functionName);
+                } else if (auto call = LocalDeclCall(*it)) {
+                    bool multi = false;
+                    const auto name = call->nodeKind == ASTNodeKind::CallExpression
+                                          ? SingleRetName(std::static_pointer_cast<CallExpressionNode>(call)->rets, multi)
+                                          : SingleRetName(std::static_pointer_cast<NameCallExpressionNode>(call)->rets, multi);
+                    if (name.empty() || !ExprMentions(loop->condition, name))
+                        continue;
+                    DemoteLocal(*it);
+                    names.push_back(name);
+                }
+            }
+            for (auto name = names.rbegin(); name != names.rend(); ++name)
+                body.insert(body.begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(*name)));
         }
     }
 

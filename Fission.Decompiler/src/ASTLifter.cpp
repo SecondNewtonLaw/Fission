@@ -1659,15 +1659,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
                 const bool mergeFromGraph = mergeIdx != InvalidBlockId;
 
-                // Nested short-circuit diamonds can use the enclosing return join as one arm. Return arms
-                // have no merge of their own, but the enclosing stop remains the real shared join.
-                if (mergeIdx == InvalidBlockId && stopBlockId != InvalidBlockId && !isReturnOnly(stopBlockId) &&
-                    (trueIdx == stopBlockId || falseIdx == stopBlockId))
-                    mergeIdx = stopBlockId;
-                // one arm ends this region while the other jumps into the latch: join at the region end and
-                // let the latch edge lift as `continue`
-                if (mergeIdx != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(mergeIdx) &&
-                    (trueIdx == stopBlockId || falseIdx == stopBlockId))
+                // An arm that is the enclosing region's end is empty; the join is that end. Return arms have no
+                // merge of their own, and a merge found past the stop would pull the enclosing join into this if.
+                if (stopBlockId != InvalidBlockId && !isReturnOnly(stopBlockId) && (trueIdx == stopBlockId || falseIdx == stopBlockId))
                     mergeIdx = stopBlockId;
 
                 if (mergeIdx == InvalidBlockId) {
@@ -1713,6 +1707,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                                       !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
                 if ((mergeTargetsLoopExit && !mergeTargetsActiveLoopExit) || mergeIsNextIterationArm)
                     mergeIdx = InvalidBlockId;
+                // one arm ends this region while the other jumps into the latch: join at the region end and
+                // let the latch edge lift as `continue`
+                if (mergeIdx != stopBlockId && stopBlockId != InvalidBlockId && (mergeIdx == InvalidBlockId || isInnermostLatch(mergeIdx)) &&
+                    (isInnermostLatch(trueIdx) || isInnermostLatch(falseIdx)) && (trueIdx == stopBlockId || falseIdx == stopBlockId))
+                    mergeIdx = stopBlockId;
 
                 auto ifStmt = std::make_shared<IfStatementNode>();
                 auto visitedCopy = visited;

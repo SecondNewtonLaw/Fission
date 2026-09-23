@@ -241,6 +241,63 @@ return if (if [[a
 b]] then "end" else select) then nil elseif -39i then true else select)LUA");
 }
 
+TEST_CASE("Replay: continue in repeat keeps until-condition locals declared", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    repeat
+        local v0 = { ["value"] = next, k = 86.25, y = tostring, 206.75 };
+        if v0 then
+            for g1_0, g1_1 in v0() do
+            end
+            if print(next) then
+                continue
+            end
+        end
+        v0 ..= ipairs(true);
+        if ((next ^ nil) <= v0[140.5]) then
+            break
+        end
+    until ((string.field) // (if (231.5) then tostring else tostring.field));
+    (select:set())(..., ({  } + string:method(pairs)));
+until { field = ... };)LUA");
+    CheckSemanticParity(R"LUA(if (tostring[{  }] and print(528)) then
+    obj *= table[119.25];
+else
+    repeat
+        if ... then
+            ipairs(next);
+        else
+            pairs();
+            string();
+            if math then
+                continue
+            end
+        end
+        string = 129;
+        if (179.75) then
+            t(string);
+        else
+            select(string, "a-b");
+            table(ipairs);
+        end
+        if 66 then
+            break
+        end
+    until (obj.field >= next);
+end
+print("after"))LUA");
+}
+
+TEST_CASE("Replay: an arm that is the enclosing join stays empty", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(string = (if ((tonumber) or (if pairs then "key" else true)) then table(print) else ...);
+if (nil) then
+else
+    repeat
+        while ("") do
+        end
+    until v2();
+end)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
