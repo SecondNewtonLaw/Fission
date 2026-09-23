@@ -131,6 +131,38 @@ namespace {
         "t.r = {E}\nprint(t.r)",
     };
 
+    // Each loop exposes an iteration value `i`.
+    constexpr const char *kCaptureLoops[] = {
+        "for i = 1, 4 do\n{BODY}\nend",
+        "for _, i in ipairs({ 1, 2, 3, 4 }) do\n{BODY}\nend",
+        "local i = 0\nwhile i < 4 do\ni += 1\n{BODY}\nend",
+        "local i = 0\nrepeat\ni += 1\n{BODY}\nuntil i >= 4",
+        "local i = 0\nwhile true do\ni += 1\nif i > 4 then break end\n{BODY}\nend",
+    };
+    constexpr const char *kCaptureBodies[] = {
+        "local v = i * 2 fns[#fns + 1] = function() return v end",
+        "fns[#fns + 1] = function() return i end",
+        "local v = i fns[#fns + 1] = function() v += 1 return v end v += 10",
+        "local v = i if v % 2 == 0 then fns[#fns + 1] = function() return v end end",
+        "local v = i fns[#fns + 1] = function() return v end if v > 2 then break end",
+        "local v = i local g = function() return v end v = v * 3 fns[#fns + 1] = g",
+        "local v = i if v % 2 == 0 then continue end fns[#fns + 1] = function() return v + 1 end",
+    };
+
+    constexpr const char *kMergeStatements[] = {
+        "if x then a = 1 else b = 2 end",
+        "if x then a, b = b, a end",
+        "if x == 0 then a = a + b elseif x then b = a - b else a, b = b, a end",
+        "for i = 1, 5 do if i % 2 == 0 then a, b = b, a + i else a = a * 2 end end",
+        "while a < 50 do a, b = b, a + b end",
+        "local c = a if x then c = b end a = c + 1",
+        "if x then local t = a a = b b = t end",
+        "repeat a, b = b + 1, a until a > 10 or (x and b > 5)",
+        "if x then a = a + 1 end if not x then b = b + 1 end a, b = a + b, a - b",
+        "local f = function() return a + b end if x then a = 10 end b = f()",
+    };
+    constexpr const char *kMergeWrappers[] = {"{S}", "if x ~= false then\n{S}\nend"};
+
     std::string FillOperands(std::string expression, const std::array<const char *, 4> &operands) {
         std::string out;
         for (const char c : expression) {
@@ -158,6 +190,36 @@ TEST_CASE("Value shapes: short-circuit values keep semantics in every context", 
                 if (const auto decompiled = Divergence(source); !decompiled.empty())
                     failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
             }
+    for (const auto &failure : failures)
+        UNSCOPED_INFO(failure);
+    CHECK(failures.empty());
+}
+
+TEST_CASE("Capture shapes: closures keep each iteration's bindings", "[Decompiler][CaptureShapes][Semantics]") {
+    fuzz::EnableLuauFlags();
+    std::vector<std::string> failures;
+    for (const char *loop : kCaptureLoops)
+        for (const char *body : kCaptureBodies) {
+            const std::string source =
+                "local fns = {}\n" + Fill(loop, "{BODY}", body) + "\nfor n, fn in ipairs(fns) do print(n, fn()) end\nprint(\"end\", #fns)";
+            if (const auto decompiled = Divergence(source); !decompiled.empty())
+                failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
+        }
+    for (const auto &failure : failures)
+        UNSCOPED_INFO(failure);
+    CHECK(failures.empty());
+}
+
+TEST_CASE("Merge shapes: values merged across branches and loops keep semantics", "[Decompiler][MergeShapes][Semantics]") {
+    fuzz::EnableLuauFlags();
+    std::vector<std::string> failures;
+    for (const char *wrapper : kMergeWrappers)
+        for (const char *statement : kMergeStatements) {
+            const std::string source = "local function probe(x)\nlocal a, b = 1, 2\n" + Fill(wrapper, "{S}", statement) +
+                                       "\nreturn a, b\nend\nprint(probe(nil)) print(probe(false)) print(probe(0)) print(probe(3))";
+            if (const auto decompiled = Divergence(source); !decompiled.empty())
+                failures.push_back(source + "\n--- decompiled ---\n" + decompiled);
+        }
     for (const auto &failure : failures)
         UNSCOPED_INFO(failure);
     CHECK(failures.empty());
