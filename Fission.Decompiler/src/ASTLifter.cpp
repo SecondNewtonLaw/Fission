@@ -1746,8 +1746,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
                 const bool mergeIsDirectArm = mergeIdx == trueIdx || mergeIdx == falseIdx;
                 const uint32_t otherArm = mergeIdx == trueIdx ? falseIdx : trueIdx;
+                const bool otherArmBreaks = !m_loopExitStack.empty() && otherArm == m_loopExitStack.back();
                 const bool mergeIsNextIterationArm = !mergeTargetsLoopExit && mergeFromGraph && mergeIsDirectArm && mergeIdx != stopBlockId &&
-                                                      !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
+                                                      !otherArmBreaks && !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
                 if ((mergeTargetsLoopExit && !mergeTargetsActiveLoopExit) || mergeIsNextIterationArm)
                     mergeIdx = InvalidBlockId;
                 // one arm ends this region while the other jumps into the latch: join at the region end and
@@ -6564,6 +6565,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
         return static_cast<int32_t>(branchA);
 
     const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
+    if (branchB == loopExit)
+        std::swap(branchA, branchB);
     const auto cacheKey = std::make_tuple(branchA, branchB, loopExit);
     if (const auto it = m_mergeCache.find(cacheKey); it != m_mergeCache.end())
         return it->second;
@@ -6579,7 +6582,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
     // true iff every forward path from x hits M before an exit (back-edges skipped to stay acyclic). The
     // merge must post-dominate both branches; a non-post-dominator causes exponential shared-tail re-lift.
     const auto postDominates = [&](uint32_t m, uint32_t x) -> bool {
-        if (m == x)
+        // a `break` arm leaves the region without flowing into any merge
+        if (m == x || x == loopExit)
             return true;
         boost::unordered_flat_set<uint32_t> seen;
         std::vector<uint32_t> stack{x};

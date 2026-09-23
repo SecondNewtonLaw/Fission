@@ -346,6 +346,8 @@ int main(int argc, char **argv) {
             replayDir = argv[++i];
         else if (a == "--ssa-oracle")
             ssaOracle = true;
+        else if (a == "--opt" && i + 1 < argc)
+            fuzz::optimizationLevel = std::clamp(std::atoi(argv[++i]), 0, 2);
         else if (a == "--repro-mutate" && i + 2 < argc) {
             mutateFile = argv[++i];
             mutateSeed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));

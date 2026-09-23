@@ -40,6 +40,8 @@
 
 namespace fuzz {
     constexpr int kOpt = 1, kDebug = 2;
+    // O2 adds function inlining and loop unrolling, shapes O1 never emits
+    inline int optimizationLevel = kOpt;
 
     inline void EnableLuauFlags() {
         static bool done = false;
@@ -53,7 +55,7 @@ namespace fuzz {
 
     inline bool LuauCompiles(const std::string &source, std::string *bcOut = nullptr) {
         Luau::CompileOptions opts{};
-        opts.optimizationLevel = kOpt;
+        opts.optimizationLevel = optimizationLevel;
         opts.debugLevel = kDebug;
         const std::string bc = Luau::compile(source, opts);
         if (bcOut)
@@ -148,7 +150,7 @@ namespace fuzz {
         Decompiler decompiler{};
         DecompiledOut r{};
         try {
-            auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{kOpt, kDebug});
+            auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{optimizationLevel, kDebug});
             r.code = result.resultCode;
             r.output = result.decompilationOutput;
         } catch (...) {

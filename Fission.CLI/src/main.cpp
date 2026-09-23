@@ -101,6 +101,10 @@ int main(int argc, char **argv) {
         outputFlags |= DecompilerFlags::OptimizeIR;
     if (debugNotes)
         outputFlags |= DecompilerFlags::FissionDebugNotes;
+    int testOptimizationLevel = 1;
+    for (int i = 1; i + 1 < argc; ++i)
+        if (std::strcmp(argv[i], "--opt") == 0)
+            testOptimizationLevel = std::clamp(std::atoi(argv[i + 1]), 0, 2);
     int inputExitCode = 0;
     bool handledInputs = false;
 
@@ -249,7 +253,7 @@ int main(int argc, char **argv) {
                     flag->value = true;
             decompiler.SetDecompileBudget(std::chrono::seconds(120));
             Luau::CompileOptions dopts{};
-            dopts.optimizationLevel = 1;
+            dopts.optimizationLevel = testOptimizationLevel;
             dopts.debugLevel = 2;
             const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::CaptureAST | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test-ast] %s: code=%d\n", argv[i + 1], static_cast<int>(dr.resultCode));
@@ -274,7 +278,7 @@ int main(int argc, char **argv) {
                     flag->value = true;
             decompiler.SetDecompileBudget(std::chrono::seconds(120));
             Luau::CompileOptions dopts{};
-            dopts.optimizationLevel = 1;
+            dopts.optimizationLevel = testOptimizationLevel;
             dopts.debugLevel = 2;
             const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::WriteIRToFile | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test] %s: code=%d (IR -> ir_out.txt)\n", argv[i + 1], static_cast<int>(dr.resultCode));

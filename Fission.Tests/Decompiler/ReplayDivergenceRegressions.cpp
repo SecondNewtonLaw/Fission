@@ -1007,6 +1007,65 @@ probe(nil, nil, nil) probe(nil, true, nil) probe(nil, true, 1) probe(1, nil, nil
 print(table.concat(log, ",")))LUA");
 }
 
+TEST_CASE("Loop audit: code after a break-if stays in the loop body", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n = 0
+local function t()
+    n += 1
+    return n > 2
+end
+local function run(...)
+    repeat
+        if ... then
+            break
+        end
+    until (if t() then function() end else nil)
+    if n then
+        print(n)
+    end
+end
+run() run(1))LUA");
+    CheckSemanticParity(R"LUA(repeat
+    if ... then
+        break
+    end
+until (if t(obj, "") then function(...)
+end else nil);
+if ... then
+end
+if tonumber then
+    v0 //= (not nil);
+end
+for g0_0 in next[table](function(p0, p1, ...)
+end) do
+    if 296 then
+        for i2 = "key", "key" do
+            if math then
+            end
+        end
+    end
+    for i1 = nil, table.field, (nil) do
+        if next[i1] then
+        end
+    end
+end)LUA");
+    CheckSemanticParity(R"LUA(while next(math) do
+    local function f0(p1, p2, p3, ...)
+    end
+    if (if f0 then pairs else f0) then
+        break
+    end
+end
+if { [tostring:get(select, "value")] = (true), [function(p0, p1)
+end] = select } then
+end
+for i1 = ..., v0[nil] do
+    if math[false] then
+    end
+end
+return (#function(p1, p2, p3, ...)
+end);)LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");
