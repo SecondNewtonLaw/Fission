@@ -232,6 +232,13 @@ TEST_CASE("Replay: inline-order checks terminate on mutually dependent defs", "[
     return {  }, v4:set();
 end
 return f0)LUA");
+    CheckSemanticParity(R"LUA(local v0 = (29.714285714285715)[101.42857142857143]
+local v1 = ({ 822, nil })[(v0 and nil)[(6.571428571428571).x]]
+v1[(651 / 863 <= (if game then nil else "\n"))] = (41i)[function()
+    return 548
+end]
+return if (if [[a
+b]] then "end" else select) then nil elseif -39i then true else select)LUA");
 }
 
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {

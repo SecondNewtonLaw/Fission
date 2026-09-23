@@ -152,6 +152,7 @@ class ASTLifter {
     bool ShouldInlineImpl(const LiftedInstruction *inst);
     // ShouldInline inputs remain fixed during a function lift.
     std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
+    std::unordered_set<const LiftedInstruction *> m_shouldInlineActive;
     // Materialized LOADB-diamond booleans cannot fold into table literals.
     std::unordered_set<int32_t> m_diamondBoolRegs;
     static bool CanOperationRaise(LiftedOperation op);

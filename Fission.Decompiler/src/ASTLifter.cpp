@@ -845,6 +845,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_phiConsumers.clear();
     this->m_deferToConditionInline.clear();
     this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
+    this->m_shouldInlineActive.clear();
     this->m_mergeCache.clear();       // keyed by this function's block ids
     this->m_valueArmDuplications = 0;
 
@@ -5340,7 +5341,12 @@ void ASTLifter::ConsumeInlinedInputs(const LiftedInstruction &def) {
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     if (const auto it = m_shouldInlineMemo.find(inst); it != m_shouldInlineMemo.end())
         return it->second;
+    // input checks look backward and effect checks forward, so the query can cycle; a def whose
+    // answer is still being computed stays materialized
+    if (!m_shouldInlineActive.insert(inst).second)
+        return false;
     const bool r = ShouldInlineImpl(inst);
+    m_shouldInlineActive.erase(inst);
     m_shouldInlineMemo[inst] = r;
     return r;
 }
