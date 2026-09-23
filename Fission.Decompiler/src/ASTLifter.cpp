@@ -5690,8 +5690,9 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
             return false;
         if (depth >= 64)
             return true;
+        // a folded constructor evaluates its elements where it renders
         if (CanOperationRaise(node->operation) || node->operation == LiftedOperation::CALL || node->operation == LiftedOperation::CALLFB ||
-            node->operation == LiftedOperation::NAMECALL || node->operation == LiftedOperation::NAMECALLUDATA)
+            node->operation == LiftedOperation::NAMECALL || node->operation == LiftedOperation::NAMECALLUDATA || node->operation == LiftedOperation::NEWTABLE)
             return true;
         if (node->operation != LiftedOperation::MOVE && node->operation != LiftedOperation::NOT && node->operation != LiftedOperation::AND &&
             node->operation != LiftedOperation::ANDK && node->operation != LiftedOperation::OR && node->operation != LiftedOperation::ORK)

@@ -173,6 +173,12 @@ print((if a then true else "x") or "y", if c then 1 else 2))LUA");
     );
 }
 
+TEST_CASE("Replay: a short-circuit over a constructor keeps its elements in place", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local v2 = { {  }, 85i, { v1 }, (94.85714285714286).field } and nil
+local v4 = (-(11i))[{ nil, 38.142857142857146, ["field"] = "x" }]
+v2())LUA");
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)
