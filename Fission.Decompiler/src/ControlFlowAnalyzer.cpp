@@ -568,6 +568,27 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return false;
     };
 
+    const LiftedInstruction *const firstInstruction = func.lpLiftedFunction->instructions.data();
+    std::vector<int32_t> blockAtLeader(func.lpLiftedFunction->instructions.size() + 1, -1);
+    for (const BasicBlock &b : blocks)
+        if (b.lpHead && b.bType != BlockType::Dead)
+            blockAtLeader[b.lpHead - firstInstruction] = static_cast<int32_t>(b.dwBlockId);
+
+    // Luau leaves a while/repeat loop only through the instruction after its JUMPBACK; both the failing test and
+    // every `break` target it. A multi-block condition (`while a or b`) exits from a block other than the header.
+    auto exitAfterLatch = [&](const BasicBlock &latch, const BasicBlock &header) -> std::optional<uint32_t> {
+        if (!latch.lpTail || !header.lpHead || latch.lpTail < header.lpHead)
+            return std::nullopt;
+        const auto afterIndex = static_cast<size_t>(latch.lpTail - firstInstruction) + 1;
+        if (afterIndex >= blockAtLeader.size() || blockAtLeader[afterIndex] < 0)
+            return std::nullopt;
+        const auto &after = blocks[blockAtLeader[afterIndex]];
+        for (const uint32_t pred : after.predecessors)
+            if (pred < blocks.size() && blocks[pred].lpHead && blocks[pred].lpHead >= header.lpHead && blocks[pred].lpTail <= latch.lpTail)
+                return after.dwBlockId;
+        return std::nullopt;
+    };
+
     // A break can bypass an otherwise predecessor-free back-edge in `while true`.
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Continue)
@@ -614,6 +635,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         Explain(blk, "structure: backward JUMP targets B{}; provisional while latch", headerId);
         Explain(header, "structure: B{} backward JUMP targets this block; provisional while header", blk.dwBlockId);
 
+        // lifting reads the exit as a header successor; only a header that never exits itself takes the post-latch block
         std::optional<uint32_t> loopExit;
         for (const uint32_t succ : header.successors) {
             if (!reachesBefore(succ, blk.dwBlockId, header.dwBlockId)) {
@@ -621,6 +643,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 break;
             }
         }
+        if (!loopExit)
+            loopExit = exitAfterLatch(blk, header);
         if (loopExit.has_value()) {
             blk.loopExit = loopExit.value();
             header.loopExit = loopExit.value();
@@ -1019,6 +1043,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             loopExit = succId;
                             break;
                         }
+                    if (!loopExit && block.lpTail->operation == LiftedOperation::JUMP)
+                        loopExit = exitAfterLatch(block, successor);
                     if (loopExit.has_value()) {
                         block.loopExit = loopExit.value();
                         successor.loopExit = loopExit.value();

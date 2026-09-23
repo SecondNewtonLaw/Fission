@@ -438,6 +438,105 @@ for i = 1, 3 do
 end)LUA");
 }
 
+TEST_CASE("Loop: a while whose condition exits past its header still terminates", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n = 0
+while true do
+    n += 1
+    while n % 3 ~= 0 or n < 2 do
+        n += 1
+        print("spin", n)
+    end
+    print("go", n)
+    if n > 10 then
+        break
+    end
+end
+print("done", n))LUA");
+    CheckSemanticParity(R"LUA(local n = 0
+local function step()
+    n += 1
+    return n
+end
+while true do
+    while step() % 3 ~= 0 or n < 2 do
+        print("spin", n)
+    end
+    print("go", n)
+    if n > 8 then
+        return n
+    end
+end)LUA");
+    CheckSemanticParity(R"LUA(local k = 0
+while "value" do
+    k += 1
+    while (k < 3 or tostring(k) == "4") do
+        k += 1
+        print(k)
+    end
+    if k > 6 then
+        break
+    end
+end)LUA");
+}
+
+TEST_CASE("Loop: loops sharing a header keep both loops", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local n, ready = 0, false
+while true do
+    while not ready do
+        n += 1
+        ready = n % 3 == 0
+    end
+    print("go", n)
+    ready = false
+    if n > 10 then
+        break
+    end
+end
+print("done", n))LUA");
+    CheckSemanticParity(R"LUA(local n = 0
+while true do
+    repeat
+        n += 1
+    until n % 4 == 0
+    print("tick", n)
+    if n > 12 then
+        break
+    end
+end
+print("done", n))LUA");
+    CheckSemanticParity(R"LUA(local n, m = 0, 0
+repeat
+    while n < m do
+        n += 1
+    end
+    print("n", n)
+    m += 2
+until m > 6
+print("done", n, m))LUA");
+    CheckSemanticParity(R"LUA(local a, b = 0, 0
+repeat
+    repeat
+        a += 1
+    until a % 2 == 0
+    b += 1
+    print(a, b)
+until b >= 3
+print("done", a, b))LUA");
+    CheckSemanticParity(R"LUA(local n = 0
+for i = 1, 3 do
+    while true do
+        while n < i * 2 do
+            n += 1
+        end
+        print(i, n)
+        if n >= i * 2 then
+            break
+        end
+    end
+end
+print("done", n))LUA");
+}
+
 TEST_CASE("Replay: shared short-circuit arms run on every path", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(math = (if (t.field and ...) then function(p0, p1, p2, ...)
 end else print((true <= false)));)LUA");

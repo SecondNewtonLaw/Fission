@@ -2679,7 +2679,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         }
                         return false;
                     };
-                    if (deferredWhileHeader && !block.loopExit) {
+                    // a header that does not exit itself (`while a or b`) lifts as `while true` whose exit edges break
+                    const bool deferredExit = deferredWhileHeader && block.loopExit && *block.loopExit != latchIdx && *block.loopExit != currentBlockId;
+                    if (deferredWhileHeader && (!block.loopExit || deferredExit)) {
                         whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
                         auto &headerBlock = m_currentFunction->basicBlocks[currentBlockId];
                         constexpr uint32_t kAllLoopFlags = static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
@@ -2700,7 +2702,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         boost::unordered_flat_set<uint32_t> bodyVisited = visited;
                         bodyVisited.erase(currentBlockId);
                         bodyVisited.insert(latchIdx);
+                        if (deferredExit) {
+                            bodyVisited.insert(*block.loopExit);
+                            m_loopExitStack.push_back(*block.loopExit);
+                        }
                         auto bodyStmts = co_await LiftControlFlow(currentBlockId, latchIdx, bodyVisited);
+                        if (deferredExit) {
+                            m_loopExitStack.pop_back();
+                            exitIdx = *block.loopExit;
+                        }
                         if (latchIdx != currentBlockId) {
                             auto latchStmts = LiftBlockInstructions(m_currentFunction->basicBlocks[latchIdx]);
                             bodyStmts.insert(bodyStmts.end(), latchStmts.begin(), latchStmts.end());
