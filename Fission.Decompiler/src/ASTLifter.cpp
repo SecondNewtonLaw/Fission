@@ -4147,6 +4147,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
     }
 
+    if (def->operation == LiftedOperation::LOADNJUMP && def->operands.size() >= 2 && def->operands[1].type == LiftedOperandType::ImmediateBool)
+        return std::make_shared<BooleanLiteralNode>(def->operands[1].value.imm.b);
     if (def->operation == LiftedOperation::LOAD) {
         if (def->operands[1].type == LiftedOperandType::ImmediateNil)
             return std::make_shared<NilLiteralNode>();

@@ -148,6 +148,17 @@ end);)LUA");
 print(t == t))LUA");
 }
 
+TEST_CASE("Replay: a boolean loaded by a jumping load keeps its value", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local a = ...
+local v1 = if a then 1 else next == nil
+print(v1))LUA");
+    CheckSemanticParity(R"LUA(local v0 = pairs(if ("\nhello")[nil] then function()
+end else next == nil)
+local v2 = if function()
+end then next() else -({
+})[v0[false]])LUA");
+}
+
 TEST_CASE("Replay: multiple assignment reads targets before overwriting them", "[Decompiler][ReplayRegress][Semantics]") {
     CheckSemanticParity(R"LUA(for g0_0, g0_1 in pairs(table, print) do
     g0_0, g0_0 = (function(p2, p3, ...)
