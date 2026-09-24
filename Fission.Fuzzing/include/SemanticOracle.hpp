@@ -306,6 +306,7 @@ namespace fuzz {
         enum class Kind { Match, Diverge, Unrunnable } kind = Kind::Unrunnable;
         SemTrace original, decompiled; // for Diverge: the first diverging fixture's traces
         size_t fixture = 0;            // index of the fixture that diverged (or last judged)
+        size_t successful = 0, equalErrors = 0, opaque = 0, skipped = 0;
     };
 
     // Equal errors alone do not establish coverage of the program body.
@@ -316,6 +317,7 @@ namespace fuzz {
         for (size_t i = 0; i < preludeBcs.size(); ++i) {
             SemTrace orig = RunLuauTrace(originalBc, preludeBcs[i]);
             if (orig.status == SemTrace::Status::Timeout || orig.status == SemTrace::Status::LoadFailed) {
+                ++v.skipped;
                 incomplete = true;
                 continue;
             }
@@ -332,6 +334,7 @@ namespace fuzz {
                     v.decompiled = std::move(dec);
                     return v;
                 }
+                ++v.skipped;
                 incomplete = true;
                 continue;
             }
@@ -345,6 +348,12 @@ namespace fuzz {
                 v.decompiled = std::move(dec);
                 return v;
             }
+            if (!orig.comparable || !dec.comparable)
+                ++v.opaque;
+            else if (orig.status == SemTrace::Status::Ok)
+                ++v.successful;
+            else if (orig.status == SemTrace::Status::Error)
+                ++v.equalErrors;
             incomplete |= !orig.comparable || !dec.comparable;
             judgedAny |= orig.status == SemTrace::Status::Ok && orig.comparable && dec.comparable;
             v.original = std::move(orig);

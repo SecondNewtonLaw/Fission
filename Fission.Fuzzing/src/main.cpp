@@ -297,6 +297,7 @@ int main(int argc, char **argv) {
     std::string mutateFile; // --repro-mutate <path> <seed>: compile src, flip bytes by seed, decompile (single-shot)
     std::string semFile;    // --sem-file <path>: decompile one source, run both in the Luau VM, diff traces
     std::string replayDir;  // --replay-dir <path>: validate every saved source finding in one run
+    bool explainUnchecked = false;
     uint32_t mutateSeed = 0;
     bool ssaOracle = false; // --ssa-oracle: compare SSA reaching definitions against VM dataflow (generated or --replay-dir)
 
@@ -344,6 +345,8 @@ int main(int argc, char **argv) {
             semFile = argv[++i];
         else if (a == "--replay-dir" && i + 1 < argc)
             replayDir = argv[++i];
+        else if (a == "--explain-unchecked")
+            explainUnchecked = true;
         else if (a == "--ssa-oracle")
             ssaOracle = true;
         else if (a == "--opt" && i + 1 < argc)
@@ -532,6 +535,11 @@ int main(int argc, char **argv) {
                 );
             } else if (semantics.kind == fuzz::SemVerdict::Kind::Unrunnable) {
                 ++outcomes["SEM_UNCHECKED"];
+                if (explainUnchecked)
+                    std::fprintf(
+                        stderr, "[replay] SEM_UNCHECKED ok=%zu errors=%zu opaque=%zu skipped=%zu %s\n", semantics.successful, semantics.equalErrors,
+                        semantics.opaque, semantics.skipped, path.string().c_str()
+                    );
             } else {
                 ++outcomes["PASS"];
                 const auto originalOps = fuzz::LiftOpcodes(source);

@@ -326,6 +326,17 @@ TEST_CASE("Semantic oracle preserves observable values and reports incomplete ex
         CHECK(compare("local b=buffer.fromstring('x'); return b,b", "return buffer.fromstring('x'),buffer.fromstring('x')") == Kind::Unrunnable);
         CHECK(compare("error(tostring({}))", "error(tostring({}))") == Kind::Unrunnable);
     }
+    SECTION("unchecked verdict records why execution could not establish parity") {
+        const auto prelude = Luau::compile("");
+        const auto errors = fuzz::CompareSemantics(Luau::compile("error('stop')"), Luau::compile("error('stop')"), {prelude});
+        CHECK(errors.kind == Kind::Unrunnable);
+        CHECK(errors.equalErrors == 1);
+        CHECK(errors.successful == 0);
+        const auto opaque = fuzz::CompareSemantics(Luau::compile("return function() end"), Luau::compile("return function() end"), {prelude});
+        CHECK(opaque.kind == Kind::Unrunnable);
+        CHECK(opaque.opaque == 1);
+        CHECK(opaque.successful == 0);
+    }
     SECTION("error differences remain findings") {
         CHECK(compare("error('one')", "error('two')") == Kind::Diverge);
         CHECK(compare("error('FUZZ_TIMEOUT')", "return 1") == Kind::Diverge);
