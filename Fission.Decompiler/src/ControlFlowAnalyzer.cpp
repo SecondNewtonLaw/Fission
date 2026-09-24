@@ -6,6 +6,7 @@
 
 #include "DenominatorAnalysis.hpp"
 #include "Deserializer.hpp"
+#include "SSABuilder.hpp"
 #include "SafetyGuard.hpp"
 
 #include <libassert/assert.hpp>
@@ -244,8 +245,7 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
     }
 }
 
-AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction) {
-    SetDebugFunction(lpLiftedFunction);
+std::vector<BasicBlock> ControlFlowAnalyzer::PartitionBlocks(LiftedFunction *lpLiftedFunction) {
     std::vector<BasicBlock> basicBlocks;
 
     std::set<size_t> leaderIndexes;
@@ -409,6 +409,12 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunctio
 
         basicBlocks.push_back(block);
     }
+    return basicBlocks;
+}
+
+AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction) {
+    SetDebugFunction(lpLiftedFunction);
+    auto basicBlocks = PartitionBlocks(lpLiftedFunction);
 
     std::vector<AnalyzedFunction> subfuncs;
 
@@ -608,6 +614,55 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return std::nullopt;
     };
 
+    // An O2-inlined `return` leaves the loop through code placed inside it, past the natural exit. Every
+    // non-returning exit then runs straight into the return label, which is the loop's real exit.
+    auto joinedExit = [&](uint32_t exit, const BasicBlock &latch, const BasicBlock &header) -> uint32_t {
+        const auto natural = exitAfterLatch(latch, header);
+        if (!natural)
+            return exit;
+        std::vector<bool> region(blocks.size());
+        std::vector<uint32_t> pending{latch.dwBlockId};
+        region[header.dwBlockId] = region[latch.dwBlockId] = true;
+        while (!pending.empty()) {
+            const uint32_t current = pending.back();
+            pending.pop_back();
+            for (const uint32_t pred : blocks[current].predecessors)
+                if (pred < blocks.size() && !region[pred] && pred > header.dwBlockId && pred < latch.dwBlockId) {
+                    region[pred] = true;
+                    pending.push_back(pred);
+                }
+        }
+        const auto chain = [&](uint32_t start) {
+            std::vector<uint32_t> path{start};
+            for (int hops = 0; hops < 16 && blocks[path.back()].successors.size() == 1 && blocks[path.back()].successors[0] > path.back(); ++hops)
+                path.push_back(blocks[path.back()].successors[0]);
+            return path;
+        };
+        std::vector<std::vector<uint32_t>> exits;
+        for (uint32_t id = header.dwBlockId; id <= latch.dwBlockId; ++id) {
+            if (!region[id])
+                continue;
+            for (const uint32_t succ : blocks[id].successors) {
+                if (succ >= blocks.size() || region[succ] || std::ranges::any_of(exits, [&](const auto &path) { return path.front() == succ; }))
+                    continue;
+                if (!blocks[succ].successors.empty())
+                    exits.push_back(chain(succ));
+            }
+        }
+        const bool bypassesNatural = std::ranges::any_of(exits, [&](const auto &path) {
+            return path.front() < latch.dwBlockId && std::ranges::find(path, *natural) == path.end();
+        });
+        if (exits.size() < 2 || !bypassesNatural)
+            return exit;
+        for (const uint32_t candidate : exits.front()) {
+            if (candidate <= latch.dwBlockId)
+                continue;
+            if (std::ranges::all_of(exits, [&](const auto &path) { return std::ranges::find(path, candidate) != path.end(); }))
+                return candidate == *natural ? exit : candidate;
+        }
+        return exit;
+    };
+
     // True when `start` re-enters `header` through another back-edge without first passing an enclosing loop's
     // header (which precedes it): the loops share this header, so `start` is inside the outer one, not an exit.
     auto returnsToSharedHeader = [&](uint32_t start, const BasicBlock &header, const BasicBlock &latch) {
@@ -679,12 +734,13 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         std::optional<uint32_t> loopExit;
         for (const uint32_t succ : header.successors) {
             if (!reachesBefore(succ, blk.dwBlockId, header.dwBlockId) && !returnsToSharedHeader(succ, header, blk)) {
-                loopExit = succ;
+                loopExit = joinedExit(succ, blk, header);
                 break;
             }
         }
         if (!loopExit)
-            loopExit = exitAfterLatch(blk, header);
+            if (const auto natural = exitAfterLatch(blk, header))
+                loopExit = joinedExit(*natural, blk, header);
         if (loopExit.has_value()) {
             blk.loopExit = loopExit.value();
             header.loopExit = loopExit.value();
@@ -1074,11 +1130,12 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     std::optional<uint32_t> loopExit;
                     for (const uint32_t succId : successor.successors)
                         if (!reachesBefore(succId, block.dwBlockId, successor.dwBlockId) && !returnsToSharedHeader(succId, successor, block)) {
-                            loopExit = succId;
+                            loopExit = joinedExit(succId, block, successor);
                             break;
                         }
                     if (!loopExit && block.lpTail->operation == LiftedOperation::JUMP)
-                        loopExit = exitAfterLatch(block, successor);
+                        if (const auto natural = exitAfterLatch(block, successor))
+                            loopExit = joinedExit(*natural, block, successor);
                     if (loopExit.has_value()) {
                         block.loopExit = loopExit.value();
                         successor.loopExit = loopExit.value();
@@ -1227,8 +1284,114 @@ AnalyzedFunction ControlFlowAnalyzer::DetermineBasicBlocks(LiftedFunction *lpLif
     return analyzed;
 }
 
+// Luau copies the `return` after an if-chain into every arm. When the copies return a variable the chain reads or
+// assigns, the earlier copies become jumps to the last one, restoring the chain's shared exit.
+bool ControlFlowAnalyzer::ConvergeReturns(AnalyzedFunction &func) {
+    auto &blocks = func.basicBlocks;
+    const auto dominators = AnalyzeDenominators(func);
+    const auto idom = [&](int32_t id) {
+        const auto it = dominators.find(id);
+        return it == dominators.end() ? -1 : it->second.idom;
+    };
+
+    std::map<std::pair<int32_t, int32_t>, std::vector<uint32_t>> copies;
+    for (const auto &block : blocks) {
+        const auto *tail = block.lpTail;
+        if (block.bType != BlockType::Dead && tail && tail->operation == LiftedOperation::RETURN && tail->operands.size() >= 2 &&
+            tail->operands[0].type == LiftedOperandType::Register && tail->operands[1].value.imm.n >= 2 && dominators.contains(block.dwBlockId))
+            copies[{tail->operands[0].value.reg, tail->operands[1].value.imm.n}].push_back(block.dwBlockId);
+    }
+
+    for (const auto &[shape, members] : copies) {
+        if (members.size() < 2)
+            continue;
+        const int32_t first = shape.first, last = shape.first + shape.second - 2;
+        const uint32_t kept = members.back();
+
+        // a temporary each arm computes afresh is not a shared variable; an arm that only returns is a guard clause
+        bool live = false, work = false;
+        for (const uint32_t id : members) {
+            std::set<int32_t> written;
+            for (auto *inst = blocks[id].lpHead; inst <= blocks[id].lpTail; ++inst) {
+                if (id != kept && inst->operation != LiftedOperation::NOP && inst->operation != LiftedOperation::RETURN)
+                    work = true;
+                for (size_t i = 0; i < inst->operands.size(); ++i) {
+                    const auto &operand = inst->operands[i];
+                    const auto access = SSABuilder::GetRegisterAccess(*inst, i);
+                    if (operand.type == LiftedOperandType::Register && operand.value.reg >= first && operand.value.reg <= last &&
+                        (access == AccessType::Read || access == AccessType::ReadWrite) && !written.contains(operand.value.reg))
+                        live = true;
+                }
+                for (size_t i = 0; i < inst->operands.size(); ++i) {
+                    const auto &operand = inst->operands[i];
+                    const auto access = SSABuilder::GetRegisterAccess(*inst, i);
+                    if (operand.type == LiftedOperandType::Register && operand.value.reg >= first && operand.value.reg <= last &&
+                        (access == AccessType::Write || access == AccessType::ReadWrite))
+                        written.insert(operand.value.reg);
+                }
+            }
+        }
+        if (!live || !work)
+            continue;
+
+        int32_t head = static_cast<int32_t>(members.front());
+        for (const uint32_t id : members) {
+            std::set<int32_t> ancestors;
+            for (int32_t cursor = head; cursor != -1; cursor = idom(cursor))
+                ancestors.insert(cursor);
+            int32_t cursor = static_cast<int32_t>(id);
+            while (cursor != -1 && !ancestors.contains(cursor))
+                cursor = idom(cursor);
+            head = cursor;
+        }
+        if (head < 0)
+            continue;
+
+        // the copies must hang off the chain through forward edges only; a loop in between would turn a copy into a break
+        bool straight = std::ranges::none_of(blocks[head].predecessors, [&](uint32_t pred) { return pred >= static_cast<uint32_t>(head); });
+        std::set<uint32_t> region(members.begin(), members.end());
+        std::vector<uint32_t> pending(members.begin(), members.end());
+        while (straight && !pending.empty()) {
+            const uint32_t id = pending.back();
+            pending.pop_back();
+            if (std::ranges::any_of(blocks[id].successors, [&](uint32_t succ) { return succ <= id; }))
+                straight = false;
+            if (id == static_cast<uint32_t>(head))
+                continue;
+            for (const uint32_t pred : blocks[id].predecessors) {
+                if (pred >= id)
+                    straight = false;
+                else if (region.insert(pred).second)
+                    pending.push_back(pred);
+            }
+        }
+        if (!straight)
+            continue;
+
+        auto *const instructions = func.lpLiftedFunction->instructions.data();
+        const auto target = blocks[kept].lpTail - instructions;
+        for (const uint32_t id : members) {
+            if (id == kept)
+                continue;
+            auto *copy = blocks[id].lpTail;
+            copy->operation = LiftedOperation::JUMP;
+            copy->operands.assign(1, LiftedOperand{});
+            copy->operands[0].type = LiftedOperandType::ImmediateInteger;
+            copy->operands[0].value.imm.n = static_cast<int32_t>(target - (copy - instructions));
+            copy->instructionRemarks = std::format("INFO: copied return converges on PC {}", target);
+        }
+        Explain(blocks[kept], "optimize: {} copies of this return converge here", members.size());
+        return true;
+    }
+    return false;
+}
+
 void ControlFlowAnalyzer::OptimizeGraph(AnalyzedFunction &func) {
     SetDebugFunction(func.lpLiftedFunction);
+    for (int round = 0; round < 64 && this->ConvergeReturns(func); ++round) {
+        func.basicBlocks = this->PartitionBlocks(func.lpLiftedFunction);
+        this->LinkBasicBlocks(func.basicBlocks);
+    }
     this->OptimiseGraphInternal(func.basicBlocks);
     for (auto &f : func.innerFunctions)
         this->OptimizeGraph(f);

@@ -6,20 +6,33 @@
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <string>
+#include <utility>
 
 namespace {
-    constexpr Luau::CompileOptions kOptions{fuzz::kOpt, fuzz::kDebug};
+    struct CompileLevels {
+        int optimization, debug;
+        CompileLevels(int optimizationLevel, int debugLevel)
+            : optimization(std::exchange(fuzz::optimizationLevel, optimizationLevel))
+            , debug(std::exchange(fuzz::debugLevel, debugLevel)) {}
+        ~CompileLevels() {
+            fuzz::optimizationLevel = optimization;
+            fuzz::debugLevel = debug;
+        }
+    };
 
-    void CheckSemanticParity(const std::string &source) {
+    // Roblox ships debug level 1: no upvalue names reach the decompiler.
+    void CheckSemanticParity(const std::string &source, int optimizationLevel = fuzz::kOpt, int debugLevel = fuzz::kDebug) {
+        const CompileLevels levels(optimizationLevel, debugLevel);
+        const Luau::CompileOptions options{optimizationLevel, debugLevel};
         fuzz::EnableLuauFlags();
         const auto result = fuzz::FullDecompile(source);
         REQUIRE(result.code == DecompileResult::Success);
         INFO(result.output);
-        const auto originalBytecode = Luau::compile(source, kOptions);
-        const auto reconstructedBytecode = Luau::compile(result.output, kOptions);
+        const auto originalBytecode = Luau::compile(source, options);
+        const auto reconstructedBytecode = Luau::compile(result.output, options);
         for (size_t i = 0; i < fuzz::kSemPreludeCount; ++i) {
             INFO("fixture " << i);
-            const auto prelude = Luau::compile(fuzz::kSemPreludes[i], kOptions);
+            const auto prelude = Luau::compile(fuzz::kSemPreludes[i], options);
             const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
             const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
             CHECK(reconstructed.status == original.status);
@@ -1098,4 +1111,1014 @@ else
 end
 for g0_0 in string({ pairs, [t] = pairs, false, [0] = 0 }) do
 end)LUA");
+}
+
+TEST_CASE("Compiler audit: a multi-value constructor tail survives a reused element register", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(local function multi() return "m1", "m2" end
+print(#{multi()})
+local t = {multi(), multi()}
+print(#t, t[1], t[2], t[3]))LUA");
+}
+
+TEST_CASE("Compiler audit: a pure value is not inlined past a write that reuses its input's name", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(t(142)
+local v1 = { ["data"] = 0, ["a-b"] = 0, ["y"] = "value" } or ((nil))
+local v2 = ("")[function()
+end]
+v0(v1(not "key")))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(R"LUA(local a = {x = 1} or nil
+local b = tostring(#"abc")
+print(type(a), a and a.x, b))LUA", 1, 1);
+}
+
+TEST_CASE("Compiler audit: the right operand of a register and/or stays eagerly evaluated", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local v0 = -(172i)
+local v1 = function()
+end or v0
+return (47i > nil)[function()
+end])LUA";
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(R"LUA(local calls = 0
+local function f() calls += 1 return calls end
+local a = f()
+local b = tostring or a
+print(b == tostring, calls))LUA", 1, 1);
+}
+
+TEST_CASE("Compiler audit: a reassigned recursive local function stays one variable", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local calls = 0
+local function fib(n)
+    calls += 1
+    if n < 2 then return n end
+    return fib(n - 1) + fib(n - 2)
+end
+local function memo(f)
+    local cache = {}
+    return function(n)
+        local v = cache[n]
+        if v == nil then
+            v = f(n)
+            cache[n] = v
+        end
+        return v
+    end
+end
+fib = memo(fib)
+print(fib(20), calls))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a raising value is not moved past a for-loop prep", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(R"LUA(repeat
+    local v0 = (0 .. next);
+    for i1 = "", 0 do
+        v0();
+    end
+until function(p0, p1, ...)
+end)LUA");
+}
+
+TEST_CASE("Compiler audit: a closure chosen by and/or keeps its value", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local enabled = tonumber("1")
+local disabled = tonumber("x")
+local h = enabled and function() return "a" end or print
+local g = disabled and function() return "b" end or tostring
+print(type(h), h == print, h and h(), g == tostring)
+local v0 = (function()
+end)
+local v1 = v0 and ((function()
+end)) or (false)["a-b"]
+v1[v0] = - -0)LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a local function capturing itself keeps its name without debug names", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function self() return self end
+print(self() == self)
+local function outer()
+    local function rec(n) if n > 0 then return rec(n - 1) end return n end
+    return rec
+end
+print(outer()(3)))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+    const auto reassigned = R"LUA(local function f0(n)
+    if n > 0 then return f0(n - 1) end
+    return "done"
+end
+print(f0(3))
+for i = 1, 2 do
+    print(pcall(f0, i))
+    f0 = tostring
+end
+print(f0(7)))LUA";
+    CheckSemanticParity(reassigned, 1, 1);
+    CheckSemanticParity(reassigned, 1, 2);
+}
+
+TEST_CASE("Compiler audit: an upvalue written through nested closures stays one variable", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function outer()
+    local x = 1
+    local function mid()
+        local function inner() x += 1 return x end
+        return inner
+    end
+    return mid()
+end
+local ii = outer()
+ii()
+print(ii()))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: an inlined return leaves a while or repeat loop through its return label", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local log = {}
+local function retLoop(p)
+    local n = 0
+    repeat
+        n += 1
+        if n == p then return "r" .. n end
+    until n > 3
+    return "none"
+end
+local function firstBig(t)
+    local i = 0
+    while i < #t do
+        i += 1
+        if t[i] > 10 then return tostring(t[i]) end
+    end
+    return "none"
+end
+local function nested(n)
+    local k = 0
+    repeat
+        k += 1
+        if k % 2 == 0 then
+            if k > n then return "even" .. k end
+        end
+    until k > 6
+    return "end" .. k
+end
+local function callRet(n)
+    local k = 0
+    while true do
+        k += 1
+        if k == n then return string.rep("x", k) end
+        if k > 5 then return "big" end
+    end
+end
+for p = 1, 3 do table.insert(log, retLoop(p)) end
+table.insert(log, retLoop(9))
+table.insert(log, firstBig({5, 20, 7}))
+table.insert(log, firstBig({1, 2}))
+for n = 0, 7 do table.insert(log, nested(n)) end
+for n = 1, 7 do table.insert(log, callRet(n)) end
+print(table.concat(log, ",")))LUA";
+    CheckSemanticParity(source, 2, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 1, 2);
+}
+
+TEST_CASE("Compiler audit: loop closures keep per-iteration locals when the register is reused", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local log = {}
+local function put(x) table.insert(log, tostring(x)) end
+local fns = {}
+local function captured(p)
+    local i = 0
+    repeat
+        i += 1
+        local c = i * 10
+        fns[#fns + 1] = function() return c end
+        if i == p then break end
+    until c >= 30
+    local s = "cap" .. i
+    put(s)
+end
+captured(2)
+local n = 0
+while n < 3 do
+    n += 1
+    local d = n * 2
+    fns[#fns + 1] = function() return d end
+end
+local after = tostring(n)
+put(after)
+for _, fn in ipairs(fns) do put(fn()) end
+print(table.concat(log, ",")))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: a snapshot of a global keeps its value after the global is written", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(counter = 0
+local function bump()
+    counter = counter + 1
+end
+local old = counter
+counter = 10
+print(old, counter)
+local snap = counter
+bump()
+print(snap, counter)
+local g = counter
+for i = 1, 3 do
+    print(g)
+    counter = counter + 1
+end
+local none = not counter
+local either = counter or 5
+counter = nil
+print(none, either))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a snapshot of an upvalue keeps its value after the upvalue is written", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local up = 1
+local function bump()
+    up = up * 3
+end
+local function g()
+    local o = up
+    up = up + 1
+    local p = up
+    bump()
+    return o, p, up
+end
+print(g())
+print(g()))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a copy of a captured local keeps its value after a call writes the local", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local x = 1
+local function inc()
+    x = x + 1
+end
+local a = x
+inc()
+print(a, x)
+local flag = false
+local function flip()
+    flag = not flag
+end
+local was = not flag
+flip()
+print(was, flag)
+local t = {}
+local s = x
+inc()
+t[1] = s
+print(t[1], x))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a multi-value call keeps every value when its register later holds a captured local", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto spread = R"LUA(print(obj(false));
+repeat
+    repeat
+        ipairs("x", tostring);
+    until false;
+until (((12)));
+local function f0(p1, p2, p3, ...)
+    p2();
+end
+local function f1(p2, ...)
+    f1(nil);
+    f0();
+end
+f1, f1 = (((print[nil]))), math[f0]();)LUA";
+    CheckSemanticParity(spread, 1, 1);
+    CheckSemanticParity(spread, 1, 2);
+    CheckSemanticParity(spread, 2, 2);
+    const auto argument = R"LUA(t(obj(("hello")));
+while tostring[print]:set() do
+end
+local v0, v1 = { [true] = print, y = tonumber, data = select }, (#0);
+if function(p2, p3)
+v1, v0 = p3, nil;
+end then
+end)LUA";
+    CheckSemanticParity(argument, 1, 1);
+    CheckSemanticParity(argument, 1, 2);
+    CheckSemanticParity(argument, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a reassigned local function captured by itself keeps one name through its loop merge", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f0(...)
+    f0(0, 0);
+end
+while ((f0(false, print))) do
+    f0 //= ((next));
+end
+return function(p2, p3, p4)
+f0(p2);
+end;)LUA";
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a condition's value term keeps its else edge when the then-body starts with a test", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local out = {}
+local function g(sel, ip)
+    if sel and (if ip then nil else 137.75) then
+        if ip == 2 then
+            table.insert(out, "A2")
+        end
+    else
+        table.insert(out, "B2")
+        for _ in pairs({}) do
+        end
+    end
+end
+g(true, true)
+g(true, false)
+g(false, true)
+g(true, 2)
+print(table.concat(out, ",")))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: unused leading results of a call keep later results in place", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function two()
+    return 1, 2
+end
+local _, b = two()
+print(b)
+local p, q, r = string.find("xxabc", "(a)(b)")
+print(r)
+local first, _, third = string.byte("xyz", 1, 3)
+print(first, third))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a constructor field reading a local declared after the table stays a store", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local v1 = {
+    ["\n"] = -28i,
+    ["x\n]"] = [[a
+b]],
+    nil,
+    ["end"] = 93i,
+}
+local v2 = {  }
+v1[0] = v2(-54i, 65i).field)LUA";
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a debug local reusing a table-field closure's register stays local", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local counters = {}
+for i = 1, 2 do
+    local mt = { __index = function(_, key)
+        return key
+    end }
+    local total = i * 10
+    counters[i] = function(step)
+        total += step
+        return total, mt.__index(nil, step)
+    end
+end
+print(counters[1](1), counters[2](1), counters[1](1)))LUA";
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: closures written in a constructor or a return stay there", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local backing = { value = 8 }
+local proxy = setmetatable({}, { __index = function(_, key)
+    return backing[key]
+end, __newindex = function(_, key, assigned)
+    backing[key] = assigned
+end })
+local list = { function() return 1 end, function() return 2 end }
+local M = {}
+function M.run()
+    return 3
+end
+local function make(n)
+    return function(extra)
+        return n + extra
+    end
+end
+proxy.value = 9
+print(proxy.value, list[1](), list[2](), M.run(), make(2)(3)))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 2);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    for (const char *expected : {"__index = function(", "__newindex = function(", "return function(", ".run()"})
+        CHECK(output.find(expected) != std::string::npos);
+    CHECK(output.find("local function __index") == std::string::npos);
+    CHECK(output.find("run = function") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: an elseif chain before a return keeps its chain and branch order", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function full(step)
+    if step == 0 then
+        print("zero")
+    elseif step > 0 then
+        print("up")
+    else
+        print("down")
+    end
+    return step
+end
+local function partial(step)
+    if step == 0 then
+        print("zero")
+    elseif step > 0 then
+        print("up")
+    end
+    return step
+end
+print(full(1), full(-1), full(0), partial(1), partial(-1), partial(0)))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    size_t chains = 0;
+    for (auto at = output.find("elseif 0 < arg0 then\n        print(\"up\")"); at != std::string::npos; at = output.find("elseif 0 < arg0 then\n        print(\"up\")", at + 1))
+        ++chains;
+    CHECK(chains == 2);
+    CHECK(output.find("not (0 < arg0)") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: an empty while after a loop sharing the repeat header still tests its condition", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local t = setmetatable({}, { __index = function(_, key)
+    print("get", key)
+    return nil
+end })
+local rounds = 0
+repeat
+    while rounds > 5 do
+        print("never")
+    end
+    while t.field do
+    end
+    rounds += 1
+until rounds > 1
+print(rounds))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: arms assigning a local before a shared return keep the assignment and the chain", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function advance(value, tag)
+    print(tag)
+    return value + tag
+end
+local function dispatch(selector)
+    local result = 15
+    if selector == 0 then
+        result = advance(result, 0)
+    elseif selector == 1 then
+        result = advance(result, 1)
+    elseif selector == 2 then
+    else
+        result = advance(result, 3)
+    end
+    return result
+end
+print(dispatch(0), dispatch(1), dispatch(2), dispatch(3)))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("elseif arg0 == 1 then\n        v1 = advance(v1, 1)") != std::string::npos);
+    CHECK(output.find("return v2") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a nested continue stays a continue instead of copying the loop tail", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(for i = 1, 4 do
+    if i > 1 then
+        if i == 2 then
+            continue
+        end
+        print("a", i)
+    end
+    print("b", i)
+end)LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("continue") != std::string::npos);
+    CHECK(output.find("print(\"b\", i)") == output.rfind("print(\"b\", i)"));
+    CHECK(output.find("else") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a constructor read by nothing else builds its fields once", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(if { k = t.field } then
+end
+tostring[(("hello"))](tonumber(print, table), function(p0, p1, p2)
+end))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a method defined after a mixed constructor stays a definition", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local obj = { value = 6, 6 }
+function obj:bump(step)
+    self.value += step
+    return self.value
+end
+print(obj:bump(2), obj[1]))LUA";
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+
+    const CompileLevels levels(1, 2);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find(":bump(") != std::string::npos);
+    CHECK(output.find("bump = function") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a captured local reusing a register stays local in each loop iteration", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local getters = {}
+for i = 1, 2 do
+    local t = {}
+    local x = tostring(i)
+    t.f = function()
+        return x
+    end
+    local u = { id = i }
+    u.self = function()
+        return u
+    end
+    getters[i] = u.self
+end
+print(getters[1]().id, getters[2]().id))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a compound member assignment loads its target before the right-hand side runs", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local backing = { value = 2, 2 }
+local proxy = setmetatable({}, { __index = function(ignored, key)
+    print("get", key)
+    return backing[key]
+end, __newindex = function(ignored, key, assigned)
+    print("set", key, assigned)
+    backing[key] = assigned
+end })
+local function receiver()
+    print("receiver")
+    return proxy
+end
+local function operand(value)
+    print("rhs", value)
+    return value, 0
+end
+local total = 0
+for outer = 1, 2 do
+    for inner = 1, 4 do
+        if inner % 2 == 0 then
+            continue
+        end
+        receiver().value += operand(inner)
+        total += backing.value
+    end
+end
+local function capture(step)
+    total += step
+    return total, backing.value
+end
+print(capture(1))
+return total, backing.value)LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: compound assignments to members, upvalues and globals keep their operator", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(X, K = 3, 1
+local t = { v = 1, w = 2, 3, 4 }
+local x, k = X, K
+local function get()
+    return t, x, k
+end
+t.v += x
+t.w -= 1
+t[k] *= x
+t[2] //= 2
+get().v += x
+t.w = t.w + x
+G = 1
+G += 1
+local total = 0
+local function bump(step)
+    total += step
+    return total, tostring(step)
+end
+print(bump(2), t.v, t.w, t[1], t[2], G))LUA";
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 2);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    for (const char *expected : {"t.v += x", "t.w -= 1", "t[k] *= x", "t[2] //= 2", "get().v += x", "t.w = t.w + x", "G += 1", "total += ", "return total, tostring("})
+        CHECK(output.find(expected) != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: constructors passed as arguments or holding call results stay in place", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local backing = { value = 8 }
+local proxy = setmetatable({}, { __index = function(_, key)
+    return backing[key]
+end })
+local n = 0
+local function tick()
+    n += 1
+    return n
+end
+local a = math.floor(tick() / 2)
+local b = setmetatable({}, nil)
+local c = rawlen({ 1, 2 })
+local keyed = { k = tostring(1) }
+local mixed = { k = tostring(2), 5 }
+print({ k = { j = tick() } })
+print({ k = tick() }, tick())
+local s = { a = tick(), b = { c = tick() } }
+print(rawlen({ tick(), tick() }), select("#", { k = tick() }))
+print(proxy.value, a, b, c, keyed.k, mixed.k, mixed[1], s.a, s.b.c, n))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    for (const char *expected : {"setmetatable({  }, {\n    __index = function(", "setmetatable({  }, nil)", "rawlen({ 1, 2 })", "{ k = tostring(1) }",
+                                 "{ k = tostring(2), 5 }", "print({ k = { j = tick() } })", "print({ k = tick() }, tick())", "{ a = tick(), b = { c = tick() } }",
+                                 "print(rawlen({ tick(), tick() }), select(\"#\", { k = tick() }))"})
+        CHECK(output.find(expected) != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a table built before a constructor is not moved after that constructor's raising fields", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local made = 0
+local function make()
+    made += 1
+    error("make " .. made, 0)
+end
+local function build()
+    local first = { -38, key = make(), 161 }
+    local second = { data = (true).field, false, first(45) }
+    return second
+end
+print(pcall(build))
+print(made))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a constructor field reading earlier locals folds without reading a later value", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local g = tonumber("1")
+local t = { x = g }
+g = tonumber("5")
+local h = tonumber("2")
+local u = { h, k = h }
+h = tonumber("7")
+local w = tonumber("3")
+local r = { y = -w }
+w = tonumber("8")
+print(t.x, g, u[1], u.k, h, r.y, w))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    for (const char *expected : {"= { x = v0 }", "= { v2, k = v2 }", "= { y = -v4 }"})
+        CHECK(output.find(expected) != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: code after an if whose arm returns early runs on every path", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local ticks = 0
+local function wait()
+    ticks += 1
+    if ticks > 3 then
+        error("stop", 0)
+    end
+end
+local function run(a, b)
+    if a then
+        print("a")
+    else
+        if b then
+            return
+        end
+    end
+    print("loop")
+    while true do
+        wait()
+    end
+end
+local function once(a, b)
+    if a then
+        print("a")
+    else
+        if b then
+            return
+        end
+    end
+    for i = 1, 2 do
+        print(i)
+    end
+end
+print(pcall(run, true, false))
+ticks = 0
+print(pcall(run, false, false))
+print(pcall(run, false, true))
+once(true, false)
+once(false, false)
+once(false, true))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: returns copied into an elseif chain's arms converge after the chain", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function advance(value, tag)
+    print(tag)
+    return value + tag
+end
+local function dispatch(selector)
+    local result = 16
+    if selector == 0 then
+        result = advance(result, 0)
+    elseif selector == 1 then
+        result = advance(result, 1)
+    elseif selector == 2 then
+        result = advance(result, 2)
+    else
+        result = advance(result, 3)
+    end
+    return result
+end
+print(dispatch(0), dispatch(1), dispatch(2), dispatch(3)))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    fuzz::EnableLuauFlags();
+    {
+        const CompileLevels levels(1, 1);
+        const auto output = fuzz::FullDecompile(source).output;
+        INFO(output);
+        CHECK(output.find("local v1 = 16\n    if arg0 == 0 then\n        v1 = advance(v1, 0)\n    elseif arg0 == 1 then") != std::string::npos);
+        CHECK(output.find("    elseif arg0 == 2 then\n        v1 = advance(v1, 2)\n    else\n        v1 = advance(v1, 3)\n    end\n    return v1\n") != std::string::npos);
+    }
+    {
+        const CompileLevels levels(2, 1);
+        const auto output = fuzz::FullDecompile(source).output;
+        INFO(output);
+        CHECK(output.find("local v1 = 16\n    if arg0 == 0 then\n        print(0)\n        v1 += 0\n    elseif arg0 == 1 then") != std::string::npos);
+        CHECK(output.find("    else\n        print(3)\n        v1 += 3\n    end\n    return v1\n") != std::string::npos);
+    }
+}
+
+TEST_CASE("Compiler audit: a closing if keeps its source arm order without copied returns", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(x)
+    if x ~= nil then
+        print(1)
+    else
+        print(2)
+    end
+end
+local function g(x)
+    if x == 1 then
+        print(1)
+    elseif x == 2 then
+        print(2)
+    else
+        print(3)
+    end
+end
+f(nil)
+f(1)
+g(1)
+g(2)
+g(3))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("if arg0 ~= nil then\n        print(1)\n    else\n        print(2)\n    end\nend") != std::string::npos);
+    CHECK(output.find("if arg0 == 1 then\n        print(1)\n    elseif arg0 == 2 then\n        print(2)\n    else\n        print(3)\n    end\nend") != std::string::npos);
+    CHECK(output.find("return\n") == std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a loop condition keeps a raising constructor after the index before it", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local seen = 0
+local obj = setmetatable({}, { __index = function(_, key)
+    seen += 1
+    print("index", key)
+    return {}
+end })
+local ok, message = pcall(function()
+    repeat
+    until obj[true][{ [nil] = ipairs, y = "hello" }]
+end)
+print(ok, seen)
+ok = pcall(function()
+    while obj[false][{ x = true, [nil] = true }] do
+    end
+end)
+print(ok, seen))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: closures past the 256th function keep their own bodies", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local results = {}\n";
+    for (int i = 0; i < 300; ++i)
+        source += std::format("results[{}] = function(...) return {}, select('#', ...) end\n", i + 1, i);
+    source += "local cases = { first = function(x) return x .. 'a' end, rest = function(...) return ... end }\n"
+              "print(results[1](), results[257](1, 2), results[300](), cases.first('b'), cases.rest(4, 5))\n";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: a loop variable read inside a materialized boolean term keeps its name", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local parts = { { Name = "Torso", Anchored = false }, { Name = "Other", Anchored = false }, { Name = "Head", Anchored = true } }
+local function run(speaker)
+    for _, part in pairs(parts) do
+        if speaker and part.Anchored == false and part.Name == "Torso" == false and part.Name == "Head" == false then
+            print(part.Name)
+        end
+    end
+end
+run(true))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("v.Name == \"Torso\" ~= false") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a self-referencing local function reassigned in a branch stays local", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f0()
+    return f0
+end
+if not tonumber("1") then
+    f0 = 5
+end
+print(f0 == f0(), rawget(_G, "f0")))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("local function f0()") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: an and-condition holding a constructor keeps its else arm", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local t = { [true] = 1 }
+local function check(flag)
+    if flag and (t[true] == { [math] = pairs }) then
+    else
+        print("else", flag)
+    end
+end
+check(false)
+check(true))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+
+    const CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("if not arg0 or v0[true] ~= { [math] = pairs } then") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: inlined closures capture distinct arguments", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(
+        R"LUA(local function f(n)
+    return function() return n end
+end
+return f(2)(), f(-1)())LUA",
+        2, 2
+    );
+}
+
+TEST_CASE("Compiler audit: variadic SETLIST after a value branch keeps every result", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(c)
+    local function multi() return 7, 8, 9 end
+    local t = {if c then 1 else 2, multi()}
+    return t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: variadic SETLIST keeps preceding keyed and chunk stores", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto keyed = R"LUA(local function f(c)
+    local function multi() return 7, 8, 9 end
+    local t = {x = 5, if c then 1 else 2, multi()}
+    return t.x, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    const auto chunked = R"LUA(local function f(c)
+    local function multi() return 7, 8, 9 end
+    local t = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, if c then 17 else 18, multi()}
+    return t[16], t[17], t[18], t[19], t[20]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(keyed, 1, 1);
+    CheckSemanticParity(keyed, 2, 2);
+    CheckSemanticParity(chunked, 1, 1);
+    CheckSemanticParity(chunked, 2, 2);
+}
+
+TEST_CASE("Compiler audit: variadic SETLIST keeps a stable computed key", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(c)
+    local function multi() return 7, 8, 9 end
+    local k = if c then "x" else "y"
+    local t = {[k] = 5, if c then 1 else 2, multi()}
+    return t.x, t.y, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+    CheckSemanticParity(
+        R"LUA(local function f(c)
+    local function multi() return 7, 8, 9 end
+    local t = {[if c then "x" else "y"] = 5, if c then 1 else 2, multi()}
+    return t.x, t.y, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA",
+        2, 2
+    );
 }

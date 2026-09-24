@@ -4,6 +4,7 @@
 #include "Analysis/ConstantPropagation.hpp"
 #include "Analysis/RobloxTypeInferer.hpp"
 #include "Rewriters/AttributeRenamer.hpp"
+#include "Rewriters/ChildLookupRenamer.hpp"
 #include "Rewriters/ClassMethodRewriter.hpp"
 #include "Rewriters/ConstructorResultRenamer.hpp"
 #include "Rewriters/DeadLocalEliminator.hpp"
@@ -21,6 +22,7 @@
 #include "Rewriters/ScopeAwareRenamer.hpp"
 #include "Rewriters/ScopeBlockIntroducer.hpp"
 #include "Rewriters/SelfAssignmentEliminator.hpp"
+#include "Rewriters/ShortCircuitChainFolder.hpp"
 #include "Rewriters/ShortCircuitFolder.hpp"
 #include "SafetyGuard.hpp"
 #include "SourceGenerator/AstJsonSerializer.hpp"
@@ -821,41 +823,47 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const size_t statementsBeforeRewrite = liftedAST.statements.size();
 
     const auto astRewriteStart = std::chrono::steady_clock::now();
+    std::string rewriterTimings;
+    const auto timeRewriter = [&](const char *name, auto &&run) {
+        const auto start = std::chrono::steady_clock::now();
+        run();
+        if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown)
+            rewriterTimings += std::format("\t\t{}: {}\n", name, std::chrono::duration<float>(std::chrono::steady_clock::now() - start));
+    };
+    timeRewriter("Short-Circuit Chain Folder", [&] { ShortCircuitChainFolder{}.Run(liftedAST.statements); });
     // Hoisting must run while names still identify registers and before later passes reshape scopes.
-    DeclarationHoister{}.Run(liftedAST.statements);
+    timeRewriter("Declaration Hoister 1", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
 
-    const auto shortCircuitStart = std::chrono::steady_clock::now();
-    ShortCircuitFolder{}.Run(liftedAST.statements);
-    const auto shortCircuitEnd = std::chrono::steady_clock::now();
+    timeRewriter("Short-Circuit Folder", [&] { ShortCircuitFolder{}.Run(liftedAST.statements); });
     // Method reconstruction must precede dead-local elimination.
-    ClassMethodRewriter{}.Run(liftedAST.statements);
-    DeclarationHoister{}.Run(liftedAST.statements);
-    DeadLocalEliminator{}.Run(liftedAST.statements);
-    SelfAssignmentEliminator{}.Run(liftedAST.statements);
-    const auto ifChainStart = std::chrono::steady_clock::now();
-    IfChainSimplifier{}.Run(liftedAST.statements);
-    const auto ifChainEnd = std::chrono::steady_clock::now();
-    RequireRenamer{}.Run(liftedAST.statements);
-    GetterRenamer{}.Run(liftedAST.statements);
-    AttributeRenamer{}.Run(liftedAST.statements);
-    PropertyRenamer{}.Run(liftedAST.statements);
-    ConstructorResultRenamer{}.Run(liftedAST.statements);
-    LengthCountRenamer{}.Run(liftedAST.statements);
-    PcallResultRenamer{}.Run(liftedAST.statements);
-    LoopVariableRenamer{}.Run(liftedAST.statements);
+    timeRewriter("Class Method Rewriter", [&] { ClassMethodRewriter{}.Run(liftedAST.statements); });
+    timeRewriter("Declaration Hoister 2", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
+    timeRewriter("Dead Local Eliminator 1", [&] { DeadLocalEliminator{}.Run(liftedAST.statements); });
+    timeRewriter("Self-Assignment Eliminator", [&] { SelfAssignmentEliminator{}.Run(liftedAST.statements); });
+    timeRewriter("If-Chain Simplifier", [&] { IfChainSimplifier{}.Run(liftedAST.statements); });
+    timeRewriter("Child Lookup Renamer", [&] { ChildLookupRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Require Renamer", [&] { RequireRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Getter Renamer", [&] { GetterRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Attribute Renamer", [&] { AttributeRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Property Renamer", [&] { PropertyRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Constructor Result Renamer", [&] { ConstructorResultRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Length Count Renamer", [&] { LengthCountRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Pcall Result Renamer", [&] { PcallResultRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Loop Variable Renamer", [&] { LoopVariableRenamer{}.Run(liftedAST.statements); });
     // Assignment-based naming is weakest and runs after source-based naming.
-    ReverseFieldRenamer{}.Run(liftedAST.statements);
-    GlobalAssignmentRenamer{}.Run(liftedAST.statements);
+    timeRewriter("Reverse Field Renamer", [&] { ReverseFieldRenamer{}.Run(liftedAST.statements); });
+    timeRewriter("Global Assignment Renamer", [&] { GlobalAssignmentRenamer{}.Run(liftedAST.statements); });
     // Fold branch assignments before scope blocks separate declarations from their diamonds.
-    IfExpressionFolder{}.Run(liftedAST.statements);
-    DeadLocalEliminator{}.Run(liftedAST.statements);
+    timeRewriter("If-Expression Folder", [&] { IfExpressionFolder{}.Run(liftedAST.statements); });
+    timeRewriter("Dead Local Eliminator 2", [&] { DeadLocalEliminator{}.Run(liftedAST.statements); });
 
     // Scope blocks run last against final statement lifetimes.
-    ScopeBlockIntroducer{}.Run(liftedAST.statements);
-    DeclarationHoister{}.Run(liftedAST.statements);
+    timeRewriter("Scope Block Introducer", [&] { ScopeBlockIntroducer{}.Run(liftedAST.statements); });
+    timeRewriter("Declaration Hoister 3", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
     const auto astRewriteEnd = std::chrono::steady_clock::now();
-    m_debugNotes.Add(FissionDebugStage::Pipeline, "AST rewrites changed root statement count from {} to {}", statementsBeforeRewrite,
-                     liftedAST.statements.size());
+    m_debugNotes.Add(
+        FissionDebugStage::Pipeline, "AST rewrites changed root statement count from {} to {}", statementsBeforeRewrite, liftedAST.statements.size()
+    );
 
     if ((flags & DecompilerFlags::OptimizeIR) == DecompilerFlags::OptimizeIR)
         OptimizeAST(liftedAST);
@@ -872,7 +880,6 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         RobloxTypeInferer{}.Infer(liftedAST, inferRobloxTypes, autoNameVariables);
     ScopeAwareRenamer::PruneStaleRenameComments(liftedAST.statements);
     const auto robloxPropagationEnd = std::chrono::steady_clock::now();
-    const auto astEnd = std::chrono::steady_clock::now();
 
     RootNode root{liftedAST.statements};
 
@@ -928,9 +935,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
             "\tStructure Identification: {}\n\t"
             "IR -> SSA Form: {}\n\t"
             "IR (SSA) -> AST: {}\n\t"
-            "AST Rewriting: {}\n\t"
-            "\tShort-Circuit Folder: {}\n\t"
-            "\tIf-Chain Simplifier: {}\n\t"
+            "AST Rewriting: {}\n{}\t"
             "AST -> Source Code: {}\n\t"
             "IR Optimization: {}\n\t"
             "Type Propagation: {}\n\t"
@@ -940,8 +945,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
             std::chrono::duration<float>(basicBlockIdentificationEnd - basicBlockIdentificationStart),
             std::chrono::duration<float>(optimizeGraphEnd - optimizeGraphStart), std::chrono::duration<float>(unreachablePruningEnd - unreachablePruningStart),
             std::chrono::duration<float>(identifyLoopStructuresEnd - identifyLoopStructuresStart), std::chrono::duration<float>(ssaEnd - ssaStart),
-            std::chrono::duration<float>(astEnd - astStart), std::chrono::duration<float>(astRewriteEnd - astRewriteStart),
-            std::chrono::duration<float>(shortCircuitEnd - shortCircuitStart), std::chrono::duration<float>(ifChainEnd - ifChainStart),
+            std::chrono::duration<float>(astRewriteStart - astStart), std::chrono::duration<float>(astRewriteEnd - astRewriteStart), rewriterTimings,
             std::chrono::duration<float>(sgenEnd - sgenStart), std::chrono::duration<float>(irOptimizationEnd - irOptimizationStart),
             std::chrono::duration<float>(typeInferenceEnd - typeInferenceStart), std::chrono::duration<float>(robloxPropagationEnd - robloxPropagationStart)
         );

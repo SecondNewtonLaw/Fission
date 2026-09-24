@@ -11,14 +11,63 @@
 
 class IfExpressionFolder {
   public:
-    void Run(std::vector<std::shared_ptr<Statement>> &statements) { Fold(statements); }
+    void Run(std::vector<std::shared_ptr<Statement>> &statements) { FoldFunction(statements); }
 
   private:
+    static std::shared_ptr<Expression> Negate(const std::shared_ptr<Expression> &condition) {
+        if (const auto inverse = std::dynamic_pointer_cast<UnaryExpressionNode>(condition); inverse && inverse->op == "not ")
+            return inverse->operand;
+        if (const auto compare = std::dynamic_pointer_cast<BinaryExpressionNode>(condition); compare && (compare->op == "==" || compare->op == "~="))
+            return std::make_shared<BinaryExpressionNode>(compare->op == "==" ? "~=" : "==", compare->left, compare->right);
+        return std::make_shared<UnaryExpressionNode>("not ", condition);
+    }
+
+    static bool EndsInBareReturn(const std::shared_ptr<BlockStatementNode> &arm) {
+        const auto ret = arm && !arm->body.empty() ? std::dynamic_pointer_cast<ReturnStatementNode>(arm->body.back()) : nullptr;
+        return ret && ret->returnValues.empty();
+    }
+
+    // Luau copies the function's closing `return` into the arms of its last if; falling off the end says the same.
+    static void DropTailReturns(std::vector<std::shared_ptr<Statement>> &body) {
+        const auto branch = body.empty() ? nullptr : std::dynamic_pointer_cast<IfStatementNode>(body.back());
+        if (!branch)
+            return;
+        if (branch->elseBranch && branch->elseBranch->body.size() == 1 && EndsInBareReturn(branch->elseBranch))
+            branch->elseBranch.reset();
+        if (branch->elseBranch && branch->thenBranch && branch->thenBranch->body.size() == 1 && EndsInBareReturn(branch->thenBranch)) {
+            branch->condition = Negate(branch->condition);
+            branch->thenBranch = std::move(branch->elseBranch);
+        }
+        for (const auto &arm : {branch->thenBranch, branch->elseBranch}) {
+            if (!arm)
+                continue;
+            if (arm->body.size() > 1 && EndsInBareReturn(arm))
+                arm->body.pop_back();
+            DropTailReturns(arm->body);
+        }
+    }
+
+    // `if a then A; return end; if b then B else C end` closing a function is one chain: `if a then A elseif b ...`
+    static void MergeTailGuards(std::vector<std::shared_ptr<Statement>> &body) {
+        while (body.size() >= 2) {
+            const auto chain = std::dynamic_pointer_cast<IfStatementNode>(body.back());
+            const auto guard = std::dynamic_pointer_cast<IfStatementNode>(body[body.size() - 2]);
+            if (!chain || !guard || guard->elseBranch || !guard->thenBranch || guard->thenBranch->body.size() < 2 || !EndsInBareReturn(guard->thenBranch))
+                return;
+            guard->thenBranch->body.pop_back();
+            guard->elseBranch = std::make_shared<BlockStatementNode>();
+            guard->elseBranch->body.push_back(chain);
+            body.pop_back();
+        }
+    }
+
     void FoldFunction(std::vector<std::shared_ptr<Statement>> &body) {
         Fold(body);
         if (!body.empty())
             if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(body.back()); ret && ret->returnValues.empty())
                 body.pop_back();
+        DropTailReturns(body);
+        MergeTailGuards(body);
         for (size_t i = body.size(); i > 0; --i) {
             auto guard = std::dynamic_pointer_cast<IfStatementNode>(body[i - 1]);
             if (!guard || guard->elseBranch || !guard->thenBranch || guard->thenBranch->body.size() != 1 || i + 1 != body.size() ||
@@ -48,6 +97,26 @@ class IfExpressionFolder {
         name = id->identifier->name;
         value = asn->right;
         return true;
+    }
+
+    static bool Calls(const std::shared_ptr<Expression> &expr) {
+        if (!expr)
+            return false;
+        if (std::dynamic_pointer_cast<CallExpressionNode>(expr) || std::dynamic_pointer_cast<NameCallExpressionNode>(expr))
+            return true;
+        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr))
+            return Calls(bin->left) || Calls(bin->right);
+        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr))
+            return Calls(un->operand);
+        if (auto index = std::dynamic_pointer_cast<IndexExpressionNode>(expr))
+            return Calls(index->left) || Calls(index->right);
+        if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(expr))
+            return Calls(member->table) || Calls(member->key);
+        if (auto table = std::dynamic_pointer_cast<TableLiteralNode>(expr))
+            return std::ranges::any_of(table->expressions, [](const auto &value) { return Calls(value); });
+        if (auto iff = std::dynamic_pointer_cast<IfExpressionNode>(expr))
+            return Calls(iff->condition) || Calls(iff->thenExpr) || Calls(iff->elseExpr);
+        return false;
     }
 
     static std::shared_ptr<Statement> OnlyStmt(const std::shared_ptr<BlockStatementNode> &b) {
@@ -126,7 +195,10 @@ class IfExpressionFolder {
                     }
                 }
             }
-            // Standalone diamond -> `<name> = <ifexpr>` (a reassignment expressed as an if-expression).
+            // Standalone diamond -> `<name> = <ifexpr>` (a reassignment expressed as an if-expression); arms that call
+            // stay statements, as a chain assigning an existing local reads.
+            if (Calls(ifExpr))
+                continue;
             auto lhs = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
             stmts[i] = std::make_shared<AssignmentStatementNode>(lhs, ifExpr);
         }

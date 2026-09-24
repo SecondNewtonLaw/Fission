@@ -321,6 +321,20 @@ namespace fuzz {
             }
             SemTrace dec = RunLuauTrace(decompiledBc, preludeBcs[i]);
             v.fixture = i;
+            // unbounded recursion stops where the stack runs out, which depends on each frame's register count
+            const auto overflowed = [](const SemTrace &trace) { return trace.error && trace.error->find("stack overflow") != std::string::npos; };
+            if (overflowed(orig) && overflowed(dec)) {
+                const auto calls = [](const std::string &trace) { return trace.substr(0, trace.rfind("error: ")); };
+                const auto a = calls(orig.trace), b = calls(dec.trace);
+                if (!a.starts_with(b) && !b.starts_with(a)) {
+                    v.kind = SemVerdict::Kind::Diverge;
+                    v.original = std::move(orig);
+                    v.decompiled = std::move(dec);
+                    return v;
+                }
+                incomplete = true;
+                continue;
+            }
             bool printsDiffer = orig.prints.size() != dec.prints.size();
             for (size_t p = 0; !printsDiffer && p < orig.prints.size(); ++p)
                 printsDiffer = orig.prints[p] && dec.prints[p] && orig.prints[p] != dec.prints[p];

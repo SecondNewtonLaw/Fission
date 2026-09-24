@@ -20,6 +20,8 @@ class DeclarationHoister {
             m_locallyCapturedNames.clear();
             const auto resetWalk = [&]() {
                 m_scopes.clear();
+                m_subtreeEnd.clear();
+                m_mentions.clear();
                 m_access.clear();
                 m_bareAssigned.clear();
                 m_bareAssignmentScopes.clear();
@@ -49,6 +51,7 @@ class DeclarationHoister {
                 CoalesceAdjacentDeclarations(*scope.body);
             for (auto &scope : m_scopes)
                 PredeclareRepeatConditionLocals(*scope.body);
+            m_mentions.clear();
             functions.insert(functions.end(), m_nestedFunctions.begin(), m_nestedFunctions.end());
         }
     }
@@ -67,6 +70,14 @@ class DeclarationHoister {
     };
 
     std::vector<ScopeInfo> m_scopes;
+    // per scope, the id of its last descendant
+    mutable std::vector<int> m_subtreeEnd;
+    // what each queried statement mentions (StatementMentions); held by pointer so an entry never outlives its node
+    struct MentionSet {
+        std::unordered_set<std::string> names;
+        bool everything = false;
+    };
+    std::unordered_map<std::shared_ptr<Statement>, MentionSet> m_mentions;
     // name -> the set of scope ids in which it is read or written
     std::unordered_map<std::string, std::unordered_set<int>> m_access;
     // names that appear as the lhs of a bare `name = expr` assignment. Only these are safe to insert
@@ -552,14 +563,18 @@ class DeclarationHoister {
         }
     }
 
-    // is `anc` an ancestor of (or equal to) scope `s` in the scope tree?
+    // is `anc` an ancestor of (or equal to) scope `s` in the scope tree? The walk numbers scopes in preorder, so a
+    // scope's subtree is the id range up to its last descendant.
     bool IsAncestorOrSelf(int anc, int s) const {
-        while (s >= 0) {
-            if (s == anc)
-                return true;
-            s = m_scopes[s].parent;
+        if (m_subtreeEnd.size() != m_scopes.size()) {
+            m_subtreeEnd.assign(m_scopes.size(), 0);
+            for (int id = static_cast<int>(m_scopes.size()) - 1; id >= 0; --id) {
+                m_subtreeEnd[id] = (std::max)(m_subtreeEnd[id], id);
+                if (const int parent = m_scopes[id].parent; parent >= 0)
+                    m_subtreeEnd[parent] = (std::max)(m_subtreeEnd[parent], m_subtreeEnd[id]);
+            }
         }
-        return false;
+        return anc >= 0 && s >= anc && s <= m_subtreeEnd[anc];
     }
 
     // M3: a name with exactly one `local name = expr` declaration whose scope does NOT dominate all of
@@ -676,7 +691,7 @@ class DeclarationHoister {
 
     // does this statement (recursively) reference `name` anywhere? used only to decide promotion
     // safety, so it errs toward "yes" by scanning all sub-expressions and nested blocks.
-    bool StatementMentions(const std::shared_ptr<Statement> &s, const std::string &name) {
+    bool StatementMentionsDeep(const std::shared_ptr<Statement> &s, const std::string &name) {
         if (!s)
             return false;
         if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s))
@@ -696,11 +711,11 @@ class DeclarationHoister {
                 return true;
             if (iff->thenBranch)
                 for (const auto &c : iff->thenBranch->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             if (iff->elseBranch)
                 for (const auto &c : iff->elseBranch->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
@@ -709,14 +724,14 @@ class DeclarationHoister {
                 return true;
             if (w->body)
                 for (const auto &c : w->body->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
         if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s)) {
             if (r->body)
                 for (const auto &c : r->body->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return ExprMentions(r->condition, name);
         }
@@ -725,7 +740,7 @@ class DeclarationHoister {
                 return true;
             if (fn->lpLoopBody)
                 for (const auto &c : fn->lpLoopBody->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
@@ -734,24 +749,164 @@ class DeclarationHoister {
                 return true;
             if (fg->body)
                 for (const auto &c : fg->body->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
         if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
             if (fdn->lpFunctionBody)
                 for (const auto &c : fdn->lpFunctionBody->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
         if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
             for (const auto &c : blk->body)
-                if (StatementMentions(c, name))
+                if (StatementMentionsDeep(c, name))
                     return true;
             return false;
         }
         return false;
+    }
+
+    bool StatementMentions(const std::shared_ptr<Statement> &s, const std::string &name) {
+        if (!s)
+            return false;
+        auto [entry, fresh] = m_mentions.try_emplace(s);
+        if (fresh)
+            CollectStatementMentions(s, entry->second);
+        return entry->second.everything || entry->second.names.contains(name);
+    }
+
+    // Every name StatementMentionsDeep / ExprMentions would report, with `everything` for a node they treat as mentioning all.
+    void CollectStatementMentions(const std::shared_ptr<Statement> &s, MentionSet &out) {
+        if (!s)
+            return;
+        const auto block = [&](const std::shared_ptr<BlockStatementNode> &body) {
+            if (body)
+                for (const auto &c : body->body)
+                    CollectStatementMentions(c, out);
+        };
+        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
+            CollectExprMentions(decl->identifier, out);
+            CollectExprMentions(decl->value, out);
+        } else if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s)) {
+            CollectExprMentions(asn->left, out);
+            CollectExprMentions(asn->right, out);
+        } else if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(s)) {
+            CollectExprMentions(es->expression, out);
+        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(s)) {
+            for (const auto &v : ret->returnValues)
+                CollectExprMentions(v, out);
+        } else if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
+            CollectExprMentions(iff->condition, out);
+            block(iff->thenBranch);
+            block(iff->elseBranch);
+        } else if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(s)) {
+            CollectExprMentions(w->condition, out);
+            block(w->body);
+        } else if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s)) {
+            block(r->body);
+            CollectExprMentions(r->condition, out);
+        } else if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s)) {
+            CollectExprMentions(fn->startVariable, out);
+            CollectExprMentions(fn->increaseBy, out);
+            CollectExprMentions(fn->maxIncreased, out);
+            block(fn->lpLoopBody);
+        } else if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s)) {
+            CollectExprMentions(fg->generator, out);
+            CollectExprMentions(fg->state, out);
+            CollectExprMentions(fg->index, out);
+            block(fg->body);
+        } else if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
+            block(fdn->lpFunctionBody);
+        } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
+            block(blk);
+        }
+    }
+
+    void CollectExprMentions(const std::shared_ptr<Expression> &e, MentionSet &out) {
+        if (!e)
+            return;
+        switch (e->nodeKind) {
+        case ASTNodeKind::IdentifierExpression:
+            if (auto id = std::static_pointer_cast<IdentifierExpressionNode>(e); id->identifier)
+                out.names.insert(id->identifier->name);
+            return;
+        case ASTNodeKind::Identifier:
+            if (auto id = std::dynamic_pointer_cast<Identifier>(e))
+                out.names.insert(id->name);
+            return;
+        case ASTNodeKind::BinaryExpression:
+        case ASTNodeKind::TableBinaryExpression: {
+            auto b = std::static_pointer_cast<BinaryExpressionNode>(e);
+            CollectExprMentions(b->left, out);
+            CollectExprMentions(b->right, out);
+            return;
+        }
+        case ASTNodeKind::CompoundAssignment: {
+            auto b = std::static_pointer_cast<CompoundBinaryExpressionNode>(e);
+            CollectExprMentions(b->left, out);
+            CollectExprMentions(b->right, out);
+            return;
+        }
+        case ASTNodeKind::UnaryExpression:
+            CollectExprMentions(std::static_pointer_cast<UnaryExpressionNode>(e)->operand, out);
+            return;
+        case ASTNodeKind::IfExpression: {
+            auto i = std::static_pointer_cast<IfExpressionNode>(e);
+            CollectExprMentions(i->condition, out);
+            CollectExprMentions(i->thenExpr, out);
+            CollectExprMentions(i->elseExpr, out);
+            return;
+        }
+        case ASTNodeKind::IndexExpression: {
+            auto ix = std::static_pointer_cast<IndexExpressionNode>(e);
+            CollectExprMentions(ix->left, out);
+            CollectExprMentions(ix->right, out);
+            return;
+        }
+        case ASTNodeKind::MemberExpression: {
+            auto m = std::static_pointer_cast<MemberExpressionNode>(e);
+            CollectExprMentions(m->table, out);
+            CollectExprMentions(m->key, out);
+            return;
+        }
+        case ASTNodeKind::CallExpression: {
+            auto c = std::static_pointer_cast<CallExpressionNode>(e);
+            CollectExprMentions(c->callee, out);
+            for (const auto &a : c->arguments)
+                CollectExprMentions(a, out);
+            for (const auto &r : c->rets)
+                CollectExprMentions(r, out);
+            return;
+        }
+        case ASTNodeKind::MethodCallExpression: {
+            auto c = std::static_pointer_cast<NameCallExpressionNode>(e);
+            CollectExprMentions(c->calledOn, out);
+            CollectExprMentions(c->callWhat, out);
+            for (const auto &a : c->arguments)
+                CollectExprMentions(a, out);
+            for (const auto &r : c->rets)
+                CollectExprMentions(r, out);
+            return;
+        }
+        case ASTNodeKind::LiteralValue:
+            if (auto t = std::dynamic_pointer_cast<TableLiteralNode>(e))
+                for (const auto &el : t->expressions)
+                    CollectExprMentions(el, out);
+            return;
+        case ASTNodeKind::FunctionDeclarationNode: {
+            auto fn = std::static_pointer_cast<FunctionDeclarationNode>(e);
+            if (fn->lpFunctionBody)
+                for (const auto &c : fn->lpFunctionBody->body)
+                    CollectStatementMentions(c, out);
+            return;
+        }
+        default:
+            out.everything = true;
+            return;
+        }
     }
 
     bool ExprMentions(const std::shared_ptr<Expression> &e, const std::string &name) {
@@ -823,7 +978,7 @@ class DeclarationHoister {
             auto fn = std::static_pointer_cast<FunctionDeclarationNode>(e);
             if (fn->lpFunctionBody)
                 for (const auto &c : fn->lpFunctionBody->body)
-                    if (StatementMentions(c, name))
+                    if (StatementMentionsDeep(c, name))
                         return true;
             return false;
         }
@@ -930,6 +1085,16 @@ class DeclarationHoister {
             auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmts[i + 1]);
             const auto name = decl ? DeclName(decl) : std::string{};
             auto lhs = asn ? std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left) : nullptr;
+            // `local f; f = function ... end` is what `local function f` means, self-references included
+            if (auto fn = asn ? std::dynamic_pointer_cast<FunctionDeclarationNode>(asn->right) : nullptr;
+                fn && fn->bAnonymousInline && decl && !decl->value && lhs && lhs->identifier && lhs->identifier->name == name) {
+                fn->functionName = name;
+                fn->bAnonymousInline = false;
+                fn->bIsLocalDeclaration = true;
+                stmts[i] = fn;
+                stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
+                continue;
+            }
             if (decl && !decl->value && IsRegisterName(name) && lhs && lhs->identifier && lhs->identifier->name == name && !ExprMentions(asn->right, name)) {
                 decl->value = asn->right;
                 stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));

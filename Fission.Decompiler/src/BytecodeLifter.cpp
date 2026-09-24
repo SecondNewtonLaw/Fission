@@ -1361,6 +1361,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 "opcode migrates upvalues from the function's uv list to the heap from register R{} downward.",
                 instruction.GetABCOperand(LuauInstruction::LuauOperand::A)
             );
+            liftedFunction.upvalueCloses.emplace_back(
+                static_cast<int32_t>(liftedFunction.instructions.size() - 1), static_cast<uint8_t>(instruction.GetABCOperand(LuauInstruction::LuauOperand::A))
+            );
             break;
         }
 

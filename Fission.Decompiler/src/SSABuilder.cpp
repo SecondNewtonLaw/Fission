@@ -331,11 +331,23 @@ static void ComputeLiveness(
         }
     }
 
-    bool changed = true;
-    while (changed) {
-        changed = false;
-        for (const auto &block : func->basicBlocks) {
-            uint32_t bid = block.dwBlockId;
+    // backward dataflow: a worklist seeded last-block-first revisits only predecessors of a block whose live-in changed
+    std::vector<std::vector<uint32_t>> predecessors(numBlocks);
+    for (const auto &block : func->basicBlocks)
+        for (const uint32_t succ : block.successors)
+            if (succ < numBlocks)
+                predecessors[succ].push_back(block.dwBlockId);
+    std::vector<uint32_t> worklist(numBlocks);
+    for (size_t i = 0; i < numBlocks; ++i)
+        worklist[i] = static_cast<uint32_t>(i);
+    std::vector<bool> queued(numBlocks, true);
+    while (!worklist.empty()) {
+        Fission::CheckDecompileDeadline();
+        const uint32_t bid = worklist.back();
+        worklist.pop_back();
+        queued[bid] = false;
+        {
+            const auto &block = func->basicBlocks[bid];
             bool blockChanged = false;
 
             for (int r = 0; r <= maxRegs; ++r) {
@@ -361,7 +373,11 @@ static void ComputeLiveness(
                 }
             }
             if (blockChanged)
-                changed = true;
+                for (const uint32_t pred : predecessors[bid])
+                    if (!queued[pred]) {
+                        queued[pred] = true;
+                        worklist.push_back(pred);
+                    }
         }
     }
 }

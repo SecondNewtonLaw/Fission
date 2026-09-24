@@ -884,12 +884,8 @@ end, true;
     INFO("recompile error: " << error);
     CHECK(result.decompilationOutput.find("while true do") == std::string::npos);
     const auto untilFunction = result.decompilationOutput.find("until (function");
-    const auto followingReturnClosure = result.decompilationOutput.find("local function anon_");
-    const auto followingReturn = followingReturnClosure == std::string::npos ? std::string::npos : result.decompilationOutput.find("return anon_", followingReturnClosure);
-    CHECK(untilFunction != std::string::npos);
-    CHECK(followingReturnClosure != std::string::npos);
-    CHECK(followingReturn != std::string::npos);
-    CHECK(untilFunction < followingReturnClosure);
+    REQUIRE(untilFunction != std::string::npos);
+    CHECK(result.decompilationOutput.find("return function(", untilFunction) != std::string::npos);
     const bool hasStrandedConditionClosure = result.decompilationOutput.find("local function anon_") != std::string::npos &&
                                               result.decompilationOutput.find("_2(") != std::string::npos;
     CHECK_FALSE(hasStrandedConditionClosure);

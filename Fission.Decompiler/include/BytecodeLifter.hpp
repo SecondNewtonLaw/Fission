@@ -127,6 +127,8 @@ struct LiftedFunction {
     std::string name;
     uint8_t numparams;
     DeserializedFunction *lpDeserialized;
+    // CLOSEUPVALS lifts to NOP; (instruction index, lowest closed register) marks where captured locals end
+    std::vector<std::pair<int32_t, uint8_t>> upvalueCloses{};
 };
 
 class BytecodeLifter {

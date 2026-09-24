@@ -92,35 +92,40 @@ class LoopVariableRenamer {
         return "";
     }
 
-    void WalkBlock(std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> active) {
+    void WalkBlock(std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> &active) {
+        std::vector<std::string> added;
         for (auto &s : stmts) {
             WalkStmt(s, active);
-            AddBindings(s, active);
+            AddBindings(s, active, added);
         }
+        for (const auto &name : added)
+            active.erase(name);
     }
 
-    static void AddBinding(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &active) {
+    static void AddBinding(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &active, std::vector<std::string> *added = nullptr) {
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); id && id->identifier)
-            active.insert(id->identifier->name);
+            if (auto [it, inserted] = active.insert(id->identifier->name); inserted && added)
+                added->push_back(*it);
     }
 
-    static void AddBindings(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &active) {
+    static void AddBindings(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &active, std::vector<std::string> &added) {
         if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            AddBinding(decl->identifier, active);
+            AddBinding(decl->identifier, active, &added);
         } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
             if (fn->bIsLocalDeclaration && ScopeAwareRenamer::IsBareIdentifier(fn->functionName))
-                active.insert(fn->functionName);
+                if (auto [it, inserted] = active.insert(fn->functionName); inserted)
+                    added.push_back(*it);
         } else if (auto expression = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
             if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expression->expression); call && call->bIsLocalDeclaration)
                 for (const auto &ret : call->rets)
-                    AddBinding(ret, active);
+                    AddBinding(ret, active, &added);
             else if (auto call = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression); call && call->bIsLocalDeclaration)
                 for (const auto &ret : call->rets)
-                    AddBinding(ret, active);
+                    AddBinding(ret, active, &added);
         }
     }
 
-    void WalkStmt(const std::shared_ptr<Statement> &stmt, const std::unordered_set<std::string> &active) {
+    void WalkStmt(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &active) {
         if (!stmt)
             return;
 

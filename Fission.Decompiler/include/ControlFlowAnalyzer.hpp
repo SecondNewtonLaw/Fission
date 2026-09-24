@@ -455,7 +455,11 @@ class ControlFlowAnalyzer {
 
     void LinkBasicBlocks(std::vector<BasicBlock> &blocks);
 
+    std::vector<BasicBlock> PartitionBlocks(LiftedFunction *lpLiftedFunction);
+
     AnalyzedFunction DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction);
+
+    bool ConvergeReturns(AnalyzedFunction &func);
 
     void OptimiseGraphInternal(std::vector<BasicBlock> &blocks);
 

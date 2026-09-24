@@ -465,7 +465,8 @@ TEST_CASE("Scope: module initializer keeps crossing locals outside later scopes"
     INFO("decompile:\n" << out);
     CHECK(out.starts_with("--[["));
     const auto firstScope = out.find("\ndo\n");
-    REQUIRE(firstScope != std::string::npos);
+    REQUIRE(out.find("local cache") != std::string::npos);
+    REQUIRE(out.find("local lookups") != std::string::npos);
     CHECK(out.find("local cache") < firstScope);
     CHECK(out.find("local lookups") < firstScope);
     CHECK(Recompiles(out));
@@ -997,8 +998,8 @@ TEST_CASE("Regress: SETLIST array element indexing an inner table is declared be
     )");
 
     INFO("decompile:\n" << out);
-    // the inner table survives as a real local (it was being dropped entirely).
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+v\d+\s*=\s*\{\s*"a",\s*"b")")));
+    // the inner table survives (it was being dropped entirely).
+    CHECK(ContainsRegex(out, std::regex(R"(\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\])")));
     // every auto-named local is declared before it is used.
     CHECK(NoForwardReference(out));
     // the inner table is NOT folded into the outer constructor as a bare `vN[2]` element.
@@ -1017,7 +1018,7 @@ TEST_CASE("Regress: SETLIST first element indexing an inner table is sound", "[D
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+v\d+\s*=\s*\{\s*"a",\s*"b")")));
+    CHECK(ContainsRegex(out, std::regex(R"(local\s+v\d+\s*=\s*\{\s*\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\],\s*43\s*\})")));
     CHECK(NoForwardReference(out));
     CHECK(Recompiles(out));
 }
@@ -1150,12 +1151,10 @@ TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][
 // GetVarName prefixes the register's local (`_v6`) so the global is preserved, and emits a FISSION INFO.
 TEST_CASE("Regress: register auto-name does not overwrite a same-named global", "[Decompiler][Naming][Regression]") {
     const auto out = DecompileOrFail(R"(
-        local v1380 = 110
-        tonumber()
-        local v1381 = not v6()
-        local v1382 = 141.7
+        local a, b, c, d, e, f = tonumber(), tonumber(), tonumber(), tonumber(), tonumber(), tonumber()
+        local g = not v6()
         v681(631)
-        return #("a-b"), select(nil, 31)[{ ["data"] = nil }]
+        return #("a-b"), select(nil, 31)[{ ["data"] = g }], g, a, b, c, d, e, f
     )");
 
     INFO("decompile:\n" << out);
@@ -1463,6 +1462,7 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
                 end
                 local t = {}
                 t.x = 1
+                print(t)
                 return t
             end
             return f

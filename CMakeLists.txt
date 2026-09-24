@@ -282,6 +282,9 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/include/AbstractSyntaxTree/Visitor.hpp
         Fission.Decompiler/include/AbstractSyntaxTree/Nodes/CommentNode.hpp
         Fission.Decompiler/src/ASTLifter.cpp
+        Fission.Decompiler/src/ASTLifterInlining.cpp
+        Fission.Decompiler/src/ASTLifterExpressions.cpp
+        Fission.Decompiler/src/ASTLifterConditions.cpp
 )
 
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)

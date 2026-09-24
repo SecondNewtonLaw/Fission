@@ -602,7 +602,7 @@ TEST_CASE("Sibling branches keep independent local bindings", "[Decompiler][Scop
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(else\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));
+    CHECK(ContainsRegex(out, std::regex(R"(if\s+flag\s+then\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));
     CHECK(Recompiles(out));
 }
 
@@ -769,6 +769,19 @@ TEST_CASE("Regress: shadowed bare locals preserve initializer reads", "[Decompil
         CHECK(statements.size() == (readsOld ? 3 : 2));
         CHECK(call->rets.size() == 1);
     }
+}
+
+TEST_CASE("Dead local analysis refreshes names between runs", "[Decompiler][Rewriter][Regression]") {
+    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+    auto declaration = std::make_shared<VariableDeclarationNode>(id("value"), id("source"));
+    auto result = std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("value")});
+    std::vector<std::shared_ptr<Statement>> statements{declaration, result};
+    DeadLocalEliminator eliminator;
+    eliminator.Run(statements);
+    REQUIRE(statements.size() == 2);
+    result->returnValues.front() = id("other");
+    eliminator.Run(statements);
+    CHECK(statements.size() == 1);
 }
 
 TEST_CASE("Regress: empty then inversion preserves NaN and condition effects", "[Decompiler][Rewriter][Regression]") {
@@ -964,7 +977,7 @@ TEST_CASE("Regress: optional fallback preserves value at shared return join", "[
     const auto out = DecompileOrFail(source);
     INFO("decompile:\n" << out);
     REQUIRE(Recompiles(out));
-    CHECK(CountOccurrences(out, ".value =") == 1);
+    CHECK(CountOccurrences(out, "value = v") == 1);
     const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("")});
     INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
@@ -1670,6 +1683,7 @@ TEST_CASE("Option: OmitFissionComments drops info comments, keeps warnings", "[D
                 shared.flag = true
                 local other = {}
                 other.x = 1
+                print(other)
                 return other
             end
             return inner
@@ -1714,6 +1728,7 @@ TEST_CASE("Regress: nested function own vN does not shadow captured upvalue vN",
                 shared.flag = true
                 local other = {}
                 other.x = 1
+                print(other)
                 return other
             end
             return inner

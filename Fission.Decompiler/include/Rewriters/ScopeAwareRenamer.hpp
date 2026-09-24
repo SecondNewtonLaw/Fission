@@ -509,6 +509,11 @@ class ScopeAwareRenamer {
                 RenameExpr(e, rename, shadowed);
             return;
         }
+        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
+            RenameExpr(conditional->condition, rename, shadowed);
+            RenameExpr(conditional->thenExpr, rename, shadowed);
+            RenameExpr(conditional->elseExpr, rename, shadowed);
+        }
     }
 
     template <class F> static void WalkStmt(const std::shared_ptr<Statement> &stmt, F &f) {

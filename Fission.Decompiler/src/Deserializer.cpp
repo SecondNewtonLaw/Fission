@@ -68,7 +68,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         DeserializedFunction function{};
         function.uTypeVersion = result.typesVersion;
         function.uBytecodeVersion = result.bytecodeVersion;
-        function.bytecodeId = int(i);
+        function.bytecodeId = static_cast<std::uint32_t>(i);
         function.userdataTypeNames = userdataTypeNames;
 
         // V12 proto sizes include trailing cost and future extension data; resynchronize at the recorded end.

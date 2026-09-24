@@ -13,6 +13,8 @@
 #include <array>
 #include <cstdio>
 #include <deque>
+#include <regex>
+#include <set>
 #include <string>
 #include <vector>
 
@@ -1016,6 +1018,83 @@ namespace {
     }
 } // namespace
 
+// Locals the compiler propagates as constants: initialized with a constant and never assigned.
+using ConstantLocals = std::map<const Luau::AstLocal *, Luau::AstExpr *>;
+
+// The compiler folds a constant condition, so its if-expression leaves no branch to recover.
+static bool FoldsToConstant(Luau::AstExpr *expr, const ConstantLocals &constants) {
+    if (auto *n = expr->as<Luau::AstExprGroup>())
+        return FoldsToConstant(n->expr, constants);
+    if (expr->is<Luau::AstExprConstantNil>() || expr->is<Luau::AstExprConstantBool>() || expr->is<Luau::AstExprConstantNumber>() ||
+        expr->is<Luau::AstExprConstantInteger>() || expr->is<Luau::AstExprConstantString>())
+        return true;
+    if (auto *n = expr->as<Luau::AstExprLocal>()) {
+        const auto found = constants.find(n->local);
+        return found != constants.end() && FoldsToConstant(found->second, constants);
+    }
+    if (auto *n = expr->as<Luau::AstExprUnary>())
+        return n->op == Luau::AstExprUnary::Op::Not && FoldsToConstant(n->expr, constants);
+    if (auto *n = expr->as<Luau::AstExprBinary>())
+        return (n->op == Luau::AstExprBinary::And || n->op == Luau::AstExprBinary::Or || n->op == Luau::AstExprBinary::CompareEq ||
+                n->op == Luau::AstExprBinary::CompareNe) &&
+               FoldsToConstant(n->left, constants) && FoldsToConstant(n->right, constants);
+    return false;
+}
+
+// The truthiness of a folded condition, when it is plain to see.
+static std::optional<bool> ConstantTruth(Luau::AstExpr *expr, const ConstantLocals &constants) {
+    if (auto *n = expr->as<Luau::AstExprGroup>())
+        return ConstantTruth(n->expr, constants);
+    if (expr->is<Luau::AstExprConstantNil>())
+        return false;
+    if (auto *n = expr->as<Luau::AstExprConstantBool>())
+        return n->value;
+    if (expr->is<Luau::AstExprConstantNumber>() || expr->is<Luau::AstExprConstantInteger>() || expr->is<Luau::AstExprConstantString>())
+        return true;
+    if (auto *n = expr->as<Luau::AstExprLocal>()) {
+        const auto found = constants.find(n->local);
+        return found == constants.end() ? std::nullopt : ConstantTruth(found->second, constants);
+    }
+    if (auto *n = expr->as<Luau::AstExprUnary>(); n && n->op == Luau::AstExprUnary::Op::Not) {
+        const auto operand = ConstantTruth(n->expr, constants);
+        return operand ? std::optional<bool>(!*operand) : std::nullopt;
+    }
+    if (auto *n = expr->as<Luau::AstExprBinary>(); n && (n->op == Luau::AstExprBinary::And || n->op == Luau::AstExprBinary::Or)) {
+        const auto left = ConstantTruth(n->left, constants);
+        if (!left)
+            return std::nullopt;
+        return *left == (n->op == Luau::AstExprBinary::Or) ? left : ConstantTruth(n->right, constants);
+    }
+    return std::nullopt;
+}
+
+static ConstantLocals CollectConstantLocals(Luau::AstStatBlock *root) {
+    struct Collector : Luau::AstVisitor {
+        ConstantLocals initial;
+        std::set<const Luau::AstLocal *> written;
+        bool visit(Luau::AstStatLocal *node) override {
+            for (size_t i = 0; i < node->vars.size && i < node->values.size; ++i)
+                initial[node->vars.data[i]] = node->values.data[i];
+            return true;
+        }
+        bool visit(Luau::AstStatAssign *node) override {
+            for (auto *var : node->vars)
+                if (auto *local = var->as<Luau::AstExprLocal>())
+                    written.insert(local->local);
+            return true;
+        }
+        bool visit(Luau::AstStatCompoundAssign *node) override {
+            if (auto *local = node->var->as<Luau::AstExprLocal>())
+                written.insert(local->local);
+            return true;
+        }
+    } collector;
+    root->visit(&collector);
+    for (const auto *local : collector.written)
+        collector.initial.erase(local);
+    return collector.initial;
+}
+
 std::optional<std::map<std::string, int>> LuauAstGenerator::MeasureSugar(const std::string &source, bool scoped) {
     Luau::Allocator allocator;
     Luau::AstNameTable names(allocator);
@@ -1025,11 +1104,17 @@ std::optional<std::map<std::string, int>> LuauAstGenerator::MeasureSugar(const s
     struct Visitor : Luau::AstVisitor {
         std::map<std::string, int> counts;
         bool scoped = false;
+        ConstantLocals constants;
         std::string scope = "chunk";
         std::map<const Luau::AstLocal *, std::string> locals;
         std::map<std::string, int> functionInstances;
         int nextLocal = 0, nextLambda = 0;
-        void add(const std::string &kind, const std::string &target = "") { counts[scoped ? scope + "|" + kind + "|" + target : kind]++; }
+        // a local's number follows declaration order and a loop variable keeps its source name, neither of which the output
+        // preserves (hoisted declarations shift the order); sites compare locals by kind only
+        void add(const std::string &kind, const std::string &target = "") {
+            static const std::regex local(R"(\blocal\d+\b|\bcapture:[A-Za-z_][A-Za-z0-9_]*)");
+            counts[scoped ? scope + "|" + kind + "|" + std::regex_replace(target, local, "local") : kind]++;
+        }
         std::string shape(Luau::AstExpr *expr) {
             if (auto *n = expr->as<Luau::AstExprGroup>())
                 return shape(n->expr);
@@ -1094,7 +1179,33 @@ std::optional<std::map<std::string, int>> LuauAstGenerator::MeasureSugar(const s
             return true;
         }
         bool visit(Luau::AstStatCompoundAssign *node) override {
-            add("compound-" + Luau::toString(node->op) + "=", shape(node->var));
+            // `t.k ..= v` compiles exactly like `t.k = t.k .. v`; only a local's `..=` is told apart (by rendering)
+            if (node->op != Luau::AstExprBinary::Concat || node->var->is<Luau::AstExprLocal>())
+                add("compound-" + Luau::toString(node->op) + "=", shape(node->var));
+            return true;
+        }
+        // `if c then continue end` directly in a loop body compiles exactly like `if not c then <rest> end`
+        std::set<const Luau::AstStat *> guardContinues;
+        void markGuardContinues(Luau::AstStatBlock *body) {
+            for (auto *stat : body->body)
+                if (auto *branch = stat->as<Luau::AstStatIf>(); branch && !branch->elsebody && branch->thenbody->body.size == 1 &&
+                                                                  branch->thenbody->body.data[0]->is<Luau::AstStatContinue>())
+                    guardContinues.insert(branch->thenbody->body.data[0]);
+        }
+        bool visit(Luau::AstStatWhile *node) override {
+            markGuardContinues(node->body);
+            return true;
+        }
+        bool visit(Luau::AstStatRepeat *node) override {
+            markGuardContinues(node->body);
+            return true;
+        }
+        bool visit(Luau::AstStatFor *node) override {
+            markGuardContinues(node->body);
+            return true;
+        }
+        bool visit(Luau::AstStatForIn *node) override {
+            markGuardContinues(node->body);
             return true;
         }
         bool visit(Luau::AstStatFunction *node) override {
@@ -1129,8 +1240,16 @@ std::optional<std::map<std::string, int>> LuauAstGenerator::MeasureSugar(const s
                 add("method-call", shape(node->func));
             return true;
         }
-        bool visit(Luau::AstExprIfElse *) override {
-            add("if-expression");
+        bool visit(Luau::AstExprIfElse *node) override {
+            if (!FoldsToConstant(node->condition, constants)) {
+                add("if-expression");
+                return true;
+            }
+            // the compiler keeps only the branch the constant takes
+            if (const auto truth = ConstantTruth(node->condition, constants)) {
+                (*truth ? node->trueExpr : node->falseExpr)->visit(this);
+                return false;
+            }
             return true;
         }
         bool visit(Luau::AstStatIf *node) override {
@@ -1144,23 +1263,28 @@ std::optional<std::map<std::string, int>> LuauAstGenerator::MeasureSugar(const s
                     add("record-field", shape(item.key));
             return true;
         }
-        bool visit(Luau::AstStatContinue *) override {
-            add("continue");
+        bool visit(Luau::AstStatContinue *node) override {
+            if (!guardContinues.contains(node))
+                add("continue");
             return true;
         }
     } visitor;
     visitor.scoped = scoped;
+    visitor.constants = CollectConstantLocals(parsed.root);
     parsed.root->visit(&visitor);
     return visitor.counts;
 }
 
-std::optional<std::string> LuauAstGenerator::RecoveryLoss(const std::string &source, const std::string &output, bool allowInlining) {
+std::optional<std::string> LuauAstGenerator::RecoveryLoss(const std::string &source, const std::string &output, bool allowInlining, bool localFunctionsInlined) {
     const auto before = MeasureSugar(source, true), after = MeasureSugar(output, true);
     if (!before || !after)
         return std::nullopt;
     std::string loss;
     for (const auto &[site, amount] : *before) {
         if (site.find("|inlined-") != std::string::npos)
+            continue;
+        // an inlined local function's call leaves no expression to recover
+        if (localFunctionsInlined && site.find("function:") != std::string::npos)
             continue;
         const auto found = after->find(site);
         int recovered = found == after->end() ? 0 : found->second;

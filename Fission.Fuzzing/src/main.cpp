@@ -173,7 +173,7 @@ namespace {
         for (const auto &prelude : preludes)
             originalTraces.push_back(fuzz::RunLuauTrace(baselineBc, prelude));
         const bool semantic = verdict.kind == fuzz::SemVerdict::Kind::Diverge;
-        const auto loss = LuauAstGenerator::RecoveryLoss(source, baseline.output, verdict.kind == fuzz::SemVerdict::Kind::Match);
+        const auto loss = LuauAstGenerator::RecoveryLoss(source, baseline.output, verdict.kind == fuzz::SemVerdict::Kind::Match, fuzz::optimizationLevel >= 2);
         if (!semantic && (verdict.kind != fuzz::SemVerdict::Kind::Match || !loss || loss->empty()))
             return false;
         const std::string firstLine = loss ? loss->substr(0, loss->find('\n')) : "";
@@ -197,7 +197,7 @@ namespace {
             } else {
                 if (current.kind != fuzz::SemVerdict::Kind::Match)
                     return false;
-                const auto remaining = LuauAstGenerator::RecoveryLoss(candidate, decompiled.output, true);
+                const auto remaining = LuauAstGenerator::RecoveryLoss(candidate, decompiled.output, true, fuzz::optimizationLevel >= 2);
                 const std::string marker = site + ": ";
                 if (!remaining || (!remaining->starts_with(marker) && remaining->find("\n" + marker) == std::string::npos))
                     return false;
@@ -348,6 +348,8 @@ int main(int argc, char **argv) {
             ssaOracle = true;
         else if (a == "--opt" && i + 1 < argc)
             fuzz::optimizationLevel = std::clamp(std::atoi(argv[++i]), 0, 2);
+        else if (a == "--debug" && i + 1 < argc)
+            fuzz::debugLevel = std::clamp(std::atoi(argv[++i]), 0, 2);
         else if (a == "--repro-mutate" && i + 2 < argc) {
             mutateFile = argv[++i];
             mutateSeed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));
@@ -498,7 +500,8 @@ int main(int argc, char **argv) {
             std::string decompiledBc;
             if (!fuzz::LuauCompiles(decompiled.output, &decompiledBc)) {
                 ++outcomes["INVALID_RECOMPILE"];
-                std::fprintf(stderr, "[replay] INVALID_RECOMPILE %016llx %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str());
+                std::fprintf(stderr, "[replay] INVALID_RECOMPILE %016llx %s %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str(),
+                             decompiledBc.empty() ? "" : decompiledBc.c_str() + 1);
                 continue;
             }
             if (fuzz::UsesGeneratedLocalBeforeDeclared(decompiled.output, &source)) {
@@ -563,7 +566,7 @@ int main(int argc, char **argv) {
         if (preludes.empty())
             return 2;
         const auto verdict = fuzz::CompareSemantics(before, after, preludes);
-        const auto loss = LuauAstGenerator::RecoveryLoss(source, output, verdict.kind == fuzz::SemVerdict::Kind::Match);
+        const auto loss = LuauAstGenerator::RecoveryLoss(source, output, verdict.kind == fuzz::SemVerdict::Kind::Match, fuzz::optimizationLevel >= 2);
         if (!loss)
             return 2;
         std::fprintf(
@@ -1224,7 +1227,7 @@ int main(int argc, char **argv) {
                 continue;
             }
             const auto v = fuzz::CompareSemantics(bc, outBc, preludeBcs);
-            const auto recovery = LuauAstGenerator::RecoveryLoss(source, dec.output, v.kind == fuzz::SemVerdict::Kind::Match);
+            const auto recovery = LuauAstGenerator::RecoveryLoss(source, dec.output, v.kind == fuzz::SemVerdict::Kind::Match, fuzz::optimizationLevel >= 2);
             if (!recovery)
                 c.buckets["SUGAR_PARSE_ERROR"]++;
             sugarLoss = recovery.value_or("");

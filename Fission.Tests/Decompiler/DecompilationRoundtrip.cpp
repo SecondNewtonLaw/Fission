@@ -116,11 +116,10 @@ TEST_CASE("Roundtrip: if statement", "[Decompiler][Roundtrip]") {
     )");
 
     INFO("decompile:\n" << out);
-    // The inverted branch keeps the exact `math.random() > 0.5` comparison negated with `not`, not
-    // the algebraically-flipped `<=`. `>` lowers to `LT(0.5, x)`; flipping to `<=` would reverse the
-    // operands and, on NaN or a raising compare, change the result/error. `not (a > b)` recompiles to
-    // the same LT with an inverted branch, so operand order and any raised error survive the roundtrip.
-    CHECK(ContainsRegex(out, std::regex(R"(if\s+not\s*\(\s*math\.random\(\)\s*>\s*0\.5\s*\)\s+then\s+return\s+0\s+else\s+return\s+1\s+end)")));
+    // The branch keeps the exact `math.random() > 0.5` comparison, not the algebraically-flipped `<=`. `>` lowers
+    // to `LT(0.5, x)`; flipping to `<=` would reverse the operands and, on NaN or a raising compare, change the
+    // result/error. Swapping the arms instead of negating recompiles to the same LT and branch.
+    CHECK(ContainsRegex(out, std::regex(R"(if\s+math\.random\(\)\s*>\s*0\.5\s+then\s+return\s+1\s+else\s+return\s+0\s+end)")));
 }
 
 TEST_CASE("Roundtrip: repeat-until loop", "[Decompiler][Roundtrip]") {

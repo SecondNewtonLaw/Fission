@@ -122,7 +122,7 @@ struct DeserializedFunction {
     std::uint8_t uTypeVersion;
     std::uint8_t uBytecodeVersion;
 
-    std::uint8_t bytecodeId{};
+    std::uint32_t bytecodeId{};
     std::uint8_t maxstacksize{};
     std::uint8_t numparams{};
     std::uint8_t nups{};

@@ -206,6 +206,8 @@ class IfStatementNode : public Statement {
     std::shared_ptr<Expression> condition;
     std::shared_ptr<BlockStatementNode> thenBranch;
     std::shared_ptr<BlockStatementNode> elseBranch;
+    // the lifter placed the jump target first; the source's `then` is the else arm
+    bool bFallthroughInElse = false;
     IfStatementNode() { this->nodeKind = ASTNodeKind::IfStatement; }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }

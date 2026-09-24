@@ -101,10 +101,12 @@ int main(int argc, char **argv) {
         outputFlags |= DecompilerFlags::OptimizeIR;
     if (debugNotes)
         outputFlags |= DecompilerFlags::FissionDebugNotes;
-    int testOptimizationLevel = 1;
+    int testOptimizationLevel = 1, testDebugLevel = 2;
     for (int i = 1; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], "--opt") == 0)
             testOptimizationLevel = std::clamp(std::atoi(argv[i + 1]), 0, 2);
+        else if (std::strcmp(argv[i], "--debug") == 0)
+            testDebugLevel = std::clamp(std::atoi(argv[i + 1]), 0, 2);
     int inputExitCode = 0;
     bool handledInputs = false;
 
@@ -125,7 +127,7 @@ int main(int argc, char **argv) {
                 if (strncmp(flag->name, "Luau", 4) == 0)
                     flag->value = true;
             Luau::CompileOptions sopts{};
-            sopts.optimizationLevel = 1;
+            sopts.optimizationLevel = testOptimizationLevel;
             sopts.debugLevel = 1;
             const std::string bc = Luau::compile(ssrc, sopts);
             if (bc.empty() || bc[0] == '\0') {
@@ -254,7 +256,7 @@ int main(int argc, char **argv) {
             decompiler.SetDecompileBudget(std::chrono::seconds(120));
             Luau::CompileOptions dopts{};
             dopts.optimizationLevel = testOptimizationLevel;
-            dopts.debugLevel = 2;
+            dopts.debugLevel = testDebugLevel;
             const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::CaptureAST | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test-ast] %s: code=%d\n", argv[i + 1], static_cast<int>(dr.resultCode));
             PrintDecompileError(dr);
@@ -279,7 +281,7 @@ int main(int argc, char **argv) {
             decompiler.SetDecompileBudget(std::chrono::seconds(120));
             Luau::CompileOptions dopts{};
             dopts.optimizationLevel = testOptimizationLevel;
-            dopts.debugLevel = 2;
+            dopts.debugLevel = testDebugLevel;
             const auto dr = decompiler.DecompileTestCode(dsrc, DecompilerFlags::AutoNameVariables | DecompilerFlags::WriteIRToFile | outputFlags, dopts);
             std::fprintf(stderr, "[decompile-test] %s: code=%d (IR -> ir_out.txt)\n", argv[i + 1], static_cast<int>(dr.resultCode));
             PrintDecompileError(dr);
@@ -324,7 +326,10 @@ int main(int argc, char **argv) {
         if (!r.timingStatistics.empty())
             std::fprintf(stderr, "%s\n", r.timingStatistics.c_str());
         std::cout << "\n===SOURCE===\n" << r.decompilationOutput << "\n===END===\n";
-        if (r.resultCode != DecompileResult::Success)
+        const std::string recompiled = Luau::compile(r.decompilationOutput, Luau::CompileOptions{});
+        const bool recompiles = !recompiled.empty() && recompiled.front() != '\0';
+        std::fprintf(stderr, "[roblox] recompile: %s\n", recompiles ? "ok" : recompiled.empty() ? "(empty)" : recompiled.c_str() + 1);
+        if (r.resultCode != DecompileResult::Success || !recompiles)
             inputExitCode = 1;
         handledInputs = true;
         ++i;
