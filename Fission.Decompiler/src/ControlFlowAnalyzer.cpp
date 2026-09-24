@@ -1190,6 +1190,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 continue;
             if (!dominates(b.dwBlockId, blk.dwBlockId))
                 continue;
+            if (blk.lpHead->instructionIndex > blocks[*b.loopLatch].lpTail->instructionIndex)
+                continue;
 
             // Choose the deepest dominating loop header.
             bool deeper = (innermostHeader < 0);

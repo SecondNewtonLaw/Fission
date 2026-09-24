@@ -67,6 +67,30 @@ static void CheckNoIntroducedGeneratedGlobals(const std::string &source) {
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
 }
 
+TEST_CASE("Generic for natural exit remains outside loop", "[Decompiler][Roundtrip][FuzzRegress]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(
+x = true
+if x then
+    for k in pairs({1, 2}) do
+        local function h() h() end
+        h = "hi"
+        if function() h() end then break end
+    end
+else
+    print(0)
+end
+return 1
+)LUA";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO("decompiled output:\n" << result.decompilationOutput);
+    std::string error;
+    REQUIRE(Recompiles(result.decompilationOutput, &error));
+    CHECK(fuzz::CompareSemantics(Luau::compile(source), Luau::compile(result.decompilationOutput), {Luau::compile("")}).kind == fuzz::SemVerdict::Kind::Match);
+}
+
 TEST_CASE("Forward-reference oracle recognizes Luau local bindings", "[Fuzz][ForwardRef][Regression]") {
     const std::string source = GENERATE(
         "local function v0() local v0 = {} return v0 end v0()",
