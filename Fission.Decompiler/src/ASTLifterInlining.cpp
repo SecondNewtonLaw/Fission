@@ -794,10 +794,9 @@ bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
                     continue;
                 return false;
             }
-            if ((user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB) && user->instructionIndex > e->instructionIndex &&
+            if (user->instructionIndex > e->instructionIndex &&
+                (user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB || m_defsByInstruction.contains(user)) &&
                 IsConstructorElement(user))
-                continue;
-            if (user->instructionIndex > e->instructionIndex && m_defsByInstruction.contains(user) && IsConstructorElement(user))
                 continue;
             if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
                  user->operation == LiftedOperation::SETTABLEN) &&

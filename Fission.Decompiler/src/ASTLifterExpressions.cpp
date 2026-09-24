@@ -145,7 +145,21 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     const auto tableRead = [](LiftedOperation operation) {
         return operation == LiftedOperation::GETTABLE || operation == LiftedOperation::GETTABLEKS || operation == LiftedOperation::GETTABLEN;
     };
-    if (BinaryOperatorSymbol(def->operation) || unary(def->operation) || tableRead(def->operation)) {
+    const auto callCallee = [&](const LiftedInstruction *instruction) -> const LiftedOperand * {
+        if (instruction->operation != LiftedOperation::CALL && instruction->operation != LiftedOperation::CALLFB &&
+            instruction->operation != LiftedOperation::NAMECALL)
+            return nullptr;
+        const LiftedInstruction *site = instruction;
+        if (instruction->operation != LiftedOperation::NAMECALL && instruction->instructionIndex >= 2) {
+            const auto &previous = m_currentFunction->lpLiftedFunction->instructions[instruction->instructionIndex - 2];
+            if (previous.operation == LiftedOperation::NAMECALL && !previous.operands.empty() && !instruction->operands.empty() &&
+                previous.operands[0].value.reg == instruction->operands[0].value.reg)
+                site = &previous;
+        }
+        const size_t source = site->operation == LiftedOperation::NAMECALL ? 1 : 0;
+        return site->operands.size() > source && site->operands[source].type == LiftedOperandType::Register ? &site->operands[source] : nullptr;
+    };
+    if (BinaryOperatorSymbol(def->operation) || unary(def->operation) || tableRead(def->operation) || callCallee(def)) {
         struct Frame {
             const LiftedInstruction *instruction;
             uint8_t phase = 0;
@@ -158,8 +172,9 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             if (operand.type == LiftedOperandType::Register && !m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion}) &&
                 !m_inlineableClosures.contains({static_cast<uint8_t>(operand.value.reg), operand.ssaVersion})) {
                 inner = m_currentFunction->GetDefinition(operand);
-                if (inner && (inner->instructionIndex >= parent->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) ||
-                              !ShouldInline(inner) || (!BinaryOperatorSymbol(inner->operation) && !unary(inner->operation) && !tableRead(inner->operation))))
+                if (inner &&
+                    (inner->instructionIndex >= parent->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) || !ShouldInline(inner) ||
+                     (!BinaryOperatorSymbol(inner->operation) && !unary(inner->operation) && !tableRead(inner->operation) && !callCallee(inner))))
                     inner = nullptr;
             }
             if (inner)
@@ -173,7 +188,10 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             const char *binary = BinaryOperatorSymbol(current->operation);
             if (frame.phase == 0) {
                 frame.phase = 1;
-                descend(current->operands[1], current);
+                if (const auto *callee = callCallee(current))
+                    descend(*callee, current);
+                else
+                    descend(current->operands[1], current);
                 continue;
             }
             if ((binary || current->operation == LiftedOperation::GETTABLE) && frame.phase == 1) {
@@ -199,6 +217,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
                 value = std::make_shared<IndexExpressionNode>(
                     value, std::make_shared<NumberLiteralNode>(static_cast<double>(current->operands[2].value.imm.n) + 1.0)
                 );
+            else if (callCallee(current))
+                value = LiftCall(*current, current->instructionIndex, true, std::move(value));
             else {
                 const char *symbol = current->operation == LiftedOperation::NOT ? "not " : current->operation == LiftedOperation::MINUS ? "-" : "#";
                 value = std::make_shared<UnaryExpressionNode>(symbol, value);

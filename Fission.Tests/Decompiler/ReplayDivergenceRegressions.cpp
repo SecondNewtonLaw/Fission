@@ -2356,3 +2356,14 @@ TEST_CASE("Compiler audit: nested table constructors keep distant SETLIST stores
         CheckSemanticParity(source, 2, 1);
     }
 }
+
+TEST_CASE("Compiler audit: alternating table reads and calls lift without depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    for (const int depth : {35, 70}) {
+        std::string source = "local t = {}\nt[1] = function() return t end\nprint(t";
+        for (int i = 0; i < depth; ++i)
+            source += "[1]()";
+        source += " == t)";
+        CheckSemanticParity(source, 1, 1);
+        CheckSemanticParity(source, 2, 1);
+    }
+}
