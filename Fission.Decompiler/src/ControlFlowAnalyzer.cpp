@@ -850,12 +850,9 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 block.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
                 successor.dwBlockFlags |= static_cast<uint32_t>(loopFlag);
 
-                for (uint32_t succId2 : successor.successors) {
-                    if (dominates(successor.dwBlockId, succId2)) {
-                        block.loopExit = succId2;
-                        successor.loopExit = succId2;
-                        break;
-                    }
+                if (const auto natural = exitAfterLatch(successor, block)) {
+                    block.loopExit = joinedExit(*natural, successor, block);
+                    successor.loopExit = block.loopExit;
                 }
             }
         }

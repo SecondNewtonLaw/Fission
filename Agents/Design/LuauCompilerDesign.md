@@ -449,7 +449,7 @@ These run after each function is emitted and change the CFG the decompiler sees.
 | `SETLIST` flush before keyed items (§11) | Table coalescing | Item order in the constructor matches store order |
 | Final `SETLIST C=0` (§11) | AST table reconstruction | Keep the trailing call's full result tuple; preserve earlier keyed and fixed-array stores, including the stored value of a computed key that later changes |
 | FASTCALL skip region (§10) | Lifter/CFA | The fallback setup and `CALL` are one call; the skip is not a branch |
-| O2 inlined returns (§12) | `joinedExit` (CFA), deferred while header, loop-exit phi predeclare | While/repeat: when an exit leaving from the body bypasses the natural exit and every exit flows straight into one block, that block (the return label) is the loop exit; the header lifts as `while true` with break arms, and a value first written in those arms is declared ahead of the loop. Numeric/generic for: open |
+| O2 inlined returns (§12) | `joinedExit` (CFA), loop-exit phi predeclare, guarded for natural exit | An exit from the body can bypass natural-exit code and join at the return label. CFA uses the instruction after the latch to find the natural exit even when `break` also reaches it, then finds the shared join. While/repeat lift with break arms. Numeric/generic for lift the natural path under a flag that early exits set; result locals are declared before the loop. |
 | `AND`/`OR` read both registers (§6) | `ShouldInline` | Never inline an effectful or raising def into the right operand of register-form `and`/`or`: that position becomes lazy |
 | A register reused by a new local keeps its default name (§3) | `InputRebound` | A pure def is not inlined past a non-call write that reuses a direct operand's name |
 | `x and function() end or y` (§6) | `DetectOrChain` `truthyClosure` | A tested closure folds to `true` only when the test is its sole user |
@@ -458,7 +458,6 @@ These run after each function is emitted and change the CFG the decompiler sees.
 | `local function f` captures its own register (§3) | Closure handlers | The self-capture alias is the closure's own name unless its value flows into a phi |
 | VAL-captured locals are never reassigned (§3) | Capture pre-pass | Without debug names, a captured version whose register is reused gets its own name so loop closures stay per-iteration |
 
-**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. Exceptions:
-- **O2 inlined `return` inside a numeric or generic `for`.** The natural-exit code must run only when the loop was not left early. That needs a synthetic flag local, because Luau has no `goto`.
+**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. On 2026-09-24, targeted O2 regressions also matched for numeric and generic for loops with inlined returns, a break plus an inlined nil return, and nested for loops. Remaining exceptions:
 - **An if-expression condition term that tests a function literal, inside a compound condition whose body cannot be duplicated** (for example, it holds an infinite loop). The value-term folder cannot render the closure. Fuzz-only shape.
 - **Expressions nested more than 64 deep.** `LiftExpression` rejects them as hostile input, for example 65+ chained method calls. Valid Luau, but rare.

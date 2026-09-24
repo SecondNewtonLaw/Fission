@@ -157,6 +157,7 @@ class ASTLifter {
 
     // Branches to the innermost loop exit become break statements.
     std::vector<uint32_t> m_loopExitStack;
+    std::vector<std::pair<uint32_t, std::string>> m_earlyForExits;
     // Blocks whose lifting is still in progress up the call chain; a shared tail must not re-enter them.
     std::vector<uint32_t> m_liftingBlocks;
     // Phi outputs of a condition's value term, read as the term's rebuilt expression while the condition is lifted.

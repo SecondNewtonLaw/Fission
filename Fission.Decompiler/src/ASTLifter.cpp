@@ -226,6 +226,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_hoistedRegisters.clear();
     this->m_capturedVariableWrites.clear();
     this->m_processedInstructions.clear();
+    this->m_earlyForExits.clear();
     this->m_setListKeySnapshots.clear();
     this->m_inlineConsumedDefs.clear();
     this->m_foldConsumedDefs.clear();
@@ -956,6 +957,14 @@ static uint32_t ResolveLoopExitFromLatch(const std::vector<BasicBlock> &blocks, 
 
 ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, boost::unordered_flat_set<uint32_t> &visited) {
     std::vector<std::shared_ptr<Statement>> nodes;
+    const auto markEarlyForExit = [&](uint32_t target) {
+        for (auto it = m_earlyForExits.rbegin(); it != m_earlyForExits.rend(); ++it)
+            if (it->first == target) {
+                auto name = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(it->second));
+                nodes.push_back(std::make_shared<AssignmentStatementNode>(name, std::make_shared<BooleanLiteralNode>(true)));
+                break;
+            }
+    };
 
     // true only for the first block of this call (the branch/region entry). A visited block met here is
     // a shared branch arm; met later in the linear walk it is a genuine convergence that must stop.
@@ -1052,6 +1061,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // body code reaching the innermost loop exit directly == `break` (normal exit goes via latch).
         // don't mark visited; exit is still lifted once after the loop.
         if (!m_loopExitStack.empty() && currentBlockId == m_loopExitStack.back()) {
+            markEarlyForExit(currentBlockId);
             nodes.push_back(std::make_shared<BreakStatementNode>());
             break;
         }
@@ -1527,6 +1537,61 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             if (block.loopLatch.has_value()) {
                 uint32_t latchIdx = block.loopLatch.value();
                 uint32_t exitIdx = block.loopLatch.value();
+                std::optional<std::pair<uint32_t, std::string>> earlyForExit;
+                constexpr uint32_t kForFlags = static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
+                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed);
+                if ((block.dwBlockFlags & kForFlags) != 0 && block.loopExit) {
+                    const uint32_t natural = ResolveLoopExitFromLatch(m_currentFunction->basicBlocks, latchIdx, currentBlockId);
+                    if (natural != InvalidBlockId && natural != *block.loopExit && CanReach(natural, *block.loopExit, currentBlockId, {currentBlockId})) {
+                        std::string name = std::format("__fission_early_for_{}", currentBlockId);
+                        const auto occupied = [&](const std::string &candidate) {
+                            const auto named = [&](const auto &names) {
+                                return std::ranges::any_of(names, [&](const auto &item) { return item.second == candidate; });
+                            };
+                            return m_currentFunction->enclosingNames.contains(candidate) || named(m_currentFunction->variableNames) ||
+                                   named(m_currentFunction->ssaOverrides) || named(m_currentFunction->globalRegNames) ||
+                                   named(m_currentFunction->upvalueNames) ||
+                                   std::ranges::any_of(
+                                       m_currentFunction->lpLiftedFunction->lpDeserialized->locvars,
+                                       [&](const auto &local) { return local.varname == candidate; }
+                                   ) ||
+                                   std::ranges::any_of(m_currentFunction->lpLiftedFunction->lpDeserialized->constants, [&](const auto &constant) {
+                                       return constant.kType == LUA_TSTRING && std::get<std::string>(constant.constantData) == candidate;
+                                   });
+                        };
+                        for (int suffix = 2; occupied(name); ++suffix)
+                            name = std::format("__fission_early_for_{}_{}", currentBlockId, suffix);
+                        earlyForExit = std::make_pair(natural, name);
+                        nodes.push_back(
+                            std::make_shared<VariableDeclarationNode>(
+                                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), std::make_shared<BooleanLiteralNode>(false)
+                            )
+                        );
+                        for (const auto &phi : m_currentFunction->basicBlocks[*block.loopExit].phiNodes) {
+                            if (phi.operands.empty() || phi.operands[0].type != LiftedOperandType::Register ||
+                                m_definedRegisters.contains(phi.operands[0].value.reg))
+                                continue;
+                            bool early = false, normal = false;
+                            for (size_t inputIndex = 1; inputIndex < phi.operands.size(); ++inputIndex) {
+                                const auto &input = phi.operands[inputIndex];
+                                const auto *definition = input.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(input) : nullptr;
+                                const int origin = definition ? BlockOf(definition) : -1;
+                                early |= origin > static_cast<int>(currentBlockId) && origin < static_cast<int>(latchIdx);
+                                normal |= origin >= static_cast<int>(natural) && origin < static_cast<int>(*block.loopExit);
+                            }
+                            if (early && normal) {
+                                nodes.push_back(
+                                    std::make_shared<VariableDeclarationNode>(
+                                        std::make_shared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
+                                    )
+                                );
+                                m_definedRegisters.insert(phi.operands[0].value.reg);
+                                m_hoistedRegisters.insert(phi.operands[0].value.reg);
+                            }
+                        }
+                    }
+                }
 
                 boost::unordered_flat_set<uint32_t> loopVisited = visited;
 
@@ -1926,16 +1991,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             const bool hasBreakTarget = (exitIdx != InvalidBlockId && exitIdx != latchIdx && exitIdx != bodyIdx);
                             if (hasBreakTarget)
                                 m_loopExitStack.push_back(exitIdx);
+                            if (earlyForExit)
+                                m_earlyForExits.emplace_back(exitIdx, earlyForExit->second);
                             const auto definedBeforeLoopBody = m_definedRegisters;
-                            forNode->lpLoopBody = CreateBlock(
-                                co_await LiftControlFlow(
-                                    bodyIdx, *block.loopLatch,
-                                    visited
-                                )
-                            );
+                            forNode->lpLoopBody = CreateBlock(co_await LiftControlFlow(bodyIdx, *block.loopLatch, visited));
                             m_definedRegisters = definedBeforeLoopBody;
                             if (hasBreakTarget)
                                 m_loopExitStack.pop_back();
+                            if (earlyForExit)
+                                m_earlyForExits.pop_back();
 
                             // use the body's string, not LiftExpression (may inline a LOAD const). route via
                             // ResolveVariableName so its m_definedRegisters bookkeeping still runs.
@@ -2418,6 +2482,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         const bool hasBreakTarget = (exitIdx != InvalidBlockId && exitIdx != block.loopLatch.value_or(InvalidBlockId) && exitIdx != bodyIdx);
                         if (hasBreakTarget)
                             m_loopExitStack.push_back(exitIdx);
+                        if (earlyForExit)
+                            m_earlyForExits.emplace_back(exitIdx, earlyForExit->second);
                         const auto definedBeforeLoopBody = m_definedRegisters;
                         // the loop variables are bound by the `for`; a write in the body assigns them
                         for (int i = 0; i < numVars; ++i)
@@ -2426,6 +2492,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         m_definedRegisters = definedBeforeLoopBody;
                         if (hasBreakTarget)
                             m_loopExitStack.pop_back();
+                        if (earlyForExit)
+                            m_earlyForExits.pop_back();
 
                         for (int i = 0; i < numVars; ++i) {
                             LiftedOperand varOp;
@@ -2498,18 +2566,31 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             m_definedRegisters.erase(baseReg + 3 + i);
                 }
 
-            // A chosen "exit" with no path beyond the loop is actually inside the loop body.
-            bool exitInBody = false;
-            if (exitIdx != InvalidBlockId && exitIdx < m_currentFunction->basicBlocks.size() && block.loopLatch.has_value()) {
-                bool hasLoopBack = false;
-                bool hasPostLoopPath = false;
-                for (uint32_t s : m_currentFunction->basicBlocks[exitIdx].successors)
-                    if (s == block.loopLatch.value() || s == currentBlockId)
-                        hasLoopBack = true;
-                    else
-                        hasPostLoopPath = true;
-                exitInBody = hasLoopBack && !hasPostLoopPath;
-            }
+                if (earlyForExit) {
+                    auto normalVisited = visited;
+                    auto normal = co_await LiftControlFlow(earlyForExit->first, exitIdx, normalVisited);
+                    if (!normal.empty()) {
+                        auto guard = std::make_shared<IfStatementNode>();
+                        guard->condition = std::make_shared<UnaryExpressionNode>(
+                            "not ", std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(earlyForExit->second))
+                        );
+                        guard->thenBranch = CreateBlock(normal);
+                        nodes.push_back(guard);
+                    }
+                }
+
+                // A chosen "exit" with no path beyond the loop is actually inside the loop body.
+                bool exitInBody = false;
+                if (exitIdx != InvalidBlockId && exitIdx < m_currentFunction->basicBlocks.size() && block.loopLatch.has_value()) {
+                    bool hasLoopBack = false;
+                    bool hasPostLoopPath = false;
+                    for (uint32_t s : m_currentFunction->basicBlocks[exitIdx].successors)
+                        if (s == block.loopLatch.value() || s == currentBlockId)
+                            hasLoopBack = true;
+                        else
+                            hasPostLoopPath = true;
+                    exitInBody = hasLoopBack && !hasPostLoopPath;
+                }
                 nextBlockId = exitInBody ? InvalidBlockId : exitIdx;
             }
 
@@ -2590,6 +2671,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         case BlockType::Break:
             Explain(block, "emit break for edge to B{}", block.successors.empty() ? InvalidBlockId : block.successors.front());
             nodes.insert(nodes.end(), stmts.begin(), stmts.end());
+            if (!block.successors.empty())
+                markEarlyForExit(block.successors.front());
             nodes.push_back(std::make_shared<BreakStatementNode>());
             break;
         case BlockType::Return:

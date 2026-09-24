@@ -2162,3 +2162,85 @@ return f(true), f(false))LUA";
     CheckSemanticParity(source, 1, 1);
     CheckSemanticParity(source, 2, 2);
 }
+
+TEST_CASE("Compiler audit: an O2 inlined return skips a numeric for natural exit", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function probe(limit)
+    for i = 1, limit do
+        if i == 2 then return 100 + i end
+    end
+    return -1
+end
+local limits = {3, 1}
+print(probe(limits[1]), probe(limits[2])))LUA";
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: an O2 inlined return skips a generic for natural exit", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function probe(items)
+    for _, value in ipairs(items) do
+        if value == 2 then return 100 + value end
+    end
+    return -1
+end
+local items = {{1, 2, 3}, {1}}
+print(probe(items[1]), probe(items[2])))LUA";
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: an O2 inlined nil return remains distinct from a loop break", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function probe(limit, stop)
+    for i = 1, limit do
+        if i == stop then break end
+        if i == 2 then return nil end
+    end
+    return -1
+end
+local limits = {3, 3}
+print(probe(limits[1], 4), probe(limits[2], 1)))LUA";
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: O2 inline exits keep pairs and custom iterator results", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto pairsSource = R"LUA(local function probe(items)
+    for key, value in pairs(items) do
+        if key == "hit" then return value end
+    end
+    return -1
+end
+local items = {{hit = 7}, {miss = 1}}
+print(probe(items[1]), probe(items[2])))LUA";
+    const auto customSource = R"LUA(local function iter(state, index)
+    local nextIndex = index + 1
+    if nextIndex > #state then return nil end
+    return nextIndex, state[nextIndex]
+end
+local function probe(items)
+    for _, value in iter, items, 0 do
+        if value == 2 then return 100 + value end
+    end
+    return -1
+end
+local items = {{1, 2, 3}, {1}}
+print(probe(items[1]), probe(items[2])))LUA";
+    CheckSemanticParity(pairsSource, 2, 1);
+    CheckSemanticParity(pairsSource, 2, 2);
+    CheckSemanticParity(customSource, 2, 1);
+    CheckSemanticParity(customSource, 2, 2);
+}
+
+TEST_CASE("Compiler audit: O2 nested for inline exits skip both natural paths", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function probe(limit)
+    for i = 1, limit do
+        for j = 1, limit do
+            if i == 2 and j == 2 then return i * 10 + j end
+        end
+    end
+    return -1
+end
+print(probe(3), probe(1)))LUA";
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+}
