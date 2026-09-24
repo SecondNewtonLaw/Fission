@@ -214,3 +214,17 @@ return sum)LUA";
     }
     REQUIRE(found);
 }
+
+TEST_CASE("Compiler short-circuit fallback remains reachable after false primary", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function k(a, b, c, d)
+    return (a and b) and c or d
+end
+print(k(true, true, false, 7))
+print(k(false, true, true, 8))
+return k(true, true, 5, 9))LUA";
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+        lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+    }
+}
