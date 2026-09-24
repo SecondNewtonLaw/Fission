@@ -1,6 +1,9 @@
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wunused-parameter"
 #include "Luau/Compiler.h"
+#pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("Semantic oracle normalizes runtime addresses in printed strings", "[Fuzz][SemanticOracle]") {
