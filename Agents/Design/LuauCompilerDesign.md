@@ -434,7 +434,7 @@ These run after each function is emitted and change the CFG the decompiler sees.
 
 | Compiler behaviour | Fission counterpart | Invariant to hold |
 |---|---|---|
-| Condition = forward-jump tree, 2 exits, value-region leaves (§5) | `DetectOrChain`, `DetectGuardRegion`, value terms | Any tree of pure tests lifts to one boolean expression; a leaf that computes a value is part of the condition only through its phi register |
+| Condition = forward-jump tree, 2 exits, value-region leaves (§5) | `DetectOrChain`, `DetectGuardRegion`, value terms | Any tree of pure tests lifts to one boolean expression; a leaf that computes a value is part of the condition only through its phi register. If the phi result is used only by a truth test, a closure input can be replaced with `true`; no closure name is emitted. |
 | Then-arm falls through from the condition (§7) | `FindMergeBlock`, IfHeader arm selection | The fall-through successor of the last test is the then-arm |
 | Break/continue fast path jumps straight to the loop target (§7) | Break/continue edge classification | A condition exit may *be* a loop exit/continue target, with no JUMP block |
 | Repeat has two exits when locals are captured (§8) | `exitAfterLatch`, repeat detection | `skipLabel` and `endLabel` are both loop exits |
@@ -458,6 +458,5 @@ These run after each function is emitted and change the CFG the decompiler sees.
 | `local function f` captures its own register (§3) | Closure handlers | The self-capture alias is the closure's own name unless its value flows into a phi |
 | VAL-captured locals are never reassigned (§3) | Capture pre-pass | Without debug names, a captured version whose register is reused gets its own name so loop closures stay per-iteration |
 
-**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. On 2026-09-24, targeted O2 regressions also matched for numeric and generic for loops with inlined returns, a break plus an inlined nil return, and nested for loops. Remaining exceptions:
-- **An if-expression condition term that tests a function literal, inside a compound condition whose body cannot be duplicated** (for example, it holds an infinite loop). The value-term folder cannot render the closure. Fuzz-only shape.
+**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. On 2026-09-24, targeted regressions also matched for O2 numeric and generic for loops with inlined returns, a break plus an inlined nil return, nested for loops, and O1/O2 if-expression closure condition terms with and without captures. Remaining exception:
 - **Expressions nested more than 64 deep.** `LiftExpression` rejects them as hostile input, for example 65+ chained method calls. Valid Luau, but rare.

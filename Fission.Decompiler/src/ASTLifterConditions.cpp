@@ -644,7 +644,13 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         const auto index = static_cast<size_t>(at - target.predecessors.begin()) + 1;
         if (at == target.predecessors.end() || target.phiNodes.size() != 1 || index >= target.phiNodes.front().operands.size())
             return std::nullopt;
-        return build ? LiftExpression(target.phiNodes.front().operands[index], true) : Expr{};
+        if (!build)
+            return Expr{};
+        const auto &input = target.phiNodes.front().operands[index];
+        const auto *definition = input.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(input) : nullptr;
+        if (definition && (definition->operation == LiftedOperation::NEWCLOSURE || definition->operation == LiftedOperation::DUPCLOSURE))
+            return std::make_shared<BooleanLiteralNode>(true);
+        return LiftExpression(input, true);
     };
     const auto diamond = [&](const ValueTerm &term, uint32_t x, uint32_t join, bool build) -> std::optional<Expr> {
         const auto &block = blocks[x];

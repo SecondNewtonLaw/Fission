@@ -2244,3 +2244,29 @@ print(probe(3), probe(1)))LUA";
     CheckSemanticParity(source, 2, 1);
     CheckSemanticParity(source, 2, 2);
 }
+
+TEST_CASE("Compiler audit: a closure used only as an if-expression condition is truthy", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local calls = 0
+local function choose()
+    calls += 1
+    return calls == 2
+end
+if choose() or (if choose() then function() end else nil) then
+    while next({}) do
+        print("body")
+    end
+    print("then")
+else
+    print("else")
+end)LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 1, 2);
+    CheckSemanticParity(source, 2, 1);
+    CheckSemanticParity(source, 2, 2);
+    std::string capturingSource = source;
+    capturingSource.replace(capturingSource.find("function() end"), sizeof("function() end") - 1, "function() return calls end");
+    CheckSemanticParity(capturingSource, 1, 1);
+    CheckSemanticParity(capturingSource, 1, 2);
+    CheckSemanticParity(capturingSource, 2, 1);
+    CheckSemanticParity(capturingSource, 2, 2);
+}
