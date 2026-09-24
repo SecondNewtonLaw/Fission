@@ -7,7 +7,7 @@
 #include <catch2/catch_test_macros.hpp>
 #include <string>
 
-TEST_CASE("Numeric for preserves distinct staged operands", "[Decompiler][LoopOperand][Semantics]") {
+TEST_CASE("Numeric for evaluates its first staged operand before a later error", "[Decompiler][LoopOperand][Semantics]") {
     fuzz::EnableLuauFlags();
     const std::string source = R"LUA(local v0 = {}
 for i1 = print("hello"), t(), v0 do
@@ -24,15 +24,16 @@ return { tonumber, [t] = nil, [353] = next }, v0.field.field
     std::string decompiledBytecode;
     REQUIRE(fuzz::LuauCompiles(source, &originalBytecode));
     REQUIRE(fuzz::LuauCompiles(result.output, &decompiledBytecode));
-    const auto preludes = fuzz::CompilePreludes([](const std::string &prelude, std::string *bytecode) {
-        return fuzz::LuauCompiles(prelude, bytecode);
-    });
+    const auto preludes = fuzz::CompilePreludes([](const std::string &prelude, std::string *bytecode) { return fuzz::LuauCompiles(prelude, bytecode); });
     REQUIRE_FALSE(preludes.empty());
     for (size_t i = 0; i < preludes.size(); ++i) {
         INFO("fixture " << i);
         const auto original = fuzz::RunLuauTrace(originalBytecode, preludes[i]);
         const auto decompiled = fuzz::RunLuauTrace(decompiledBytecode, preludes[i]);
         INFO("original: " << original.trace << "decompiled: " << decompiled.trace);
+        REQUIRE(original.status != fuzz::SemTrace::Status::Timeout);
+        REQUIRE(original.status != fuzz::SemTrace::Status::LoadFailed);
+        REQUIRE(original.trace.starts_with("\"hello\"\n"));
         CHECK(decompiled.status == original.status);
         CHECK(decompiled.trace == original.trace);
     }

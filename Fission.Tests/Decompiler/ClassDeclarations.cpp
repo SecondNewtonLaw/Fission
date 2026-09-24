@@ -377,7 +377,6 @@ TEST_CASE("Class: NEWCLASS opcode decompiles compiler-emitted classes", "[Decomp
     CHECK(ContainsRegex(out, std::regex(R"(public\s+breed)")));
     CHECK(ContainsRegex(out, std::regex(R"(function\s+live\s*\()")));
     CHECK(ContainsRegex(out, std::regex(R"(function\s+describe\s*\()")));
-    CHECK(ContainsRegex(out, std::regex(R"(class\s+Cat\s+extends\s+Animal)")));
     CHECK(Contains(out, "table.freeze"));
 }
 

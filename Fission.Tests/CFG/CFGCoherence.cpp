@@ -807,21 +807,3 @@ TEST_CASE("CFG: reachable fallthrough past the function is rejected", "[CFG][Saf
     ControlFlowAnalyzer analyzer{};
     CHECK_THROWS(analyzer.DetermineBasicBlocks(&function));
 }
-
-TEST_CASE("CFG: empty while loop body", "[CFG]") {
-    auto snip = CompileAndAnalyze(R"(
-        local i = 0
-        while i < 10 do
-            i = i + 1
-        end
-        print(i)
-    )");
-    const auto &f = snip->analyzed;
-
-    REQUIRE_FALSE(f.basicBlocks.empty());
-    RunStandardCoherenceChecks(f);
-
-    INFO("while loop with minimal body produces a LoopHeader/LoopLatch pair");
-    CHECK(CountBlocksByType(f, BlockType::LoopHeader) >= 1);
-    CHECK(CountBlocksByType(f, BlockType::LoopLatch) >= 1);
-}

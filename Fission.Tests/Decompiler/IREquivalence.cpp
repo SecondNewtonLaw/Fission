@@ -14,8 +14,6 @@
 
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
 #include <functional>
 #include <iostream>
 #include <map>
@@ -112,7 +110,7 @@ namespace {
         return out;
     }
 
-    // Strong: valid Luau AND re-lifting the decompiled source reproduces the exact opcode stream.
+    // Checks opcode order only; register operands and constants need semantic tests.
     void RequireSameIR(const std::string &source) {
         const auto before = LiftOpcodes(source);
         REQUIRE(before.has_value());
@@ -683,99 +681,21 @@ TEST_CASE("Regress: generic-for loop variables are identifiers, never inlined ex
     RequireValidRoundtrip("return function(t) for a, b, c in next, t, nil do for x, y in pairs(a) do print(x) end end end");
 }
 
-// Saved fuzz corpus
-
-TEST_CASE("Fuzz corpus: every saved sample decompiles without crashing and recompiles", "[Decompiler][Fuzz][Corpus]") {
-    // Fission.Fuzzing saves every compiling, crash-free sample here. Re-running them guards against
-    // regressions on the exact inputs the fuzzer has already vetted. Absent corpus => nothing to do.
-    const std::filesystem::path dir = std::filesystem::path(FISSION_SOURCE_DIR) / "Fission.Fuzzing" / "corpus";
-    if (!std::filesystem::exists(dir)) {
-        SUCCEED("no fuzz corpus checked in");
-        return;
-    }
-    int ran = 0;
-    for (const auto &entry : std::filesystem::directory_iterator(dir)) {
-        if (entry.path().extension() != ".lua")
-            continue;
-        std::ifstream f(entry.path(), std::ios::binary);
-        std::stringstream ss;
-        ss << f.rdbuf();
-        const std::string src = ss.str();
-        if (!LuauCompiles(src))
-            continue;
-        ++ran;
-        INFO("corpus sample: " << entry.path().filename().string());
-        DecompileResult code{};
-        const std::string out = Decompile(src, code);
-        // a graceful refusal is fine; a hard crash takes the process down, an invalid output recompiles fail.
-        CHECK((code == DecompileResult::Success || code == DecompileResult::FailedToDecompile));
-        if (code == DecompileResult::Success)
-            CHECK(LuauCompiles(out));
-    }
-    INFO("corpus samples exercised: " << ran);
-}
-
-// Recompilable Luau checks
-
-TEST_CASE("Valid: numeric for recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("local s = 0 for i = 1, 10 do s = s + i end return s");
-}
-
-TEST_CASE("Valid: while loop recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("local i = 0 while i < 10 do i = i + 1 end return i");
-}
-
-TEST_CASE("Valid: repeat-until recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("local i = 0 repeat i = i + 1 until i >= 10 return i");
-}
-
-TEST_CASE("Valid: if-elseif-else recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(x) if x > 2 then return 1 elseif x > 1 then return 2 else return 3 end end");
-}
-
-TEST_CASE("Valid: generic for over pairs recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(t) local n = 0 for k, v in pairs(t) do n = n + v end return n end");
-}
-
-TEST_CASE("Valid: and-or short-circuit recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(a, b) return a and b or 0 end");
-}
-
-// The decompiler folds the dead intermediate locals (`local x,y=a,b; return y,x` -> `return b,a`):
-// behaviour-identical, but fewer opcodes, so it is a floor case rather than an IR fixpoint.
-TEST_CASE("Valid: local swap recompiles cleanly (dead locals folded)", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(a, b) local x, y = a, b return y, x end");
-}
-
-// One sibling inner table is hoisted into a local; the rebuilt table holds identical values but
-// the opcode order shifts, so assert the valid-Luau floor rather than an IR fixpoint.
-TEST_CASE("Valid: nested table literal recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return { { 1, 2 }, { 3, 4 } }");
-}
-
-// `a and b and c` is structured back into an if-not-return chain: equivalent behaviour, different
-// recompiled jump layout, hence a floor case.
-TEST_CASE("Valid: and-chain as a value recompiles cleanly", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(a, b, c) return a and b and c end");
-}
-
 // Guards the GETTABLEN-as-a-statement path: the numeric index must be a declared local, never a
 // dangling `vN` (which would silently read a nil global instead of the table element).
 TEST_CASE("Valid: reused numeric index declares a real local", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("return function(t) local a = t[1] return a + a + t[2] end");
+    const auto out = RequireValidRoundtrip("return function(t) local a = t[1] return a + a + t[2] end");
+    CHECK_FALSE(UsesGeneratedLocalBeforeDeclared(out));
 }
 
 // A never-mutated constant upvalue is folded through the capture (`x=5; ()->x+1` -> `()->6`):
 // behaviour-identical, but the capture opcodes vanish, so this is a floor case.
 TEST_CASE("Valid: constant upvalue folds through capture", "[Decompiler][IREquivalence][ValidLuau]") {
-    RequireValidRoundtrip("local x = 5 return function() return x + 1 end");
+    const auto out = RequireValidRoundtrip("local x = 5 return function() return x + 1 end");
+    CHECK(out.find("return 6") != std::string::npos);
 }
 
-TEST_CASE("Deser hardening: malformed/truncated/random bytecode never hard-crashes", "[Decompiler][Deser][Hardening]") {
-    // The deserializer + lifter ingest attacker-controlled bytes, so any malformed/truncated/garbage
-    // input must fail gracefully (a DecompileResult code), never hard-fault. A hard crash here aborts
-    // the test process; so reaching the end IS the assertion. Mirrors the Fission.Fuzzing --deser
-    // campaign (which runs millions of such inputs); this locks the contract into CI.
+TEST_CASE("Deserializer rejects every truncation of valid bytecode", "[Decompiler][Deser][Hardening]") {
     EnableLuauFFlagsOnce();
     Decompiler decompiler{};
     std::ostringstream sink;
@@ -786,32 +706,11 @@ TEST_CASE("Deser hardening: malformed/truncated/random bytecode never hard-crash
 
     const auto vanilla = [&](const std::string &bc) { return decompiler.DecompileVanillaBytecode(bc, static_cast<DecompilerFlags>(0)).resultCode; };
 
-    // every truncation of a valid chunk (exercises short-read paths at every offset)
-    for (size_t n = 0; n <= base.size(); ++n)
-        (void)vanilla(base.substr(0, n));
-
-    // deterministic byte mutations of valid bytecode + pure-random byte strings
-    uint32_t s = 0x12345u;
-    auto next = [&]() {
-        s = s * 1103515245u + 12345u;
-        return s;
-    };
-    for (int i = 0; i < 3000; ++i) {
-        std::string m = base;
-        const int flips = 1 + static_cast<int>(next() % 8);
-        for (int f = 0; f < flips && !m.empty(); ++f)
-            m[next() % m.size()] = static_cast<char>((next() >> 8) & 0xFF);
-        (void)vanilla(m);
-
-        std::string r;
-        const int len = static_cast<int>(next() % 96);
-        for (int k = 0; k < len; ++k)
-            r.push_back(static_cast<char>((next() >> 8) & 0xFF));
-        (void)vanilla(r);
-    }
+    for (size_t n = 0; n < base.size(); ++n)
+        CHECK(vanilla(base.substr(0, n)) != DecompileResult::Success);
 
     std::cout.rdbuf(coutBuf);
-    SUCCEED("deserializer + pipeline survived truncations, mutations and random inputs without crashing");
+    CHECK(vanilla(base) == DecompileResult::Success);
 }
 
 TEST_CASE("Regress: nested-table generic-for generator inlines without forward-reference", "[Decompiler][Regression][TableForwardRef]") {

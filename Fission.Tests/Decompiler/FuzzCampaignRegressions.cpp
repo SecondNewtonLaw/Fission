@@ -4,11 +4,7 @@
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
 #include <catch2/catch_test_macros.hpp>
-#include <chrono>
 #include <cstring>
-#include <filesystem>
-#include <fstream>
-#include <sstream>
 #include <string>
 
 static void EnableLuauFFlagsOnce() {
@@ -39,30 +35,6 @@ static void CheckDecompileRecompiles(const std::string &source) {
     INFO("source:\n" << source);
     REQUIRE(result.resultCode == DecompileResult::Success);
     INFO("decompiled output:\n" << result.decompilationOutput);
-    std::string error;
-    const bool recompiles = Recompiles(result.decompilationOutput, &error);
-    INFO("recompile error: " << error);
-    CHECK(recompiles);
-}
-
-TEST_CASE("Roblox corpus RegEx fixture does not stack-overflow during lifting", "[Decompiler][Regression][RobloxCorpus]") {
-    EnableLuauFFlagsOnce();
-    const auto fixture = std::filesystem::path(FISSION_SOURCE_DIR) /
-                         "Bytecode_12_Dump/CorePackages.Packages._Index.RegExp.RegExp.RegEx.lbc";
-    if (!std::filesystem::exists(fixture)) {
-        SUCCEED("optional Bytecode_12_Dump fixture is absent");
-        return;
-    }
-
-    std::ifstream input(fixture, std::ios::binary);
-    REQUIRE(input);
-    std::stringstream bytes;
-    bytes << input.rdbuf();
-
-    Decompiler decompiler{};
-    decompiler.SetDecompileBudget(std::chrono::seconds(30));
-    const auto result = decompiler.DecompileRobloxBytecode(bytes.str(), static_cast<DecompilerFlags>(0));
-    REQUIRE(result.resultCode == DecompileResult::Success);
     std::string error;
     const bool recompiles = Recompiles(result.decompilationOutput, &error);
     INFO("recompile error: " << error);

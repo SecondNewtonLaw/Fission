@@ -28,7 +28,7 @@ namespace {
             const auto prelude = Luau::compile(fuzz::kSemPreludes[i], kOptions);
             const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
             const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
-            if (reconstructed.status != original.status || reconstructed.trace != original.trace)
+            if (original.status != fuzz::SemTrace::Status::Ok || reconstructed.status != original.status || reconstructed.trace != original.trace)
                 return result.output;
         }
         return {};
@@ -83,12 +83,9 @@ TEST_CASE("Loop shapes: nested loop matrix keeps semantics", "[Decompiler][LoopS
 
 namespace {
     constexpr const char *kBranchLoops[] = {
-        "while g < 30 do\n{BODY}\nend",
-        "while true do\n{BODY}\nif g > 30 then break end\nend",
-        "repeat\n{BODY}\nuntil g > 30",
-        "while g < 30 or h < 2 do\n{BODY}\nend",
-        "for i = 1, 12 do\n{BODY}\nend",
-        "for _, v in ipairs({ 1, 2, 3, 4, 5, 6 }) do\n{BODY}\nend",
+        "while g < 30 do\n{BODY}\nend",  "while true do\n{BODY}\nif g > 30 then break end\nend",
+        "repeat\n{BODY}\nuntil g > 30",  "while g < 30 or (h < 2 and g < 60) do\n{BODY}\nend",
+        "for i = 1, 12 do\n{BODY}\nend", "for _, v in ipairs({ 1, 2, 3, 4, 5, 6 }) do\n{BODY}\nend",
     };
     // Every body advances `g` first so each loop terminates whichever branch it takes.
     constexpr const char *kBranchBodies[] = {

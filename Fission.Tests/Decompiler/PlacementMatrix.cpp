@@ -37,7 +37,7 @@ return table.concat(events, ","), value
 )LUA";
     }
 
-    void CheckParity(const std::string &name, const std::string &source) {
+    void CheckParity(const std::string &name, const std::string &source, bool expectError = false) {
         INFO("matrix case: " << name);
         std::string originalBytecode;
         const bool compiles = fuzz::LuauCompiles(source, &originalBytecode);
@@ -60,6 +60,9 @@ return table.concat(events, ","), value
             const auto prelude = Luau::compile(fuzz::kSemPreludes[i], kOptions);
             const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
             const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
+            CHECK(original.status == (expectError ? fuzz::SemTrace::Status::Error : fuzz::SemTrace::Status::Ok));
+            if (expectError)
+                CHECK(original.trace.find("error: A") != std::string::npos);
             CHECK(reconstructed.status == original.status);
             CHECK(reconstructed.trace == original.trace);
         }
@@ -69,12 +72,8 @@ return table.concat(events, ","), value
 TEST_CASE("Placement matrix preserves evaluation order and multiplicity", "[Decompiler][PlacementMatrix]") {
     fuzz::EnableLuauFlags();
     const std::vector<std::pair<std::string, std::string>> producers{
-        {"call", R"(mark("$", 11))"},
-        {"field", R"(receiver("$").value)"},
-        {"index", R"(receiver("$")[1])"},
-        {"arithmetic", R"(mark("$", 10) + 1)"},
-        {"method", R"(receiver("$"):get())"},
-        {"closure", R"((function() return mark("$", 11) end)())"},
+        {"call", R"(mark("$", 11))"},           {"field", R"(receiver("$").value)"},  {"index", R"(receiver("$")[1])"},
+        {"arithmetic", R"(mark("$", 10) + 1)"}, {"method", R"(receiver("$"):get())"}, {"closure", R"((function() return mark("$", 11) end)())"},
     };
 
     for (const auto &[producerName, producer] : producers) {
@@ -103,7 +102,7 @@ TEST_CASE("Placement matrix preserves first observable failure", "[Decompiler][P
         {"materialized", "local function fail(tag) error(tag) end\nlocal first = fail(\"A\")\nprint(\"barrier\")\nlocal value = { first, fail(\"B\") }"},
     };
     for (const auto &[name, body] : cases)
-        CheckParity(name, body);
+        CheckParity(name, body, true);
 }
 
 TEST_CASE("Control-flow matrix keeps loop-owned statements inside loops", "[Decompiler][PlacementMatrix][ControlFlow]") {

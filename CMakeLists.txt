@@ -377,13 +377,18 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/BindingLifetimeRegressions.cpp
             Fission.Tests/Decompiler/EmptyLoopConditionRegressions.cpp
             Fission.Tests/Decompiler/ExpressionLifetimeBatch4Regressions.cpp
-            Fission.Tests/Decompiler/ExpressionLifetimeRegressions.cpp
             Fission.Tests/Decompiler/ForwardDeclarationRegressions.cpp
             Fission.Tests/Decompiler/LoopOperandRegressions.cpp
             Fission.Tests/Decompiler/RepeatExitRegressions.cpp
             Fission.Tests/Decompiler/LiftingSemantics.cpp
+            Fission.Tests/Decompiler/LiftingSemanticsPart2.cpp
+            Fission.Tests/Decompiler/LiftingSemanticsPart3.cpp
             Fission.Tests/Decompiler/ControlFlowRegressions.cpp
+            Fission.Tests/Decompiler/ControlFlowRegressionRewriters.cpp
+            Fission.Tests/Decompiler/ControlFlowRegressionClosures.cpp
             Fission.Tests/Decompiler/ControlFlowRewriterRegressions.cpp
+            Fission.Tests/Decompiler/ControlFlowRewriterRegressionsPart2.cpp
+            Fission.Tests/Decompiler/ControlFlowRewriterRegressionsPart3.cpp
             Fission.Tests/Decompiler/ComplexControlFlow.cpp
             Fission.Tests/Decompiler/TypeInference.cpp
             Fission.Tests/Decompiler/IREquivalence.cpp
@@ -391,14 +396,17 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/ScopeCaptureRegressions.cpp
             Fission.Tests/Decompiler/FuzzCampaignRegressions.cpp
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp
+            Fission.Tests/Decompiler/FuzzRecompileLoopSyntaxRegressions.cpp
             Fission.Tests/Decompiler/FuzzRun35678124075Regressions.cpp
-            Fission.Tests/Decompiler/FuzzRun35682025082Regressions.cpp
             Fission.Tests/Decompiler/FuzzRun35687267534Regressions.cpp
             Fission.Tests/Decompiler/ReplayDivergenceRegressions.cpp
+            Fission.Tests/Decompiler/ReplayDivergenceLoopAudit.cpp
+            Fission.Tests/Decompiler/ReplayDivergenceCompilerAudit.cpp
             Fission.Tests/Decompiler/LoopShapeMatrix.cpp
-        Fission.Tests/Decompiler/PlacementMatrix.cpp
-        Fission.Tests/Decompiler/SemanticOracleRegressions.cpp
+            Fission.Tests/Decompiler/PlacementMatrix.cpp
+            Fission.Tests/Decompiler/SemanticOracleRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
+            Fission.Tests/Decompiler/FuzzSemanticEvaluationRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
     )
