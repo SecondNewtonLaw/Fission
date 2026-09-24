@@ -380,6 +380,7 @@ endLabel:
   - A keyed item is stored with `SETTABLEKS`/`SETTABLEN`/`SETTABLE` right after its key and value are computed.
   - A later branch can change a captured computed key before the final `SETLIST C=0`. Reconstruction must use the key value stored earlier. ASTLifter saves a pre-materialized key beside the table declaration or an effectful call key at its `SETTABLE` site. It keeps the latter store out of constructor folding, then rebuilds the final literal with every result of the last call. O2 inlining can turn a call key into a literal `LOAD`; that literal remains the key even if its temporary register is reused.
 - **Temporary target**: when the target is not a temporary, the table is built in a fresh register and then moved.
+- **Nested constructors**: each inner `NEWTABLE` is populated before its parent `SETLIST`. The parent store may be more than 100 instructions from the parent allocation; Fission finds its bound from the table's SSA users. A chain of single-element `NEWTABLE`/`SETLIST` pairs is rebuilt from the innermost value outward, without recursive expression lifting.
 
 ## 12. O2-only transformations
 
@@ -457,7 +458,8 @@ These run after each function is emitted and change the CFG the decompiler sees.
 | `SETLIST` elements are fresh temporaries (§11) | `LiftSetListElement`, `elementForwardRefs` | Only a phi-defined element needs the materialized local; a call element can always inline into the constructor |
 | `local function f` captures its own register (§3) | Closure handlers | The self-capture alias is the closure's own name unless its value flows into a phi |
 | VAL-captured locals are never reassigned (§3) | Capture pre-pass | Without debug names, a captured version whose register is reused gets its own name so loop closures stay per-iteration |
-| Deep call, unary, binary, and table-read spines (§3, §11) | `LiftCall`, `LiftExpression` | Walk consecutive calls and same-kind expression chains iteratively. `GETTABLEN` joins `GETTABLE`/`GETTABLEKS` in the table-read walker; its bytecode index is one less than the Luau index. |
+| Deep call, operator, and table-read trees (§3, §11) | `LiftCall`, `LiftExpression` | Walk consecutive calls and mixed unary/binary/table-read trees iteratively. `GETTABLEN`'s bytecode index is one less than the Luau index. |
 
-**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. On 2026-09-24, targeted regressions also matched for O2 numeric and generic for loops with inlined returns, a break plus an inlined nil return, nested for loops, O1/O2 if-expression closure condition terms with and without captures, and 70-deep call, method, unary, binary, and constant-index table chains. Remaining exception:
-- **Mixed expression trees deeper than 64 recursive lifts.** Valid Luau such as 70 alternating `-(x + …)` levels still reaches `LiftExpression`'s safety limit. The single-kind spine walkers do not cover alternating operator kinds.
+**Probes**: each section above has a semantic probe family (compile → decompile → recompile, traces compared). The last full run, on 2026-09-23, matched at O1/O2 × debug 1/2. On 2026-09-24, targeted regressions also matched for O2 numeric and generic for loops with inlined returns, a break plus an inlined nil return, nested for loops, O1/O2 if-expression closure condition terms with and without captures, 70-deep call and mixed operator/table-read chains, and 27/70-level nested single-element table constructors.
+
+The 70-step alternating `[1]()` call/table probe remained CPU-bound after 100 seconds and was stopped. Its output and semantic parity were not established.

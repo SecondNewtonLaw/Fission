@@ -139,80 +139,74 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             return ConstantLiteral(def->operands[1].value.imm.k);
     }
 
-    // Walk both binary spine directions without recursive def traversal.
-    if (BinaryOperatorSymbol(def->operation) != nullptr) {
-        const auto rightBinary = [&](const LiftedInstruction *current) -> const LiftedInstruction * {
-            if (HasConstantRightOperand(current->operation) || current->operands[2].type != LiftedOperandType::Register)
-                return nullptr;
-            const auto &right = current->operands[2];
-            if (m_pinnedRegisters.contains({right.value.reg, right.ssaVersion}) ||
-                m_inlineableClosures.contains({static_cast<uint8_t>(right.value.reg), right.ssaVersion}))
-                return nullptr;
-            const auto *next = m_currentFunction->GetDefinition(right);
-            return next && next->instructionIndex < current->instructionIndex && !m_processedInstructions.contains(next->instructionIndex) &&
-                           ShouldInline(next) && BinaryOperatorSymbol(next->operation)
-                       ? next
-                       : nullptr;
+    const auto unary = [](LiftedOperation operation) {
+        return operation == LiftedOperation::NOT || operation == LiftedOperation::MINUS || operation == LiftedOperation::LENGTH;
+    };
+    const auto tableRead = [](LiftedOperation operation) {
+        return operation == LiftedOperation::GETTABLE || operation == LiftedOperation::GETTABLEKS || operation == LiftedOperation::GETTABLEN;
+    };
+    if (BinaryOperatorSymbol(def->operation) || unary(def->operation) || tableRead(def->operation)) {
+        struct Frame {
+            const LiftedInstruction *instruction;
+            uint8_t phase = 0;
+            std::shared_ptr<Expression> left;
         };
-        if (rightBinary(def)) {
-            std::vector<std::pair<const char *, std::shared_ptr<Expression>>> lefts;
-            const LiftedInstruction *current = def;
-            std::shared_ptr<Expression> value;
-            while (true) {
-                lefts.emplace_back(BinaryOperatorSymbol(current->operation), LiftExpression(current->operands[1]));
-                if (const auto *next = rightBinary(current)) {
-                    current = next;
-                    continue;
-                }
-                value = HasConstantRightOperand(current->operation) ? ConstantLiteral(current->operands[2].value.imm.k) : LiftExpression(current->operands[2]);
-                break;
+        std::vector<Frame> frames{{def, 0, {}}};
+        std::vector<std::shared_ptr<Expression>> values;
+        const auto descend = [&](const LiftedOperand &operand, const LiftedInstruction *parent) {
+            const LiftedInstruction *inner = nullptr;
+            if (operand.type == LiftedOperandType::Register && !m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion}) &&
+                !m_inlineableClosures.contains({static_cast<uint8_t>(operand.value.reg), operand.ssaVersion})) {
+                inner = m_currentFunction->GetDefinition(operand);
+                if (inner && (inner->instructionIndex >= parent->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) ||
+                              !ShouldInline(inner) || (!BinaryOperatorSymbol(inner->operation) && !unary(inner->operation) && !tableRead(inner->operation))))
+                    inner = nullptr;
             }
-            for (auto it = lefts.rbegin(); it != lefts.rend(); ++it)
-                value = std::make_shared<BinaryExpressionNode>(it->first, it->second, value);
-            return value;
-        }
-        std::vector<std::pair<const char *, std::shared_ptr<Expression>>> rights;
-        const LiftedInstruction *curDef = def;
-        LiftedOperand leftLeafOperand{};
-        bool leftLeafSet = false;
-        while (true) {
-            const char *sym = BinaryOperatorSymbol(curDef->operation);
-            std::shared_ptr<Expression> rightExpr;
-            if (HasConstantRightOperand(curDef->operation))
-                rightExpr = ConstantLiteral(curDef->operands[2].value.imm.k);
+            if (inner)
+                frames.push_back({inner, 0, {}});
             else
-                rightExpr = LiftExpression(curDef->operands[2]);
-            rights.emplace_back(sym, rightExpr);
-
-            const auto &leftOp = curDef->operands[1];
-            if (leftOp.type != LiftedOperandType::Register) {
-                leftLeafOperand = leftOp;
-                leftLeafSet = true;
-                break;
+                values.push_back(LiftExpression(operand));
+        };
+        while (!frames.empty()) {
+            auto &frame = frames.back();
+            const auto *current = frame.instruction;
+            const char *binary = BinaryOperatorSymbol(current->operation);
+            if (frame.phase == 0) {
+                frame.phase = 1;
+                descend(current->operands[1], current);
+                continue;
             }
-            if (m_pinnedRegisters.contains({leftOp.value.reg, leftOp.ssaVersion})) {
-                leftLeafOperand = leftOp;
-                leftLeafSet = true;
-                break;
+            if ((binary || current->operation == LiftedOperation::GETTABLE) && frame.phase == 1) {
+                frame.left = std::move(values.back());
+                values.pop_back();
+                frame.phase = 2;
+                if (binary && HasConstantRightOperand(current->operation))
+                    values.push_back(ConstantLiteral(current->operands[2].value.imm.k));
+                else
+                    descend(current->operands[2], current);
+                continue;
             }
-            SSARef leftRef{static_cast<uint8_t>(leftOp.value.reg), leftOp.ssaVersion};
-            if (m_inlineableClosures.contains(leftRef)) {
-                leftLeafOperand = leftOp;
-                leftLeafSet = true;
-                break;
+            auto value = std::move(values.back());
+            values.pop_back();
+            if (binary)
+                value = std::make_shared<BinaryExpressionNode>(binary, frame.left, value);
+            else if (current->operation == LiftedOperation::GETTABLE)
+                value = std::make_shared<IndexExpressionNode>(frame.left, value);
+            else if (current->operation == LiftedOperation::GETTABLEKS) {
+                const auto &key = ConstantAt(current->operands[2].value.imm.k);
+                value = std::make_shared<MemberExpressionNode>(value, std::get<std::string>(key.constantData));
+            } else if (current->operation == LiftedOperation::GETTABLEN)
+                value = std::make_shared<IndexExpressionNode>(
+                    value, std::make_shared<NumberLiteralNode>(static_cast<double>(current->operands[2].value.imm.n) + 1.0)
+                );
+            else {
+                const char *symbol = current->operation == LiftedOperation::NOT ? "not " : current->operation == LiftedOperation::MINUS ? "-" : "#";
+                value = std::make_shared<UnaryExpressionNode>(symbol, value);
             }
-            const auto *leftDef = m_currentFunction->GetDefinition(leftOp);
-            if (!leftDef || m_processedInstructions.contains(leftDef->instructionIndex) || !ShouldInline(leftDef) || BinaryOperatorSymbol(leftDef->operation) == nullptr) {
-                leftLeafOperand = leftOp;
-                leftLeafSet = true;
-                break;
-            }
-            curDef = leftDef;
+            frames.pop_back();
+            values.push_back(std::move(value));
         }
-        std::shared_ptr<Expression> expr = leftLeafSet ? LiftExpression(leftLeafOperand) : std::make_shared<NilLiteralNode>();
-        for (auto it = rights.rbegin(); it != rights.rend(); ++it)
-            expr = std::make_shared<BinaryExpressionNode>(it->first, expr, it->second);
-        return expr;
+        return values.back();
     }
 
     switch (def->operation) {
@@ -224,35 +218,6 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         auto right = LiftExpression(def->operands[2]);
         return std::make_shared<BinaryExpressionNode>(def->operation == LiftedOperation::SUBRK ? "-" : "/", left, right);
     }
-    case LiftedOperation::NOT:
-    case LiftedOperation::MINUS:
-    case LiftedOperation::LENGTH: {
-        const auto unary = [](LiftedOperation operation) {
-            return operation == LiftedOperation::NOT || operation == LiftedOperation::MINUS || operation == LiftedOperation::LENGTH;
-        };
-        std::vector<LiftedOperation> chain;
-        const LiftedInstruction *current = def;
-        LiftedOperand source{};
-        while (true) {
-            chain.push_back(current->operation);
-            source = current->operands[1];
-            if (source.type != LiftedOperandType::Register || m_pinnedRegisters.contains({source.value.reg, source.ssaVersion}) ||
-                m_inlineableClosures.contains({static_cast<uint8_t>(source.value.reg), source.ssaVersion}))
-                break;
-            const auto *inner = m_currentFunction->GetDefinition(source);
-            if (!inner || inner->instructionIndex >= current->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) ||
-                !ShouldInline(inner) || !unary(inner->operation))
-                break;
-            current = inner;
-        }
-        auto value = LiftExpression(source);
-        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-            const char *symbol = *it == LiftedOperation::NOT ? "not " : *it == LiftedOperation::MINUS ? "-" : "#";
-            value = std::make_shared<UnaryExpressionNode>(symbol, value);
-        }
-        return value;
-    }
-
     case LiftedOperation::MOVE:
         return LiftExpression(def->operands[1], forceExpression);
     case LiftedOperation::GETVARARGS:
@@ -356,71 +321,6 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             curr = std::make_shared<MemberExpressionNode>(curr, parts[i]);
         return curr;
     }
-    case LiftedOperation::GETTABLE:
-    case LiftedOperation::GETTABLEKS:
-    case LiftedOperation::GETTABLEN: {
-        // Table access chains are walked iteratively, one hop per bytecode read.
-        struct Hop {
-            bool isKeyed;
-            std::shared_ptr<Expression> indexExpr;
-            std::string memberName;
-        };
-        std::vector<Hop> hops;
-        const LiftedInstruction *curDef = def;
-        LiftedOperand leftLeafOp{};
-        bool leftLeafSet = false;
-        while (true) {
-            Hop hop{};
-            if (curDef->operation == LiftedOperation::GETTABLEKS) {
-                hop.isKeyed = false;
-                const auto &k = ConstantAt(curDef->operands[2].value.imm.k);
-                hop.memberName = std::get<std::string>(k.constantData);
-            } else if (curDef->operation == LiftedOperation::GETTABLEN) {
-                hop.isKeyed = true;
-                hop.indexExpr = std::make_shared<NumberLiteralNode>(static_cast<double>(curDef->operands[2].value.imm.n) + 1.0);
-            } else {
-                hop.isKeyed = true;
-                hop.indexExpr = LiftExpression(curDef->operands[2]);
-            }
-            hops.push_back(std::move(hop));
-
-            const auto &leftOp = curDef->operands[1];
-            if (leftOp.type != LiftedOperandType::Register) {
-                leftLeafOp = leftOp;
-                leftLeafSet = true;
-                break;
-            }
-            if (m_pinnedRegisters.contains({leftOp.value.reg, leftOp.ssaVersion})) {
-                leftLeafOp = leftOp;
-                leftLeafSet = true;
-                break;
-            }
-            SSARef lr{static_cast<uint8_t>(leftOp.value.reg), leftOp.ssaVersion};
-            if (m_inlineableClosures.contains(lr)) {
-                leftLeafOp = leftOp;
-                leftLeafSet = true;
-                break;
-            }
-            const auto *leftDef = m_currentFunction->GetDefinition(leftOp);
-            if (!leftDef || m_processedInstructions.contains(leftDef->instructionIndex) || !ShouldInline(leftDef) ||
-                (leftDef->operation != LiftedOperation::GETTABLE && leftDef->operation != LiftedOperation::GETTABLEKS &&
-                 leftDef->operation != LiftedOperation::GETTABLEN)) {
-                leftLeafOp = leftOp;
-                leftLeafSet = true;
-                break;
-            }
-            curDef = leftDef;
-        }
-        std::shared_ptr<Expression> expr = leftLeafSet ? LiftExpression(leftLeafOp) : std::make_shared<NilLiteralNode>();
-        for (auto it = hops.rbegin(); it != hops.rend(); ++it) {
-            if (it->isKeyed)
-                expr = std::make_shared<IndexExpressionNode>(expr, it->indexExpr);
-            else
-                expr = std::make_shared<MemberExpressionNode>(expr, it->memberName);
-        }
-        return expr;
-    }
-
     default:
         return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
     }
@@ -762,50 +662,72 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     int32_t tableReg = inst.operands[0].value.reg;
     // a store to the same register at another version targets a different table
     int32_t tableVersion = inst.operands[0].ssaVersion;
-    constexpr size_t scanLimit = 100;
-    size_t maxIdx = m_currentFunction->lpLiftedFunction->instructions.size();
-    const int tableBlock = BlockOf(&inst);
-    size_t blockEnd = inst.instructionIndex + 1;
-    if (tableBlock >= 0 && m_currentFunction->basicBlocks[tableBlock].lpTail)
-        blockEnd = (std::min)(maxIdx, static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex) + 1);
-    size_t scanEnd = (std::min)(maxIdx, inst.instructionIndex + scanLimit);
-    bool bFoundSetList = false;
-    const LiftedInstruction *deferredSetList = nullptr;
-    for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
-        const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
-        if (candidate.operation == LiftedOperation::SETLIST && candidate.operands.size() > 1 &&
-            candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion == tableVersion) {
-            deferredSetList = &candidate;
-            break;
-        }
-    }
-    if (!deferredSetList && scanEnd < blockEnd) {
-        const LiftedInstruction *distantSetList = nullptr;
-        bool hasFieldStore = false;
-        for (size_t i = inst.instructionIndex + 1; i < blockEnd; ++i) {
-            const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
-            if (candidate.operation == LiftedOperation::SETLIST && candidate.operands.size() > 2 && candidate.operands[0].value.reg == tableReg &&
-                candidate.operands[0].ssaVersion == tableVersion) {
-                distantSetList = &candidate;
+    if (!dryRun && inst.operation == LiftedOperation::NEWTABLE) {
+        std::vector<std::pair<const LiftedInstruction *, const LiftedInstruction *>> chain;
+        const LiftedInstruction *current = &inst;
+        bool complete = false;
+        while (current->operation == LiftedOperation::NEWTABLE) {
+            const auto &output = current->operands[0];
+            const auto users = m_currentFunction->users.find({static_cast<uint8_t>(output.value.reg), output.ssaVersion});
+            if (users == m_currentFunction->users.end())
+                break;
+            const LiftedInstruction *store = nullptr;
+            for (const auto *user : users->second) {
+                const size_t target = user->operation == LiftedOperation::SETLIST ? 0 : 1;
+                if ((user->operation != LiftedOperation::SETLIST && user->operation != LiftedOperation::SETTABLE &&
+                     user->operation != LiftedOperation::SETTABLEKS && user->operation != LiftedOperation::SETTABLEN) ||
+                    user->operands.size() <= target || user->operands[target].type != LiftedOperandType::Register ||
+                    user->operands[target].value.reg != output.value.reg || user->operands[target].ssaVersion != output.ssaVersion)
+                    continue;
+                if (store && store != user) {
+                    store = nullptr;
+                    break;
+                }
+                store = user;
+            }
+            if (!store || store->operation != LiftedOperation::SETLIST || store->operands.size() < 4 || store->operands[2].value.imm.n != 2 ||
+                store->operands[3].value.imm.n != 1)
+                break;
+            const auto values = SetListElements(*store);
+            if (values.size() != 1)
+                break;
+            chain.emplace_back(current, store);
+            const auto *child = m_currentFunction->GetDefinition(values.front());
+            if (!child || child->operation != LiftedOperation::NEWTABLE) {
+                complete = true;
                 break;
             }
-            if ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
-                 candidate.operation == LiftedOperation::SETTABLEN) &&
-                candidate.operands.size() > 1 && candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion == tableVersion)
-                hasFieldStore = true;
+            if (child->instructionIndex <= current->instructionIndex || child->instructionIndex >= store->instructionIndex || !ShouldInline(child))
+                break;
+            current = child;
         }
-
-        const auto elements = distantSetList ? SetListElements(*distantSetList) : std::vector<LiftedOperand>{};
-        const bool callElements = !elements.empty() && std::ranges::all_of(elements, [&](const LiftedOperand &element) {
-            const auto *definition = m_currentFunction->GetDefinition(element);
-            return definition && (definition->operation == LiftedOperation::CALL || definition->operation == LiftedOperation::CALLFB ||
-                                  definition->operation == LiftedOperation::NAMECALL);
-        });
-        if (!hasFieldStore && callElements && distantSetList->operands[2].value.imm.n == 0) {
-            deferredSetList = distantSetList;
-            scanEnd = static_cast<size_t>(distantSetList->instructionIndex) + 1;
+        if (complete && chain.size() > 1) {
+            std::shared_ptr<Expression> value = LiftSetListElement(*chain.back().second, 0, true);
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+                value = std::make_shared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
+                m_processedInstructions.insert(it->second->instructionIndex);
+                if (it->first != &inst) {
+                    m_processedInstructions.insert(it->first->instructionIndex);
+                    m_inlineConsumedDefs.insert(it->first->instructionIndex);
+                    ConsumeInlinedInputs(*it->first);
+                }
+            }
+            return std::static_pointer_cast<TableLiteralNode>(value);
         }
     }
+    const int tableBlock = BlockOf(&inst);
+    size_t scanEnd = static_cast<size_t>(inst.instructionIndex) + 1;
+    if (const auto users = m_currentFunction->users.find({static_cast<uint8_t>(tableReg), tableVersion}); users != m_currentFunction->users.end())
+        for (const auto *user : users->second) {
+            const size_t target = user->operation == LiftedOperation::SETLIST ? 0 : 1;
+            if ((user->operation != LiftedOperation::SETLIST && user->operation != LiftedOperation::SETTABLE &&
+                 user->operation != LiftedOperation::SETTABLEKS && user->operation != LiftedOperation::SETTABLEN) ||
+                user->operands.size() <= target || user->operands[target].type != LiftedOperandType::Register || user->operands[target].value.reg != tableReg ||
+                user->operands[target].ssaVersion != tableVersion)
+                continue;
+            scanEnd = (std::max)(scanEnd, static_cast<size_t>(user->instructionIndex) + 1);
+        }
+    bool bFoundSetList = false;
 
     if (inst.operation == LiftedOperation::DUPTABLE) {
         int constantIdx = inst.operands[1].value.imm.k;
@@ -819,9 +741,11 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
                 const auto valIdx = tableData.valueConstantIndices[i];
                 const bool hasValue = valIdx >= 0 && static_cast<size_t>(valIdx) < constants.size();
-                elements.push_back(std::make_shared<BinaryExpressionNode>(
-                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
-                ));
+                elements.push_back(
+                    std::make_shared<BinaryExpressionNode>(
+                        "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
+                    )
+                );
             }
         }
         if (!elements.empty())

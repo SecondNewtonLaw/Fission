@@ -2319,3 +2319,40 @@ TEST_CASE("Compiler audit: constant-index table chains lift without expression d
     CheckSemanticParity(source, 1, 1);
     CheckSemanticParity(source, 2, 1);
 }
+
+TEST_CASE("Compiler audit: mixed unary and binary trees lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local x = tonumber('1')\nprint(";
+    for (int i = 0; i < 70; ++i)
+        source += "-(x + ";
+    source += "x";
+    for (int i = 0; i < 70; ++i)
+        source += ")";
+    source += ")";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: mixed table and unary trees lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local t = {}\nt[1] = t\nsetmetatable(t, {__unm = function(x) return x end})\nprint(";
+    std::string expression = "t";
+    for (int i = 0; i < 70; ++i)
+        expression = "(-" + expression + ")[1]";
+    source += expression + " == t)";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: nested table constructors keep distant SETLIST stores", "[Decompiler][ReplayRegress][Semantics]") {
+    for (const int depth : {27, 70}) {
+        std::string source = "local t = ";
+        source.append(depth, '{');
+        source += "1";
+        source.append(depth, '}');
+        source += "\nprint(t";
+        for (int i = 0; i < depth; ++i)
+            source += "[1]";
+        source += ")";
+        CheckSemanticParity(source, 1, 1);
+        CheckSemanticParity(source, 2, 1);
+    }
+}
