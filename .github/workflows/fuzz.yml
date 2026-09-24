@@ -9,6 +9,7 @@ permissions:
   contents: read
 
 env:
+  CPM_SOURCE_CACHE: ${{ github.workspace }}/.cpm-cache
   CCACHE_DIR: ${{ github.workspace }}/.ccache
   CCACHE_BASEDIR: ${{ github.workspace }}
   CCACHE_MAXSIZE: 1G
@@ -31,14 +32,21 @@ jobs:
       - name: Install build dependencies
         run: sudo apt-get update && sudo apt-get install -y ccache ninja-build
 
+      - name: Cache CPM sources
+        uses: actions/cache/restore@v5
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ github.job }}-${{ hashFiles('CMakeLists.txt', 'cmake/CPM.cmake', 'cmake/patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          restore-keys: cpm-${{ runner.os }}-${{ github.job }}-${{ hashFiles('CMakeLists.txt', 'cmake/CPM.cmake', 'cmake/patches/**') }}-
+
       - name: Restore compiler cache
-        uses: actions/cache@v5
+        uses: actions/cache/restore@v5
         with:
           path: .ccache
-          key: ccache-${{ runner.os }}-clang-${{ github.job }}-${{ github.sha }}
+          key: ccache-${{ runner.os }}-clang-${{ github.job }}-v2-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
+            ccache-${{ runner.os }}-clang-${{ github.job }}-v2-
             ccache-${{ runner.os }}-clang-${{ github.job }}-
-            ccache-${{ runner.os }}-clang-
 
       - name: Setup CMake
         uses: jwlawson/actions-setup-cmake@v2
@@ -60,6 +68,18 @@ jobs:
 
       - name: Show compiler cache statistics
         run: ccache --cleanup && ccache --show-stats
+
+      - name: Save CPM sources
+        uses: actions/cache/save@v5
+        with:
+          path: ${{ env.CPM_SOURCE_CACHE }}
+          key: cpm-${{ runner.os }}-${{ github.job }}-${{ hashFiles('CMakeLists.txt', 'cmake/CPM.cmake', 'cmake/patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
+
+      - name: Save compiler cache
+        uses: actions/cache/save@v5
+        with:
+          path: .ccache
+          key: ccache-${{ runner.os }}-clang-${{ github.job }}-v2-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Generate fuzz seeds
         id: seeds
