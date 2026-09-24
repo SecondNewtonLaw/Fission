@@ -1080,9 +1080,9 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             const auto aux = function->instructions.at(currentIndex + 1).instruction;
             instr.operands[3].type = LiftedOperandType::Register;
-            instr.operands[3].value.imm.n = LUAU_INSN_AUX_A(aux);
+            instr.operands[3].value.reg = LUAU_INSN_AUX_A(aux);
             instr.operands[4].type = LiftedOperandType::Register;
-            instr.operands[4].value.imm.n = LUAU_INSN_AUX_B(aux);
+            instr.operands[4].value.reg = LUAU_INSN_AUX_B(aux);
 
             instr.instructionRemarks =
                 std::format("INFO: Perform FastCall3 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
