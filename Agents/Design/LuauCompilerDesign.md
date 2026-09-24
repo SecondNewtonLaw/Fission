@@ -378,6 +378,7 @@ endLabel:
   - List items accumulate in chunk registers and flush with `SETLIST t, r0, n+1; AUX startIndex` every 16 items, **and before every keyed item**, so insertion order is preserved.
   - A trailing multi-value item flushes with `C = 0`.
   - A keyed item is stored with `SETTABLEKS`/`SETTABLEN`/`SETTABLE` right after its key and value are computed.
+  - A later branch can change a captured computed key before the final `SETLIST C=0`. Reconstruction must use the key value stored earlier. ASTLifter saves a pre-materialized key beside the table declaration or an effectful call key at its `SETTABLE` site. It keeps the latter store out of constructor folding, then rebuilds the final literal with every result of the last call. O2 inlining can turn a call key into a literal `LOAD`; that literal remains the key even if its temporary register is reused.
 - **Temporary target**: when the target is not a temporary, the table is built in a fresh register and then moved.
 
 ## 12. O2-only transformations
@@ -446,6 +447,7 @@ These run after each function is emitted and change the CFG the decompiler sees.
 | `JUMPIFNOT*` compare (§5) | Condition negation | Negate as `not (a < b)`, never as `a >= b` |
 | Constant fields live in `DUPTABLE` templates (§11) | Table reconstruction | Read template constants; a field without a store still exists |
 | `SETLIST` flush before keyed items (§11) | Table coalescing | Item order in the constructor matches store order |
+| Final `SETLIST C=0` (§11) | AST table reconstruction | Keep the trailing call's full result tuple; preserve earlier keyed and fixed-array stores, including the stored value of a computed key that later changes |
 | FASTCALL skip region (§10) | Lifter/CFA | The fallback setup and `CALL` are one call; the skip is not a branch |
 | O2 inlined returns (§12) | `joinedExit` (CFA), deferred while header, loop-exit phi predeclare | While/repeat: when an exit leaving from the body bypasses the natural exit and every exit flows straight into one block, that block (the return label) is the loop exit; the header lifts as `while true` with break arms, and a value first written in those arms is declared ahead of the loop. Numeric/generic for: open |
 | `AND`/`OR` read both registers (§6) | `ShouldInline` | Never inline an effectful or raising def into the right operand of register-form `and`/`or`: that position becomes lazy |
@@ -460,4 +462,3 @@ These run after each function is emitted and change the CFG the decompiler sees.
 - **O2 inlined `return` inside a numeric or generic `for`.** The natural-exit code must run only when the loop was not left early. That needs a synthetic flag local, because Luau has no `goto`.
 - **An if-expression condition term that tests a function literal, inside a compound condition whose body cannot be duplicated** (for example, it holds an infinite loop). The value-term folder cannot render the closure. Fuzz-only shape.
 - **Expressions nested more than 64 deep.** `LiftExpression` rejects them as hostile input, for example 65+ chained method calls. Valid Luau, but rare.
-- **Variadic `SETLIST` after a computed table key changes.** If a table constructor stores `[k] = value`, an element branch then changes `k` through a closure, and the final element is a multiret call, the current fallback emits one indexed assignment for that call and loses its extra results. Rebuilding the table at the final `SETLIST` must preserve the original key rather than reread the changed local.

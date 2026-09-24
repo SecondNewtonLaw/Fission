@@ -226,6 +226,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_hoistedRegisters.clear();
     this->m_capturedVariableWrites.clear();
     this->m_processedInstructions.clear();
+    this->m_setListKeySnapshots.clear();
     this->m_inlineConsumedDefs.clear();
     this->m_foldConsumedDefs.clear();
     this->m_pendingClasses.clear();
@@ -2636,6 +2637,70 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         return std::nullopt;
     };
 
+    const auto snapshotableKey = [&](const LiftedInstruction &table, const LiftedInstruction &store) {
+        if (store.operation != LiftedOperation::SETTABLE || store.operands.size() < 3 || store.operands[2].type != LiftedOperandType::Register ||
+            BlockOf(&store) != BlockOf(&table) || !m_definedRegisters.contains(store.operands[2].value.reg))
+            return false;
+        const auto *definition = m_currentFunction->GetDefinition(store.operands[2]);
+        if (!definition || (definition->operation != LiftedOperation::PHI && ShouldInline(definition)))
+            return false;
+        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+        for (int index = table.instructionIndex + 1; index < store.instructionIndex; ++index)
+            if (instructions[index].operation != LiftedOperation::NOP &&
+                (instructions[index].operation != LiftedOperation::LOAD ||
+                 (!instructions[index].operands.empty() && instructions[index].operands[0].value.reg == store.operands[2].value.reg)))
+                return false;
+        return true;
+    };
+
+    const auto storeSiteSnapshotableKey = [&](const LiftedInstruction &table, const LiftedInstruction &store) {
+        if (store.operation != LiftedOperation::SETTABLE || store.operands.size() < 3 || store.operands[2].type != LiftedOperandType::Register)
+            return false;
+        const auto *definition = m_currentFunction->GetDefinition(store.operands[2]);
+        if (!definition || definition->instructionIndex <= table.instructionIndex || BlockOf(definition) != BlockOf(&store) ||
+            (definition->operation != LiftedOperation::CALL && definition->operation != LiftedOperation::CALLFB &&
+             definition->operation != LiftedOperation::NAMECALL && definition->operation != LiftedOperation::NAMECALLUDATA))
+            return false;
+        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+        for (int index = definition->instructionIndex + 1; index < store.instructionIndex; ++index)
+            if (instructions[index].operation != LiftedOperation::NOP && instructions[index].operation != LiftedOperation::LOAD)
+                return false;
+        return true;
+    };
+
+    const auto freshKeyName = [&](const LiftedInstruction &store) {
+        std::string name = std::format("__fission_key_{}", store.instructionIndex);
+        const auto occupied = [&](const std::string &candidate) {
+            if (m_currentFunction->enclosingNames.contains(candidate))
+                return true;
+            for (const auto &[_, value] : m_currentFunction->variableNames)
+                if (value == candidate)
+                    return true;
+            for (const auto &[_, value] : m_currentFunction->ssaOverrides)
+                if (value == candidate)
+                    return true;
+            for (const auto &[_, value] : m_currentFunction->globalRegNames)
+                if (value == candidate)
+                    return true;
+            for (const auto &[_, value] : m_currentFunction->upvalueNames)
+                if (value == candidate)
+                    return true;
+            for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
+                if (local.varname == candidate)
+                    return true;
+            for (const auto &constant : m_currentFunction->lpLiftedFunction->lpDeserialized->constants)
+                if (constant.kType == LUA_TSTRING && std::get<std::string>(constant.constantData) == candidate)
+                    return true;
+            for (const auto &[_, value] : m_setListKeySnapshots)
+                if (value == candidate)
+                    return true;
+            return false;
+        };
+        for (int suffix = 2; occupied(name); ++suffix)
+            name = std::format("__fission_key_{}_{}", store.instructionIndex, suffix);
+        return name;
+    };
+
     const auto delayedVariadicSetList = [&](const LiftedInstruction &table) -> const LiftedInstruction * {
         if (table.operation != LiftedOperation::NEWTABLE || table.operands.empty() || ShouldInline(&table))
             return nullptr;
@@ -2670,17 +2735,18 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     const auto &key = user->operands[2];
                     const SSARef keyRef{key.value.reg, key.ssaVersion};
                     const auto *definition = m_currentFunction->GetDefinition(key);
-                    computedField = definition && (definition->operation == LiftedOperation::PHI || !ShouldInline(definition)) &&
-                                    !m_referenceCapturedValues.contains(keyRef);
+                    const bool literal = definition && definition->operation == LiftedOperation::LOAD;
+                    computedField = literal || (definition && (definition->operation == LiftedOperation::PHI || !ShouldInline(definition)) &&
+                                                !m_referenceCapturedValues.contains(keyRef));
                     if (computedField)
                         for (const auto &[other, write] : m_currentFunction->definitionMap)
-                            if (other.regIndex == keyRef.regIndex && write && write->instructionIndex > user->instructionIndex &&
+                            if (!literal && other.regIndex == keyRef.regIndex && write && write->instructionIndex > user->instructionIndex &&
                                 write->instructionIndex < setList->instructionIndex) {
                                 computedField = false;
                                 break;
                             }
                 }
-                if (!list && !field && !computedField)
+                if (!list && !field && !computedField && !snapshotableKey(table, *user) && !storeSiteSnapshotableKey(table, *user))
                     return nullptr;
                 prior.push_back(user);
             } else if (BlockOf(user) != BlockOf(setList)) {
@@ -2803,6 +2869,21 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         case LiftedOperation::SETTABLEKS:
         case LiftedOperation::SETTABLEN:
         case LiftedOperation::SETUPVAL: {
+            if (inst.operation == LiftedOperation::SETTABLE)
+                if (const auto *table = m_currentFunction->GetDefinition(inst.operands[1]);
+                    table && delayedVariadicSetList(*table) && storeSiteSnapshotableKey(*table, inst)) {
+                    const auto snapshot = m_setListKeySnapshots.find(&inst);
+                    const std::string name = snapshot == m_setListKeySnapshots.end() ? freshKeyName(inst) : snapshot->second;
+                    auto key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
+                    statements.push_back(std::make_shared<VariableDeclarationNode>(key, LiftExpression(inst.operands[2])));
+                    m_setListKeySnapshots[&inst] = name;
+                    statements.push_back(
+                        std::make_shared<AssignmentStatementNode>(
+                            std::make_shared<IndexExpressionNode>(LiftExpression(inst.operands[1]), key), LiftExpression(inst.operands[0])
+                        )
+                    );
+                    break;
+                }
             // a store folding into a constructor that inlines at its reader renders there
             if (StoreTargetsFreshTable(&inst))
                 if (const auto *table = m_currentFunction->GetDefinition(inst.operands[1]); table && ShouldInline(table))
@@ -2862,8 +2943,16 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                             key = std::make_shared<StringLiteralNode>(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData));
                         else if (store->operation == LiftedOperation::SETTABLEN)
                             key = std::make_shared<NumberLiteralNode>(store->operands[2].value.imm.n + 1);
-                        else
-                            key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(store->operands[2], false)));
+                        else {
+                            const auto snapshot = m_setListKeySnapshots.find(store);
+                            const auto *keyDefinition = m_currentFunction->GetDefinition(store->operands[2]);
+                            if (snapshot != m_setListKeySnapshots.end())
+                                key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(snapshot->second));
+                            else if (keyDefinition && keyDefinition->operation == LiftedOperation::LOAD)
+                                key = LiftExpression(keyDefinition->operands[1]);
+                            else
+                                key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(store->operands[2], false)));
+                        }
                         elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", key, std::make_shared<IndexExpressionNode>(tableName(), key)));
                     }
                 }
@@ -3597,6 +3686,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (def == &inst) {
                 auto isDefined = m_definedRegisters.contains(inst.operands[0].value.reg);
                 auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
+                if (inst.operation == LiftedOperation::NEWTABLE)
+                    if (const auto *setList = delayedVariadicSetList(inst); setList)
+                        for (const auto *user : m_currentFunction->users.at(SSARef{inst.operands[0].value.reg, inst.operands[0].ssaVersion}))
+                            if (user->instructionIndex < setList->instructionIndex && storeSiteSnapshotableKey(inst, *user))
+                                m_setListKeySnapshots.try_emplace(user, freshKeyName(*user));
                 auto val = LiftExpression(inst.operands[0], true);
 
                 const bool isParameterWrite = inst.operands[0].value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
@@ -3618,6 +3712,18 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                     statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
                 }
+                if (inst.operation == LiftedOperation::NEWTABLE)
+                    if (const auto *setList = delayedVariadicSetList(inst); setList)
+                        for (const auto *user : m_currentFunction->users.at(SSARef{inst.operands[0].value.reg, inst.operands[0].ssaVersion}))
+                            if (user->instructionIndex < setList->instructionIndex && snapshotableKey(inst, *user)) {
+                                const std::string name = freshKeyName(*user);
+                                m_setListKeySnapshots[user] = name;
+                                statements.push_back(
+                                    std::make_shared<VariableDeclarationNode>(
+                                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), LiftExpression(user->operands[2], false)
+                                    )
+                                );
+                            }
                 if (forceDefinitions || inst.operation == LiftedOperation::NEWTABLE || inst.operation == LiftedOperation::DUPTABLE)
                     m_processedInstructions.insert(inst.instructionIndex);
             }

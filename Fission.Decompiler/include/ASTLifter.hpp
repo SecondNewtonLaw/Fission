@@ -70,6 +70,7 @@ class ASTLifter {
     boost::unordered_flat_set<const LiftedInstruction *> m_compoundInlined;
 
     boost::unordered_flat_set<int32_t> m_processedInstructions;
+    std::unordered_map<const LiftedInstruction *, std::string> m_setListKeySnapshots;
 
     // Tail duplication must re-inline pure reads that never emitted a declaration.
     boost::unordered_flat_set<int32_t> m_inlineConsumedDefs;

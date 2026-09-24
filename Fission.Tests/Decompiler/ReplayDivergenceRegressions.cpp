@@ -2122,3 +2122,43 @@ return f(true), f(false))LUA",
         2, 2
     );
 }
+
+TEST_CASE("Compiler audit: variadic SETLIST keeps the stored key after a captured local changes", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(c)
+    local k = if c then "x" else "y"
+    local function change() k = "z"; return 1 end
+    local function multi() return 7, 8, 9 end
+    local t = {[k] = 5, if c then change() else 2, multi()}
+    return t.x, t.y, t.z, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: variadic SETLIST keeps a computed key with effects", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(c)
+    local k = "x"
+    local function key() k = "z"; return "x" end
+    local function multi() return 7, 8, 9 end
+    local t = {[key()] = 5, if c then 1 else 2, multi()}
+    return t.x, t.z, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Compiler audit: variadic SETLIST keeps a method call key", "[Decompiler][ReplayRegress][Semantics]") {
+    const auto source = R"LUA(local function f(c)
+    local calls = 0
+    local object = {}
+    function object:key() calls += 1; return "x" end
+    local function multi() return 7, 8, 9 end
+    local t = {[object:key()] = 5, if c then 1 else 2, multi()}
+    return calls, t.x, t[1], t[2], t[3], t[4]
+end
+return f(true), f(false))LUA";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 2);
+}

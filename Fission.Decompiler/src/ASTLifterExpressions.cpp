@@ -1175,6 +1175,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
                 break;
             if (candidate.operands[1].value.reg == tableReg) {
+                if (m_setListKeySnapshots.contains(&candidate))
+                    break;
                 const bool closure = closureField(candidate.operands[0]);
                 if ((!closure && readsTableReg(candidate.operands[0])) || readsTableReg(candidate.operands[2]))
                     break;
