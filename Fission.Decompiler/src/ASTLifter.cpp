@@ -2773,6 +2773,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         if (store.operation != LiftedOperation::SETTABLE || store.operands.size() < 3 || store.operands[2].type != LiftedOperandType::Register)
             return false;
         const auto *definition = m_currentFunction->GetDefinition(store.operands[2]);
+        if (definition && definition->operation == LiftedOperation::PHI)
+            return store.instructionIndex > table.instructionIndex;
         if (!definition || definition->instructionIndex <= table.instructionIndex || BlockOf(definition) != BlockOf(&store))
             return false;
         if (!ShouldInline(definition))

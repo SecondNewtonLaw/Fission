@@ -12,7 +12,7 @@ States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `un
 
 ## Verification checkpoint, 2026-09-24
 
-GCC Debug build of `Fission.CLI` and `Fission.Tests` succeeded after the C21 global-key follow-up. Latest CTest passed 631/631; `Samples/StressTests/run_all.ps1` passed 22/22 using the follow-up CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-globalkeys`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
+GCC Debug build of `Fission.CLI` and `Fission.Tests` succeeded after the C21 conditional-key follow-up. Latest CTest passed 632/632; `Samples/StressTests/run_all.ps1` passed 22/22 using the follow-up CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-conditionalkeys`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
 
 ## Investigation completion gate
 
@@ -177,6 +177,8 @@ Luau `compileExprTable` flushes fixed list chunks before keyed items, then emits
 **Global-key follow-up:** `{[keyA] = value(), 10, [keyB] = value(), ...}` also lost the second variadic result at O0/O1/O2 (3 failed trace assertions). Both global reads were already materialized before their stores, but `storeSiteSnapshotableKey` limited eligibility to call definitions. It now accepts any same-block, already-materialized key definition; only inlinable call definitions still need the intervening-instruction restriction. Both distinct regression cases pass (24 assertions), full CTest 631/631 and stress samples 22/22. This extends the same snapshot root cause rather than introducing a second table rewrite.
 
 **Neighbouring forms:** Directed compiler/VM probes of arithmetic keys (`[base + 1]`, `[base + 2]`) with a variadic tail and an inline `return {[key()] = value(), 10, [key()] = value(), ...}` both matched after the fix. These probes were removed; the permanent tests target the two forms that failed before repair.
+
+**Conditional-key follow-up:** Two keys selected by `c and "x" or "y"` and `c and "a" or "b"` cross CFG branches and become SSA PHIs. `storeSiteSnapshotableKey` rejected PHIs because their synthetic `instructionIndex` is `-1` and `BlockOf` has no raw-instruction slot for them. The generic `SETLIST` fallback again truncated `(10, false)` to one result at O0/O1/O2 (3 failed trace assertions). A PHI key is materialized by branch reconstruction before the store, so the store can snapshot its value without replaying the condition. Accepting that key restores delayed table reconstruction; all three table regressions pass (36 assertions), full CTest 632/632, stress samples 22/22. A directed side-effecting branch-key probe also matched after the fix. No fuzzing run.
 
 ## Source audit log
 

@@ -269,3 +269,18 @@ make(10, false))LUA";
         lifting_semantics_test::CheckSameTrace(source, output, optLevel);
     }
 }
+
+TEST_CASE("Compiler variadic table list preserves results after conditional keys", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function make(c, ...)
+    local t = {[c and "x" or "y"] = 1, 10, [c and "a" or "b"] = 2, ...}
+    print(t.x, t.y, t.a, t.b, t[1], t[2], t[3])
+end
+make(true, 10, false)
+make(false, 10, false))LUA";
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+    }
+}
