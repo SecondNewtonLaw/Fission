@@ -3,9 +3,11 @@
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "BytecodeLifter.hpp"
+#include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
 #include "InstructionDecoder.hpp"
 #include "LiftingSemanticsTestSupport.hpp"
+#include "SSABuilder.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
 #include "Luau/Compiler.h"
@@ -171,4 +173,44 @@ setmetatable(getfenv(), {
     };
     check("local x = watched\ntrigger()\nreturn x", LOP_GETIMPORT);
     check("watched = nil\nlocal x = watched\ntrigger()\nreturn x", LOP_GETGLOBAL);
+}
+
+TEST_CASE("Compiler audit: generic loop latch reads generator state and control", "[Decompiler][CompilerAudit][SSA]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function step(state, index)
+    if index < 2 then return index + 1, index + 1 end
+end
+local sum = 0
+for key, value in step, {}, 0 do sum += value end
+return sum)LUA";
+    Luau::CompileOptions options{};
+    options.optimizationLevel = 1;
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE_FALSE(bytecode.empty());
+    REQUIRE(bytecode[0] != '\0');
+    Deserializer deserializer{};
+    const auto decoded = deserializer.Deserialize(bytecode);
+    REQUIRE(decoded.has_value());
+    Fission::InstructionDecoder decoder{};
+    BytecodeLifter lifter{&decoder};
+    auto lifted = lifter.LiftDeserializedBytecode(*decoded);
+    ControlFlowAnalyzer cfa{};
+    auto analyzed = cfa.DetermineBasicBlocks(&lifted);
+    cfa.OptimizeGraph(analyzed);
+    cfa.PruneUnreachable(analyzed);
+    cfa.IdentifyStructures(analyzed);
+    SSABuilder ssa{};
+    ssa.Build(analyzed);
+
+    bool found = false;
+    for (const auto &instruction : lifted.instructions) {
+        if (instruction.operation != LiftedOperation::FORGLOOP)
+            continue;
+        found = true;
+        const auto use = analyzed.implicitUses.find(&instruction);
+        REQUIRE(use != analyzed.implicitUses.end());
+        REQUIRE(use->second.size() == 3);
+        CHECK(use->second[0] == instruction.operands[0].ssaVersion);
+    }
+    REQUIRE(found);
 }

@@ -4,8 +4,7 @@
 // Differential SSA check: each register read in Fission's SSA, flattened through phis to its defining
 // instructions, must equal the definitions that reach that read in the VM (independent reaching-defs
 // dataflow over the raw Luau words). Multret values are represented by the producer's base register,
-// matching how Fission versions them; FASTCALL shadows of a CALL are not compared. FORGLOOP's per-iteration
-// reads of the hidden state/control slots are not source-visible and are not compared.
+// matching how Fission versions them; FASTCALL shadows of a CALL are not compared.
 #pragma once
 
 #include "BytecodeLifter.hpp"
@@ -224,7 +223,7 @@ namespace fuzz {
                 access.writes.push_back(a + 2);
                 break;
             case LOP_FORGLOOP:
-                access.reads.push_back(a);
+                AddRange(access.reads, a, 3);
                 AddRange(access.writes, a + 2, 1 + static_cast<int>(aux & 0xFF));
                 break;
             case LOP_CAPTURE:
@@ -322,6 +321,7 @@ namespace fuzz {
             case LiftedOperation::FORGPREP:
             case LiftedOperation::FORGPREP_INEXT:
             case LiftedOperation::FORGPREP_NEXT:
+            case LiftedOperation::FORGLOOP:
                 return inst.operands[0].value.reg;
             case LiftedOperation::SETLIST:
             case LiftedOperation::CONCAT:

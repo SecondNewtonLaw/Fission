@@ -2579,6 +2579,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             op.value.reg = baseReg + 2;
                             op.ssaVersion = indexVer;
                             forNode->index = LiftExpression(op, false);
+                            if (indexDef && indexDef->operation == LiftedOperation::LOAD && indexDef->operands.size() > 1 &&
+                                indexDef->operands[1].type == LiftedOperandType::ImmediateNil)
+                                forNode->index = std::make_shared<NilLiteralNode>();
 
                             // `for k,v in t do` lowers to [t, nil, nil] (Luau pads to 3). the nil state/control
                             // aren't idiomatic/portable, so collapse to the single-generator form.

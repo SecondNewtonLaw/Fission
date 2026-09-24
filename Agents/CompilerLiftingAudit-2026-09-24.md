@@ -12,11 +12,11 @@ States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `un
 
 ## Verification checkpoint, 2026-09-24
 
-Final GCC Debug build of `Fission.CLI` and `Fission.Tests` succeeded. CTest passed 627/627 after formatting; `Samples/StressTests/run_all.ps1` passed 22/22 using the fresh CLI and an isolated results directory. Individual “Full suite pending” notes below describe their earlier red/green checkpoint and are superseded by this result. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
+GCC Debug build of `Fission.CLI` and `Fission.Tests` succeeded after C6 formatting. CTest passed 628/628; `Samples/StressTests/run_all.ps1` passed 22/22 using the fresh CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c6`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by this result. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
 
 ## Investigation completion gate
 
-Family-level opcode inventory below is insufficient to close the requested investigation. Before another production fix, inspect and record each inverse boundary end to end:
+Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
 
 | Boundary | Required comparison | State |
 |---|---|---|
@@ -24,11 +24,11 @@ Family-level opcode inventory below is insufficient to close the requested inves
 | BytecodeBuilder and deserializer | Encodings, AUX lengths, constants, nested protos, jump folding/expansion, all supported version branches | source review done for compiler output; C5/C16/C17 have red/green regressions |
 | BytecodeLifter | All opcode operands, signs, register ranges, AUX ownership, synthetic NOPs and branch offsets | source review done for compiler output; C1 fixed, C3 candidate; semantic parity open |
 | CFA | Leaders, edge linking, jump direction, loop headers/latches, break/continue, graph rewriting and reachability | source review done for principal compiler shapes; C13/C14 parity open |
-| SSA | Explicit and implicit reads/defs, multret, phi placement, liveness, capture and loop edge versions | source review done for principal compiler shapes; C6/C19/C20 parity open |
+| SSA | Explicit and implicit reads/defs, multret, phi placement, liveness, capture and loop edge versions | source review done for principal compiler shapes; C6 fixed; C19/C20 parity open |
 | ASTLifter | Expression, call, table, closure, condition, loop, inlining and statement placement paths | source review done for principal compiler shapes; C15 fixed, C14 and table/multret parity remain |
 | Rewriters and source generator | Every transformation that deletes, duplicates, reorders or aliases evaluation; rendering of all emitted nodes | source review done for principal mutation paths; C7/C9/C11/C18 fixed, C10 candidate |
 
-Record exact paths and outcomes, including rejected suspicions. Move to TDD only after this table is resolved for compiler-reachable behavior. Existing C7/C9/C1/C5/C11 work was started early; preserve it and avoid further production edits until gate is met.
+Record exact paths and outcomes, including rejected suspicions. Source review found concrete defects and remaining candidates; test each candidate against compiler-produced bytecode before changing production code.
 
 Source comparison pass is complete at emitter-family/inverse-boundary level. It found finite, ranked candidates below rather than a claim that all possible programs are proven. Next phase is directed compiler-produced counterexamples, one candidate at a time, before changing production code. If a counterexample exposes an unreviewed lowering variant, reopen its boundary here.
 
@@ -76,9 +76,9 @@ Current `BytecodeBuilder::writeFunction` emits type encoding v3, but Fission acc
 
 **Red/green:** `LegacyTypeEncodingRegression.cpp` builds a v12/type-v1 blob with a two-byte function type and one `RETURN`. Luau VM accepts and executes it; Fission returned no decoded bytecode before fix. Deserializer now advances over `typeSize` only after copying into its synthetic v2-compatible buffer. Focused test passes (4 assertions, GCC Debug). Full suite pending.
 
-### C6 — generic `FORGLOOP` SSA omits state/index reads (`candidate`)
+### C6 — generic `FORGLOOP` SSA omits state/index reads (`fixed`)
 
-Compiler `compileStatForIn` initializes generator/state/index at `A..A+2` and emits `FORGLOOP` (`Compiler.cpp:4348-4457`). VM's `FORGLOOP` reads all three (`VM/src/lvmexecute.cpp:2704-2808`). Fission's `SSABuilder::GetRegisterAccess` records only explicit operand A, and its `RenameVariables`/liveness implicit-read branch covers `FOR*PREP` and `FORNLOOP`, but not `FORGLOOP` (`SSABuilder.cpp:22-52,263-331,730-772`). The prep is modeled as a loop header, so its implicit reads may indirectly keep values live. Check whether this masks the missing latch reads for compiler-produced loops before treating as a user-visible defect; especially generator/state/index phi and values from multi-return initializers.
+Compiler `compileStatForIn` initializes generator/state/index at `A..A+2` and emits `FORGLOOP` (`Compiler.cpp:4348-4457`). VM's `FORGLOOP` reads all three (`VM/src/lvmexecute.cpp:2704-2808`). Fission recorded only explicit A; liveness and SSA implicit uses omitted A+1/A+2. A compiler-produced generic loop proved this in a red regression: no `FORGLOOP` implicit-use entry. SSA now records all three reads before its control and loop-variable writes; the SSA oracle models matching VM reads. Latch-carried control phis also required `FORGPREP` to use its entry-edge value, and ASTLifter to recognize the original nil control initializer. Focused test is green (7 assertions); full CTest passed 628/628 and sample stress passed 22/22 after formatting.
 
 ### C7 — dead-local rewrite treats global reads as effect-free (`fixed`)
 

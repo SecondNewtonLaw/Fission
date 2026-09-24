@@ -308,7 +308,7 @@ static void ComputeLiveness(
             } else if (
                 (inst->operation == LiftedOperation::FORNPREP || inst->operation == LiftedOperation::FORGPREP ||
                  inst->operation == LiftedOperation::FORGPREP_INEXT || inst->operation == LiftedOperation::FORGPREP_NEXT ||
-                 inst->operation == LiftedOperation::FORNLOOP) &&
+                 inst->operation == LiftedOperation::FORNLOOP || inst->operation == LiftedOperation::FORGLOOP) &&
                 !inst->operands.empty()
             ) {
                 const int base = inst->operands[0].value.reg;
@@ -741,6 +741,15 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                 for (int i = 0; i < 3; ++i) {
                     int32_t r = baseReg + i;
                     int32_t v = CurrentVersion(r);
+                    if (inst->operation != LiftedOperation::FORNLOOP && inst->operation != LiftedOperation::FORNPREP && block.loopLatch &&
+                        block.predecessors.size() == 2) {
+                        for (const auto &phi : block.phiNodes)
+                            if (phi.operands[0].value.reg == r)
+                                for (size_t pred = 0; pred < block.predecessors.size(); ++pred)
+                                    if (block.predecessors[pred] != *block.loopLatch && pred + 1 < phi.operands.size() &&
+                                        phi.operands[pred + 1].ssaVersion >= 0)
+                                        v = phi.operands[pred + 1].ssaVersion;
+                    }
                     if (v == -1)
                         v = NewVersion(r);
                     loopInputs.push_back(v);
@@ -757,6 +766,17 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
             } else if (inst->operation == LiftedOperation::FORGLOOP && inst->operands.size() > 2) {
                 int32_t baseReg = inst->operands[0].value.reg;
                 int numVars = (inst->operands[2].value.imm.n & 0xFF);
+                std::vector<int32_t> loopInputs{inst->operands[0].ssaVersion};
+                for (int i = 1; i < 3; ++i) {
+                    const int32_t reg = baseReg + i;
+                    int32_t version = CurrentVersion(reg);
+                    if (version == -1)
+                        version = NewVersion(reg);
+                    loopInputs.push_back(version);
+                    func.useCounts[{reg, version}]++;
+                    func.users[{reg, version}].push_back(inst);
+                }
+                func.implicitUses[inst] = std::move(loopInputs);
                 int32_t stateVersion = NewVersion(baseReg + 2);
                 varsDefinedHere.push_back(baseReg + 2);
                 func.definitionMap[{static_cast<uint8_t>(baseReg + 2), stateVersion}] = inst;
