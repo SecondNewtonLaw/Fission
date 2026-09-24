@@ -2270,3 +2270,52 @@ end)LUA";
     CheckSemanticParity(capturingSource, 2, 1);
     CheckSemanticParity(capturingSource, 2, 2);
 }
+
+TEST_CASE("Compiler audit: long call chains lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local calls = 0\nlocal function f() calls += 1 return f end\nf";
+    for (int i = 0; i < 70; ++i)
+        source += "()";
+    source += "\nprint(calls)";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+
+    std::string methods = "local t = {count = 0}\nfunction t:step() self.count += 1 return self end\nt";
+    for (int i = 0; i < 70; ++i)
+        methods += ":step()";
+    methods += "\nprint(t.count)";
+    CheckSemanticParity(methods, 1, 1);
+    CheckSemanticParity(methods, 2, 1);
+    const auto ordered = "local function f(n) print(n) return f end\nf(1)(2)(3)";
+    CheckSemanticParity(ordered, 1, 1);
+    CheckSemanticParity(ordered, 2, 1);
+}
+
+TEST_CASE("Compiler audit: long unary chains lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "print(";
+    for (int i = 0; i < 70; ++i)
+        source += "not ";
+    source += "next({}))";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: right-nested binary chains lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local x = tonumber('1')\nprint(";
+    for (int i = 0; i < 70; ++i)
+        source += "(x + ";
+    source += "x";
+    for (int i = 0; i < 70; ++i)
+        source += ")";
+    source += ")";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}
+
+TEST_CASE("Compiler audit: constant-index table chains lift without expression depth loss", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local t = {}\nt[1] = t\nprint(t";
+    for (int i = 0; i < 70; ++i)
+        source += "[1]";
+    source += " == t)";
+    CheckSemanticParity(source, 1, 1);
+    CheckSemanticParity(source, 2, 1);
+}

@@ -177,7 +177,8 @@ class ASTLifter {
     bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const boost::unordered_flat_set<uint32_t> &visitedScopes);
     std::shared_ptr<Expression> LiftExpression(const LiftedOperand &operand, bool forceExpression = false);
     std::shared_ptr<Expression> ConstantLiteral(int32_t index) const;
-    std::shared_ptr<Expression> LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested);
+    std::shared_ptr<Expression>
+    LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested, std::shared_ptr<Expression> calleeOverride = nullptr);
     // With `plan`, renders nothing: records the store instructions an inlined constructor would fold.
     std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst, std::vector<int32_t> *plan = nullptr);
     // The location a SETGLOBAL, SETUPVAL or SETTABLE* writes.

@@ -139,8 +139,38 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             return ConstantLiteral(def->operands[1].value.imm.k);
     }
 
-    // left-leaning binary spines (`a+b+c+...`) are walked iteratively, then folded up
+    // Walk both binary spine directions without recursive def traversal.
     if (BinaryOperatorSymbol(def->operation) != nullptr) {
+        const auto rightBinary = [&](const LiftedInstruction *current) -> const LiftedInstruction * {
+            if (HasConstantRightOperand(current->operation) || current->operands[2].type != LiftedOperandType::Register)
+                return nullptr;
+            const auto &right = current->operands[2];
+            if (m_pinnedRegisters.contains({right.value.reg, right.ssaVersion}) ||
+                m_inlineableClosures.contains({static_cast<uint8_t>(right.value.reg), right.ssaVersion}))
+                return nullptr;
+            const auto *next = m_currentFunction->GetDefinition(right);
+            return next && next->instructionIndex < current->instructionIndex && !m_processedInstructions.contains(next->instructionIndex) &&
+                           ShouldInline(next) && BinaryOperatorSymbol(next->operation)
+                       ? next
+                       : nullptr;
+        };
+        if (rightBinary(def)) {
+            std::vector<std::pair<const char *, std::shared_ptr<Expression>>> lefts;
+            const LiftedInstruction *current = def;
+            std::shared_ptr<Expression> value;
+            while (true) {
+                lefts.emplace_back(BinaryOperatorSymbol(current->operation), LiftExpression(current->operands[1]));
+                if (const auto *next = rightBinary(current)) {
+                    current = next;
+                    continue;
+                }
+                value = HasConstantRightOperand(current->operation) ? ConstantLiteral(current->operands[2].value.imm.k) : LiftExpression(current->operands[2]);
+                break;
+            }
+            for (auto it = lefts.rbegin(); it != lefts.rend(); ++it)
+                value = std::make_shared<BinaryExpressionNode>(it->first, it->second, value);
+            return value;
+        }
         std::vector<std::pair<const char *, std::shared_ptr<Expression>>> rights;
         const LiftedInstruction *curDef = def;
         LiftedOperand leftLeafOperand{};
@@ -194,19 +224,34 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         auto right = LiftExpression(def->operands[2]);
         return std::make_shared<BinaryExpressionNode>(def->operation == LiftedOperation::SUBRK ? "-" : "/", left, right);
     }
-    case LiftedOperation::GETTABLEN: {
-        // the immediate is index - 1; a plain number literal recompiles back to GETTABLEN
-        auto base = LiftExpression(def->operands[1]);
-        auto index = std::make_shared<NumberLiteralNode>(static_cast<double>(def->operands[2].value.imm.n) + 1.0);
-        return std::make_shared<IndexExpressionNode>(base, index);
-    }
-
     case LiftedOperation::NOT:
-        return std::make_shared<UnaryExpressionNode>("not " /* not is extra space. */, LiftExpression(def->operands[1]));
     case LiftedOperation::MINUS:
-        return std::make_shared<UnaryExpressionNode>("-", LiftExpression(def->operands[1]));
-    case LiftedOperation::LENGTH:
-        return std::make_shared<UnaryExpressionNode>("#", LiftExpression(def->operands[1]));
+    case LiftedOperation::LENGTH: {
+        const auto unary = [](LiftedOperation operation) {
+            return operation == LiftedOperation::NOT || operation == LiftedOperation::MINUS || operation == LiftedOperation::LENGTH;
+        };
+        std::vector<LiftedOperation> chain;
+        const LiftedInstruction *current = def;
+        LiftedOperand source{};
+        while (true) {
+            chain.push_back(current->operation);
+            source = current->operands[1];
+            if (source.type != LiftedOperandType::Register || m_pinnedRegisters.contains({source.value.reg, source.ssaVersion}) ||
+                m_inlineableClosures.contains({static_cast<uint8_t>(source.value.reg), source.ssaVersion}))
+                break;
+            const auto *inner = m_currentFunction->GetDefinition(source);
+            if (!inner || inner->instructionIndex >= current->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) ||
+                !ShouldInline(inner) || !unary(inner->operation))
+                break;
+            current = inner;
+        }
+        auto value = LiftExpression(source);
+        for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
+            const char *symbol = *it == LiftedOperation::NOT ? "not " : *it == LiftedOperation::MINUS ? "-" : "#";
+            value = std::make_shared<UnaryExpressionNode>(symbol, value);
+        }
+        return value;
+    }
 
     case LiftedOperation::MOVE:
         return LiftExpression(def->operands[1], forceExpression);
@@ -312,8 +357,9 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         return curr;
     }
     case LiftedOperation::GETTABLE:
-    case LiftedOperation::GETTABLEKS: {
-        // member chains `a.b.c.d` are walked iteratively, one hop per GETTABLE(KS)
+    case LiftedOperation::GETTABLEKS:
+    case LiftedOperation::GETTABLEN: {
+        // Table access chains are walked iteratively, one hop per bytecode read.
         struct Hop {
             bool isKeyed;
             std::shared_ptr<Expression> indexExpr;
@@ -329,6 +375,9 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
                 hop.isKeyed = false;
                 const auto &k = ConstantAt(curDef->operands[2].value.imm.k);
                 hop.memberName = std::get<std::string>(k.constantData);
+            } else if (curDef->operation == LiftedOperation::GETTABLEN) {
+                hop.isKeyed = true;
+                hop.indexExpr = std::make_shared<NumberLiteralNode>(static_cast<double>(curDef->operands[2].value.imm.n) + 1.0);
             } else {
                 hop.isKeyed = true;
                 hop.indexExpr = LiftExpression(curDef->operands[2]);
@@ -354,7 +403,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             }
             const auto *leftDef = m_currentFunction->GetDefinition(leftOp);
             if (!leftDef || m_processedInstructions.contains(leftDef->instructionIndex) || !ShouldInline(leftDef) ||
-                (leftDef->operation != LiftedOperation::GETTABLE && leftDef->operation != LiftedOperation::GETTABLEKS)) {
+                (leftDef->operation != LiftedOperation::GETTABLE && leftDef->operation != LiftedOperation::GETTABLEKS &&
+                 leftDef->operation != LiftedOperation::GETTABLEN)) {
                 leftLeafOp = leftOp;
                 leftLeafSet = true;
                 break;
@@ -410,19 +460,45 @@ bool ASTLifter::IsMultretCall(const LiftedInstruction &callDef, int32_t callDefI
     return true;
 }
 
-std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested) {
-    // a NAMECALL two slots before a CALL on the same base is the real call site
-    const LiftedInstruction *curInst = &inst;
-    int32_t curIdx = instructionIndex;
-    while ((curInst->operation == LiftedOperation::CALL || curInst->operation == LiftedOperation::CALLFB) && curIdx >= 2) {
-        if (curInst->operands.empty())
-            break;
-        const auto &prev = m_currentFunction->lpLiftedFunction->instructions[curIdx - 2];
-        if (prev.operation != LiftedOperation::NAMECALL || prev.operands.empty() || prev.operands[0].value.reg != curInst->operands[0].value.reg)
-            break;
-        curInst = &prev;
-        curIdx -= 2;
+std::shared_ptr<Expression>
+ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested, std::shared_ptr<Expression> calleeOverride) {
+    const auto resolveSite = [&](const LiftedInstruction *call, int32_t index) {
+        while ((call->operation == LiftedOperation::CALL || call->operation == LiftedOperation::CALLFB) && index >= 2) {
+            if (call->operands.empty())
+                break;
+            const auto &prev = m_currentFunction->lpLiftedFunction->instructions[index - 2];
+            if (prev.operation != LiftedOperation::NAMECALL || prev.operands.empty() || prev.operands[0].value.reg != call->operands[0].value.reg)
+                break;
+            call = &prev;
+            index -= 2;
+        }
+        return std::pair{call, index};
+    };
+    if (!calleeOverride) {
+        std::vector<const LiftedInstruction *> chain;
+        const LiftedInstruction *call = &inst;
+        while (true) {
+            const auto [site, _] = resolveSite(call, call->instructionIndex);
+            const bool named = site->operation == LiftedOperation::NAMECALL;
+            const size_t sourceIndex = named ? 1 : 0;
+            if (site->operands.size() <= sourceIndex || site->operands[sourceIndex].type != LiftedOperandType::Register)
+                break;
+            const auto *source = m_currentFunction->GetDefinition(site->operands[sourceIndex]);
+            if (!source || source->instructionIndex >= call->instructionIndex || m_processedInstructions.contains(source->instructionIndex) ||
+                !ShouldInline(source) ||
+                (source->operation != LiftedOperation::CALL && source->operation != LiftedOperation::CALLFB && source->operation != LiftedOperation::NAMECALL))
+                break;
+            chain.push_back(call);
+            call = source;
+        }
+        if (!chain.empty()) {
+            auto value = LiftCall(*call, call->instructionIndex, true);
+            for (auto it = chain.rbegin(); it != chain.rend(); ++it)
+                value = LiftCall(**it, (*it)->instructionIndex, it + 1 == chain.rend() ? isNested : true, std::move(value));
+            return value;
+        }
     }
+    const auto [curInst, curIdx] = resolveSite(&inst, instructionIndex);
     const LiftedInstruction &resolvedInst = *curInst;
     const int32_t resolvedIdx = curIdx;
 
@@ -443,7 +519,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCall(const LiftedInstruction &inst, i
     // a call in the final argument slot truncated to one value; rendered bare it would spread on recompile
     const LiftedInstruction *adjustArgCallDef = nullptr;
 
-    if (isNameCall)
+    if (calleeOverride)
+        callee = std::move(calleeOverride);
+    else if (isNameCall)
         callee = LiftExpression(resolvedInst.operands[1], false);
     else
         callee = LiftExpression(resolvedInst.operands[0], false);
