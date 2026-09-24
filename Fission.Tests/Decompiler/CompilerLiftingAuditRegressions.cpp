@@ -252,3 +252,20 @@ makeCall(10, false))LUA";
         lifting_semantics_test::CheckSameTrace(source, output, optLevel);
     }
 }
+
+TEST_CASE("Compiler variadic table list preserves results after global keys", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function value() print("value"); return 1 end
+local function make(...)
+    local t = {[keyA] = value(), 10, [keyB] = value(), ...}
+    print(t.x, t.y, t[1], t[2], t[3])
+end
+keyA = "x"
+keyB = "y"
+make(10, false))LUA";
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+    }
+}
