@@ -7,8 +7,6 @@
 #include <catch2/catch_test_macros.hpp>
 
 namespace ForwardDeclarationRegressions {
-    constexpr Luau::CompileOptions kOptions{fuzz::kOpt, fuzz::kDebug};
-
     std::string Decompile(const std::string &source) {
         fuzz::EnableLuauFlags();
         const auto result = fuzz::FullDecompile(source);
