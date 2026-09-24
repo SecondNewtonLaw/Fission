@@ -228,3 +228,27 @@ return k(true, true, 5, 9))LUA";
         lifting_semantics_test::CheckSameTrace(source, output, optLevel);
     }
 }
+
+TEST_CASE("Compiler variadic table list preserves all results after computed fields", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function key() print("key"); return "x" end
+local function value() print("value"); return 1 end
+local function make(...)
+    local t = {[key()] = value(), 10, [key()] = value(), ...}
+    print(t.x, t[1], t[2], t[3], t[4])
+end
+local function pass(...) return ... end
+local function makeCall(...)
+    local t = {[key()] = value(), 10, [key()] = value(), pass(...)}
+    print(t.x, t[1], t[2], t[3], t[4])
+end
+make(10, false)
+make()
+make(10, nil, false)
+makeCall(10, false))LUA";
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+    }
+}

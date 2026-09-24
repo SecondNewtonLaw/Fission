@@ -2777,6 +2777,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             (definition->operation != LiftedOperation::CALL && definition->operation != LiftedOperation::CALLFB &&
              definition->operation != LiftedOperation::NAMECALL && definition->operation != LiftedOperation::NAMECALLUDATA))
             return false;
+        if (!ShouldInline(definition))
+            return true;
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
         for (int index = definition->instructionIndex + 1; index < store.instructionIndex; ++index)
             if (instructions[index].operation != LiftedOperation::NOP && instructions[index].operation != LiftedOperation::LOAD)
