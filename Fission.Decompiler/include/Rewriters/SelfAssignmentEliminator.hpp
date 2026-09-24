@@ -27,6 +27,6 @@ class SelfAssignmentEliminator : public ASTRewriter {
             return false;
         auto l = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
         auto r = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->right);
-        return l && r && l->identifier && r->identifier && l->identifier->name == r->identifier->name;
+        return l && r && l->identifier && r->identifier && !l->identifier->bIsGlobal && !r->identifier->bIsGlobal && l->identifier->name == r->identifier->name;
     }
 };

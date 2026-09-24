@@ -492,7 +492,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant; // destination to ktable if loaded properly
-            instr.operands[1].value.imm.k = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[1].value.imm.k = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::ImmediateAux; // index chain
             instr.operands[2].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
 
@@ -1484,8 +1484,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             if (!shape.IsClassShape())
                 throw Fission::DecompilerError("malformed NEWCLASS: AUX is not a class-shape constant");
             instr.instructionRemarks = std::format(
-                "INFO: Reify class '{}'{}.", std::get<LuauClassShape>(shape.constantData).className,
-                instr.operands[2].value.imm.b ? " (open)" : ""
+                "INFO: Reify class '{}'{}.", std::get<LuauClassShape>(shape.constantData).className, instr.operands[2].value.imm.b ? " (open)" : ""
             );
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";

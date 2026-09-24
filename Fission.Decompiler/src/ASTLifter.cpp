@@ -63,9 +63,7 @@ class ControlFlowTask {
 
     struct FinalAwaiter {
         bool await_ready() const noexcept { return false; }
-        void await_suspend(Handle handle) const noexcept {
-            *handle.promise().next = handle.promise().continuation;
-        }
+        void await_suspend(Handle handle) const noexcept { *handle.promise().next = handle.promise().continuation; }
         void await_resume() const noexcept {}
     };
 
@@ -211,8 +209,11 @@ ASTLifter::ASTLifter() {}
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_currentFunction = &analyzedFunction;
     if (m_debugNotes && m_debugNotes->Enabled())
-        m_debugFunction = std::format("F{} ({})", analyzedFunction.lpLiftedFunction->lpDeserialized ? static_cast<int>(analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId) : -1,
-                                      analyzedFunction.lpLiftedFunction->name);
+        m_debugFunction = std::format(
+            "F{} ({})",
+            analyzedFunction.lpLiftedFunction->lpDeserialized ? static_cast<int>(analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId) : -1,
+            analyzedFunction.lpLiftedFunction->name
+        );
     Explain("function {}: lifting {} CFG blocks", m_debugFunction, analyzedFunction.basicBlocks.size());
     this->m_definedRegisters.clear();
     this->m_pinnedRegisters.clear();
@@ -236,7 +237,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_deferToConditionInline.clear();
     this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
     this->m_shouldInlineActive.clear();
-    this->m_mergeCache.clear();       // keyed by this function's block ids
+    this->m_mergeCache.clear(); // keyed by this function's block ids
     this->m_forwardReach.clear();
     this->m_dominators.reset();
     this->m_valueArmDuplications = 0;
@@ -336,8 +337,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 continue;
             for (const auto *setList = table + 1; setList <= block.lpTail; ++setList) {
                 if (setList->operation != LiftedOperation::SETLIST || setList->operands.size() < 2 ||
-                    setList->operands[0].value.reg != table->operands[0].value.reg ||
-                    setList->operands[0].ssaVersion != table->operands[0].ssaVersion || !analyzedFunction.implicitUses.contains(setList))
+                    setList->operands[0].value.reg != table->operands[0].value.reg || setList->operands[0].ssaVersion != table->operands[0].ssaVersion ||
+                    !analyzedFunction.implicitUses.contains(setList))
                     continue;
                 const auto &versions = analyzedFunction.implicitUses.at(setList);
                 const int32_t startReg = setList->operands[1].value.reg;
@@ -376,8 +377,10 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         }
     }
 
-    Explain("function {}: forced {} definitions to remain statements because moving them could change effects or closure order",
-            m_debugFunction, m_forcedMaterialization.size());
+    Explain(
+        "function {}: forced {} definitions to remain statements because moving them could change effects or closure order", m_debugFunction,
+        m_forcedMaterialization.size()
+    );
 
     ASTFunction ast;
     ast.backingFunction = &analyzedFunction;
@@ -458,8 +461,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 grew = false;
                 for (const auto &[version, definition] : definitions)
                     if (definition->operation == LiftedOperation::PHI && !versions.contains(version) &&
-                        std::any_of(definition->operands.begin() + 1, definition->operands.end(),
-                                    [&](const LiftedOperand &input) { return versions.contains(input.ssaVersion); }))
+                        std::any_of(definition->operands.begin() + 1, definition->operands.end(), [&](const LiftedOperand &input) {
+                            return versions.contains(input.ssaVersion);
+                        }))
                         grew |= versions.insert(version).second;
             }
             return versions;
@@ -534,8 +538,16 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                                             analyzedFunction.ssaOverrides[ref] = name;
                     } else if (mode == 1 && proto->upvalueNames.size() <= capIdx && reg >= analyzedFunction.lpLiftedFunction->numparams) {
                         // no debug locals: every value of the captured variable is one local
-                        const std::string name = selfCapture && proto->debugName ? localName(*proto->debugName, reg)
-                                                                                 : analyzedFunction.GetVarName(reg, cap.operands[1].ssaVersion);
+                        const std::string name =
+                            selfCapture && proto->debugName ? localName(*proto->debugName, reg)
+                            : definitionCounts()[reg] > static_cast<int>(capturedVersions.size())
+                                ? localName(
+                                      std::format(
+                                          "upv{}_{}_{}", reg, cap.operands[1].ssaVersion, analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId
+                                      ),
+                                      reg
+                                  )
+                                : analyzedFunction.GetVarName(reg, cap.operands[1].ssaVersion);
                         for (const int32_t version : capturedVersions) {
                             const SSARef ref{reg, version};
                             analyzedFunction.ssaOverrides.try_emplace(ref, name);
@@ -556,8 +568,10 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                                              (def->second->operation == LiftedOperation::NEWCLOSURE || def->second->operation == LiftedOperation::DUPCLOSURE);
                         if (!closure && definitionCounts()[ref.regIndex] > 1)
                             analyzedFunction.ssaOverrides.try_emplace(
-                                ref, localName(std::format("upv{}_{}_{}", ref.regIndex, ref.version, analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId),
-                                               ref.regIndex)
+                                ref, localName(
+                                         std::format("upv{}_{}_{}", ref.regIndex, ref.version, analyzedFunction.lpLiftedFunction->lpDeserialized->bytecodeId),
+                                         ref.regIndex
+                                     )
                             );
                     }
                 }
@@ -607,6 +621,17 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 continue;
             if (analyzedFunction.ssaOverrides.contains(ref) || analyzedFunction.variableNames.contains(ref))
                 continue;
+            if (analyzedFunction.IsConsumedByPhi(definition->operands[0]))
+                continue;
+            if ((definition->operation == LiftedOperation::GETIMPORT || definition->operation == LiftedOperation::GETGLOBAL) && !ShouldInline(definition)) {
+                const auto users = analyzedFunction.users.find(ref);
+                if (users != analyzedFunction.users.end() && std::ranges::any_of(users->second, [&](const LiftedInstruction *user) {
+                        return (user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB) && !user->operands.empty() &&
+                               user->operands[0].type == LiftedOperandType::Register && user->operands[0].value.reg == reg &&
+                               user->operands[0].ssaVersion == ref.version;
+                    }))
+                    analyzedFunction.ssaOverrides[ref] = std::format("v{}_{}", reg, ref.version);
+            }
             auto current = ref;
             int32_t lastUse = definition->instructionIndex;
             std::unordered_set<SSARef> seen;
@@ -785,8 +810,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     return ast;
 }
 
-void ASTLifter::ExplainKeep(const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer,
-                           const LiftedInstruction *barrier) const {
+void ASTLifter::ExplainKeep(
+    const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer, const LiftedInstruction *barrier
+) const {
     if (!m_debugNotes || !m_debugNotes->Enabled() || !definition)
         return;
     const int blockId = BlockOf(definition);
@@ -1087,9 +1113,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // to render once after them.
         if (currentBlockId == stopBlockId &&
             (!isReturnOnly(currentBlockId) || std::ranges::any_of(m_currentFunction->basicBlocks[currentBlockId].predecessors, [&](uint32_t pred) {
-                 const auto *tail = m_currentFunction->basicBlocks[pred].lpTail;
-                 return tail && tail->operation == LiftedOperation::JUMP;
-             })))
+                const auto *tail = m_currentFunction->basicBlocks[pred].lpTail;
+                return tail && tail->operation == LiftedOperation::JUMP;
+            })))
             break;
         // return blocks are allowed to be duplicated, as they have no successors.
         // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
@@ -1122,9 +1148,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
                     break;
-                } else if (auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt;
-                           // a pure tail reached through pure tests folds back into one short-circuit value
-                           region && (canDup || std::ranges::any_of(*region, blockHasEffect) || std::ranges::any_of(walked, blockHasEffect))) {
+                } else if (
+                    auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt;
+                    // a pure tail reached through pure tests folds back into one short-circuit value
+                    region && (canDup || std::ranges::any_of(*region, blockHasEffect) || std::ranges::any_of(walked, blockHasEffect))
+                ) {
                     // a small effectful tail shared by two exclusive branch edges: each path runs it once,
                     // so emitting it in both branches keeps every effect single. clear its processed marks
                     // (as for shared return blocks) so the second copy is complete.
@@ -1153,7 +1181,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             std::vector<uint32_t> &stack;
             ~LiftingScope() { stack.pop_back(); }
         };
-        m_liftingBlocks.push_back(currentBlockId);        const LiftingScope liftingScope{m_liftingBlocks};
+        m_liftingBlocks.push_back(currentBlockId);
+        const LiftingScope liftingScope{m_liftingBlocks};
 
         auto &block = m_currentFunction->basicBlocks[currentBlockId];
 
@@ -1170,12 +1199,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                     (block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop;
         // a header exits by itself only when one of its arms is the loop exit; an arm that runs code before
         // leaving (an inlined `return`) is a break arm of a `while true`
-        const bool deferredWhileHeader = block.bType == BlockType::LoopHeader && block.loopLatch &&
-                                         (block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop && block.successors.size() == 2 &&
-                                         (std::all_of(block.successors.begin(), block.successors.end(),
-                                                      [&](uint32_t successor) { return CanReach(successor, *block.loopLatch, currentBlockId, {currentBlockId}); }) ||
-                                          (block.loopExit && *block.loopExit != *block.loopLatch &&
-                                           std::ranges::find(block.successors, *block.loopExit) == block.successors.end()));
+        const bool deferredWhileHeader =
+            block.bType == BlockType::LoopHeader && block.loopLatch && (block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop &&
+            block.successors.size() == 2 &&
+            (std::all_of(
+                 block.successors.begin(), block.successors.end(),
+                 [&](uint32_t successor) { return CanReach(successor, *block.loopLatch, currentBlockId, {currentBlockId}); }
+             ) ||
+             (block.loopExit && *block.loopExit != *block.loopLatch && std::ranges::find(block.successors, *block.loopExit) == block.successors.end()));
         auto stmts = isRepeatHeader || deferredWhileHeader ? std::vector<std::shared_ptr<Statement>>{} : LiftBlockInstructions(block);
 
         // Linear continuation for the next iteration; -1 terminates the loop.
@@ -1239,7 +1270,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 // Loop exits are break targets, not convergences. A direct arm is likewise not a merge when
                 // the other arm reaches it only after returning through this header on a later iteration.
                 const bool mergeTargetsLoopExit = mergeIdx != InvalidBlockId && !m_loopExitStack.empty() &&
-                                                 std::find(m_loopExitStack.begin(), m_loopExitStack.end(), mergeIdx) != m_loopExitStack.end();
+                                                  std::find(m_loopExitStack.begin(), m_loopExitStack.end(), mergeIdx) != m_loopExitStack.end();
                 const bool mergeTargetsActiveLoopExit = !m_loopExitStack.empty() && mergeIdx == m_loopExitStack.back();
                 if (mergeTargetsActiveLoopExit) {
                     if (mergeIdx == trueIdx)
@@ -1258,7 +1289,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 const uint32_t otherArm = mergeIdx == trueIdx ? falseIdx : trueIdx;
                 const bool otherArmBreaks = !m_loopExitStack.empty() && otherArm == m_loopExitStack.back();
                 const bool mergeIsNextIterationArm = !mergeTargetsLoopExit && mergeFromGraph && mergeIsDirectArm && mergeIdx != stopBlockId &&
-                                                      !otherArmBreaks && !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
+                                                     !otherArmBreaks && !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
                 if ((mergeTargetsLoopExit && !mergeTargetsActiveLoopExit) || mergeIsNextIterationArm)
                     mergeIdx = InvalidBlockId;
                 // one arm flows to this region's end while the other jumps into the latch: join at the region end and
@@ -1527,8 +1558,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             if (block.loopLatch.has_value() && !sharedOuterRepeatLatch)
                 infiniteWhileLatch = DetectInfiniteWhileLatch(currentBlockId, *block.loopLatch);
             // around a repeat, only a back-edge the code after `until` flows into is an enclosing loop; others are inner loops
-            if (infiniteWhileLatch && isRepeatHeader &&
-                (!block.loopExit || !CanReach(*block.loopExit, *infiniteWhileLatch, currentBlockId, {currentBlockId})))
+            if (infiniteWhileLatch && isRepeatHeader && (!block.loopExit || !CanReach(*block.loopExit, *infiniteWhileLatch, currentBlockId, {currentBlockId})))
                 infiniteWhileLatch.reset();
             if (infiniteWhileLatch)
                 Explain(block, "wrap inner loop in while true because enclosing latch B{} returns to this shared header", *infiniteWhileLatch);
@@ -1629,8 +1659,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
                             uint32_t testId = InvalidBlockId;
                             for (const auto &candidate : m_currentFunction->basicBlocks) {
-                                if (candidate.bTerminator != BlockTerminator::Conditional || candidate.successors.size() != 2 ||
-                                    !candidate.lpTail || candidate.lpTail->instructionIndex >= pred.lpTail->instructionIndex)
+                                if (candidate.bTerminator != BlockTerminator::Conditional || candidate.successors.size() != 2 || !candidate.lpTail ||
+                                    candidate.lpTail->instructionIndex >= pred.lpTail->instructionIndex)
                                     continue;
                                 const bool firstLoops = CanReach(candidate.successors[0], predId, currentBlockId, {currentBlockId});
                                 const bool secondLoops = CanReach(candidate.successors[1], predId, currentBlockId, {currentBlockId});
@@ -1639,16 +1669,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 const uint32_t other = firstLoops ? candidate.successors[1] : candidate.successors[0];
                                 if (other != latchIdx && !CanReach(other, latchIdx, currentBlockId, {currentBlockId, predId}))
                                     continue;
-                                if (testId == InvalidBlockId || candidate.lpTail->instructionIndex >
-                                                                    m_currentFunction->basicBlocks[testId].lpTail->instructionIndex) {
+                                if (testId == InvalidBlockId ||
+                                    candidate.lpTail->instructionIndex > m_currentFunction->basicBlocks[testId].lpTail->instructionIndex) {
                                     testId = candidate.dwBlockId;
                                     sharedWhileExit = other;
                                 }
                             }
                             if (testId != InvalidBlockId) {
                                 sharedWhileLatch = predId;
-                                Explain(block, "preserve enclosing while through shared repeat header; latch B{} exits through B{}", predId,
-                                        *sharedWhileExit);
+                                Explain(block, "preserve enclosing while through shared repeat header; latch B{} exits through B{}", predId, *sharedWhileExit);
                                 break;
                             }
                         }
@@ -1668,8 +1697,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (!conditionDef || BlockOf(conditionDef) != static_cast<int>(latch.dwBlockId))
                                 continue;
 
-                            DeferIntoCondition(*conditionDef, {static_cast<uint8_t>(conditionOperand.value.reg), conditionOperand.ssaVersion}, expectedUser,
-                                               pendingConditionDefs);
+                            DeferIntoCondition(
+                                *conditionDef, {static_cast<uint8_t>(conditionOperand.value.reg), conditionOperand.ssaVersion}, expectedUser,
+                                pendingConditionDefs
+                            );
                         }
 
                         std::vector<std::shared_ptr<Statement>> bodyStmts;
@@ -1704,12 +1735,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 m_loopExitStack.pop_back();
                         } else if (block.bTerminator == BlockTerminator::Conditional && latchIdx != currentBlockId) {
                             auto &headerBlock = m_currentFunction->basicBlocks[currentBlockId];
-                            constexpr uint32_t kAllLoopFlags = static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
-                                                               static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
-                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
-                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
-                                                               static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed) |
-                                                               static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                            constexpr uint32_t kAllLoopFlags =
+                                static_cast<uint32_t>(LoopBlockFlags::WhileLoop) | static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
+                                static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                                static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed) | static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
                             const uint32_t savedFlags = headerBlock.dwBlockFlags;
                             const auto savedLatch = headerBlock.loopLatch;
                             const auto savedHeader = headerBlock.loopHeader;
@@ -2218,12 +2247,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     if (deferredWhileHeader && (!block.loopExit || deferredExit)) {
                         whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
                         auto &headerBlock = m_currentFunction->basicBlocks[currentBlockId];
-                        constexpr uint32_t kAllLoopFlags = static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
-                                                           static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
-                                                           static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) |
-                                                           static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
-                                                           static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed) |
-                                                           static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
+                        constexpr uint32_t kAllLoopFlags =
+                            static_cast<uint32_t>(LoopBlockFlags::WhileLoop) | static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
+                            static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop) | static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
+                            static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed) | static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
                         const uint32_t savedFlags = headerBlock.dwBlockFlags;
                         const auto savedLatch = headerBlock.loopLatch;
                         const auto savedHeader = headerBlock.loopHeader;
@@ -2250,9 +2277,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 });
                                 if (!writtenInLoop)
                                     continue;
-                                nodes.push_back(std::make_shared<VariableDeclarationNode>(
-                                    std::make_shared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
-                                ));
+                                nodes.push_back(
+                                    std::make_shared<VariableDeclarationNode>(
+                                        std::make_shared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
+                                    )
+                                );
                                 m_definedRegisters.insert(phi.operands[0].value.reg);
                                 m_hoistedRegisters.insert(phi.operands[0].value.reg);
                             }
@@ -2638,7 +2667,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         const uint32_t id = pending.back();
                         pending.pop_back();
                         for (const uint32_t succ : m_currentFunction->basicBlocks[id].successors) {
-                            if (succ == *infiniteWhileLatch || succ == currentBlockId || succ >= m_currentFunction->basicBlocks.size() || !seen.insert(succ).second)
+                            if (succ == *infiniteWhileLatch || succ == currentBlockId || succ >= m_currentFunction->basicBlocks.size() ||
+                                !seen.insert(succ).second)
                                 continue;
                             // an inner loop's latch returns to its header; CanReach does not follow latch back-edges
                             const auto &candidate = m_currentFunction->basicBlocks[succ];
@@ -2906,8 +2936,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         // an effectful `repeat until f()` twice.
         const bool openCall = (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) && inst.operands.size() > 2 &&
                               inst.operands[2].value.imm.n == 0;
-        if (ShouldInline(&inst) && (!forceDefinitions || m_deferToConditionInline.contains(&inst) || openCall || inst.operation == LiftedOperation::GETVARARGS ||
-                                    m_compoundInlined.contains(&inst)))
+        if (ShouldInline(&inst) && (!forceDefinitions || m_deferToConditionInline.contains(&inst) || openCall ||
+                                    inst.operation == LiftedOperation::GETVARARGS || m_compoundInlined.contains(&inst)))
             continue;
         if (forceDefinitions && m_foldConsumedDefs.contains(inst.instructionIndex))
             continue; // already rendered inside a folded table constructor
@@ -3209,8 +3239,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (!targetFunc)
                 throw Fission::DecompilerError("malformed bytecode: DUPCLOSURE proto is not a lifted child function");
 
-            if (duplicatedFunction->numparams >= 1 &&
-                IsSingleUseClassMemberValue(m_currentFunction, inst.operands[0].value.reg, inst.operands[0].ssaVersion))
+            if (duplicatedFunction->numparams >= 1 && IsSingleUseClassMemberValue(m_currentFunction, inst.operands[0].value.reg, inst.operands[0].ssaVersion))
                 targetFunc->SetReceiverName(0, "self");
 
             // walk trailing CAPTUREs; "propagate" = rename the source reg to the upvalue's debug name
@@ -3394,7 +3423,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
-                (m_definedRegisters.contains(saveWhere.value.reg) && (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
+                (m_definedRegisters.contains(saveWhere.value.reg) &&
+                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
                 if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                     if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())
@@ -3406,7 +3436,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bIsLocalDeclaration = false;
                 // a merged value defined ahead of its merges opens the variable nothing declared yet; inside an arm, the
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
-                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
+                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) &&
+                    DominatesMerges(inst, saveWhere)) {
                     statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }
@@ -3423,9 +3454,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (this->m_currentFunction->users.contains({saveWhere.value.reg, saveWhere.ssaVersion})) {
                 auto users = this->m_currentFunction->users[{saveWhere.value.reg, saveWhere.ssaVersion}];
                 for (const auto &user : users) {
-                    if (user->operation == LiftedOperation::SETGLOBAL && std::all_of(users.begin(), users.end(), [&](const auto *other) {
-                            return other == user;
-                        })) {
+                    if (user->operation == LiftedOperation::SETGLOBAL &&
+                        std::all_of(users.begin(), users.end(), [&](const auto *other) { return other == user; })) {
                         // set to global, not a local function.
                         auto fDec = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements.back());
                         // local functions may have a debug name. This is exactly to prevent this
@@ -3646,7 +3676,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
-                (m_definedRegisters.contains(saveWhere.value.reg) && (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
+                (m_definedRegisters.contains(saveWhere.value.reg) &&
+                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
                 if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                     if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())
@@ -3658,7 +3689,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bIsLocalDeclaration = false;
                 // a merged value defined ahead of its merges opens the variable nothing declared yet; inside an arm, the
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
-                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
+                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) &&
+                    DominatesMerges(inst, saveWhere)) {
                     statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }
@@ -3675,9 +3707,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (this->m_currentFunction->users.contains({saveWhere.value.reg, saveWhere.ssaVersion})) {
                 auto users = this->m_currentFunction->users[{saveWhere.value.reg, saveWhere.ssaVersion}];
                 for (const auto &user : users) {
-                    if (user->operation == LiftedOperation::SETGLOBAL && std::all_of(users.begin(), users.end(), [&](const auto *other) {
-                            return other == user;
-                        })) {
+                    if (user->operation == LiftedOperation::SETGLOBAL &&
+                        std::all_of(users.begin(), users.end(), [&](const auto *other) { return other == user; })) {
                         // set to global, not a local function.
                         auto fDec = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements.back());
                         // local functions may have a debug name. This is exactly to prevent this

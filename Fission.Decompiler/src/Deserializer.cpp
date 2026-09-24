@@ -117,8 +117,6 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
                     }
 
                     memcpy(function.typeinfo.data() + headerSize, types, typeSize);
-                    reader.AdvanceBy(headerSize + typeSize);
-                } else {
                     reader.AdvanceBy(typeSize);
                 }
             } else if (result.typesVersion == 2 || result.typesVersion == 3) {

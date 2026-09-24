@@ -17,20 +17,13 @@
 #endif
 #endif
 
-// A bare global import never raises; an index path falls back to GETGLOBAL + GETTABLEKS outside safeenv.
-static bool IsBareImport(const LiftedInstruction &inst) {
-    return inst.operation == LiftedOperation::GETIMPORT && (inst.operands.size() < 3 || (inst.operands[2].value.imm.u >> 30) < 2);
-}
-
 // A builtin fast path reads the call's arguments ahead of the CALL that consumes them.
 static bool IsTableStore(const LiftedInstruction &inst) {
     return inst.operation == LiftedOperation::SETLIST || inst.operation == LiftedOperation::SETTABLE || inst.operation == LiftedOperation::SETTABLEKS ||
            inst.operation == LiftedOperation::SETTABLEN;
 }
 
-static const LiftedOperand &StoredTable(const LiftedInstruction &store) {
-    return store.operands[store.operation == LiftedOperation::SETLIST ? 0 : 1];
-}
+static const LiftedOperand &StoredTable(const LiftedInstruction &store) { return store.operands[store.operation == LiftedOperation::SETLIST ? 0 : 1]; }
 
 static std::vector<LiftedOperand> RegisterRun(int32_t first, const std::vector<int32_t> &versions) {
     std::vector<LiftedOperand> run(versions.size());
@@ -198,8 +191,9 @@ void ASTLifter::CollectCompoundAssignments() {
         if (!load || load->operands[0].value.reg != op->operands[0].value.reg || !LoadsStoreTarget(*load, store))
             continue;
         const int32_t reg = op->operands[0].value.reg;
-        if (!m_currentFunction->IsSingleUse(load->operands[0]) || SoleUser(refOf(load->operands[0])) != op || !m_currentFunction->IsSingleUse(op->operands[0]) ||
-            SoleUser(refOf(op->operands[0])) != &store || BlockOf(load) != BlockOf(&store) || BeginsDebugLocal(*load, reg) || BeginsDebugLocal(*op, reg))
+        if (!m_currentFunction->IsSingleUse(load->operands[0]) || SoleUser(refOf(load->operands[0])) != op ||
+            !m_currentFunction->IsSingleUse(op->operands[0]) || SoleUser(refOf(op->operands[0])) != &store || BlockOf(load) != BlockOf(&store) ||
+            BeginsDebugLocal(*load, reg) || BeginsDebugLocal(*op, reg))
             continue;
         auto &compound = m_compoundAssignments[&store];
         compound.operation = op;
@@ -256,7 +250,8 @@ void ASTLifter::KeepOrderedCompoundAssignments() {
     }
     // the right-hand side renders inside the statement too, even where a block forces its definitions out
     for (const auto &entry : m_compoundAssignments)
-        for (auto k = static_cast<size_t>(entry.second.inlined.front()->instructionIndex) + 1; k < static_cast<size_t>(entry.second.operation->instructionIndex); ++k)
+        for (auto k = static_cast<size_t>(entry.second.inlined.front()->instructionIndex) + 1;
+             k < static_cast<size_t>(entry.second.operation->instructionIndex); ++k)
             if (instructions[k].operation != LiftedOperation::NOP)
                 m_compoundInlined.insert(&instructions[k]);
     m_shouldInlineMemo.clear();
@@ -377,27 +372,28 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     }
 
     // a constructor nothing else reads is still built once; inlined into its own stores it would render twice
-    if ((inst->operation == LiftedOperation::NEWTABLE || inst->operation == LiftedOperation::DUPTABLE) && inst->operands[0].type == LiftedOperandType::Register) {
+    if ((inst->operation == LiftedOperation::NEWTABLE || inst->operation == LiftedOperation::DUPTABLE) &&
+        inst->operands[0].type == LiftedOperandType::Register) {
         const SSARef defRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
         const auto users = m_currentFunction->users.find(defRef);
         if (users != m_currentFunction->users.end() && !users->second.empty() && std::ranges::all_of(users->second, [&](const LiftedInstruction *user) {
                 const size_t table = user->operation == LiftedOperation::SETLIST ? 0 : 1;
-                return (user->operation == LiftedOperation::SETLIST || user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
-                        user->operation == LiftedOperation::SETTABLEN) &&
-                       user->operands.size() > table && user->operands[table].value.reg == defRef.regIndex && user->operands[table].ssaVersion == defRef.version;
+                return (user->operation == LiftedOperation::SETLIST || user->operation == LiftedOperation::SETTABLE ||
+                        user->operation == LiftedOperation::SETTABLEKS || user->operation == LiftedOperation::SETTABLEN) &&
+                       user->operands.size() > table && user->operands[table].value.reg == defRef.regIndex &&
+                       user->operands[table].ssaVersion == defRef.version;
             }))
             return false;
 
         // a table whose field stores all fold into its constructor renders at its one reader
         const auto ownStore = [&](const LiftedInstruction *user) {
             const size_t table = user->operation == LiftedOperation::SETLIST ? 0 : 1;
-            return (user->operation == LiftedOperation::SETLIST || user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
-                    user->operation == LiftedOperation::SETTABLEN) &&
+            return (user->operation == LiftedOperation::SETLIST || user->operation == LiftedOperation::SETTABLE ||
+                    user->operation == LiftedOperation::SETTABLEKS || user->operation == LiftedOperation::SETTABLEN) &&
                    user->operands.size() > table && user->operands[table].value.reg == defRef.regIndex && user->operands[table].ssaVersion == defRef.version;
         };
-        if (users != m_currentFunction->users.end() && std::ranges::any_of(users->second, [&](const LiftedInstruction *user) {
-                return ownStore(user) && user->operation != LiftedOperation::SETLIST;
-            })) {
+        if (users != m_currentFunction->users.end() &&
+            std::ranges::any_of(users->second, [&](const LiftedInstruction *user) { return ownStore(user) && user->operation != LiftedOperation::SETLIST; })) {
             boost::unordered_flat_set<const LiftedInstruction *> readers;
             for (const auto *user : users->second)
                 if (!ownStore(user) && !IsFastCall(user->operation))
@@ -408,7 +404,8 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
             }
             // a phi-defined list item needs the materialized local
             for (const auto *user : users->second)
-                if (user->operation == LiftedOperation::SETLIST && ownStore(user) && std::ranges::any_of(SetListElements(*user), [&](const LiftedOperand &element) {
+                if (user->operation == LiftedOperation::SETLIST && ownStore(user) &&
+                    std::ranges::any_of(SetListElements(*user), [&](const LiftedOperand &element) {
                         const auto *definition = m_currentFunction->GetDefinition(element);
                         return definition && definition->operation == LiftedOperation::PHI;
                     })) {
@@ -545,7 +542,6 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     }
 
     // Keep raising operations at their original position so error order matches bytecode evaluation.
-    const bool bareImport = IsBareImport(*inst);
     const auto inlineTreeCanRaise = [&](auto &&self, const LiftedInstruction *node, int depth) -> bool {
         if (!node)
             return false;
@@ -578,7 +574,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         }
     }
     const bool raisesWhenInlined = CanOperationRaise(inst->operation) || mayMoveRaisingInput;
-    const bool defCanRaise = raisesWhenInlined && !bareImport;
+    const bool defCanRaise = raisesWhenInlined;
     if (defCanRaise && inst->operands[0].type == LiftedOperandType::Register && singleUse) {
         const auto *user = onlyUser({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion});
         if (!user) {
@@ -602,9 +598,10 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         if (isPureConst) {
             const uint8_t reg = inst->operands[0].value.reg;
             const auto users = m_currentFunction->users.find({reg, inst->operands[0].ssaVersion});
-            const bool selfReassigned = users != m_currentFunction->users.end() && std::ranges::any_of(users->second, [&](const LiftedInstruction *user) {
-                return !user->operands.empty() && user->operands[0].type == LiftedOperandType::Register && user->operands[0].value.reg == reg;
-            });
+            const bool selfReassigned =
+                users != m_currentFunction->users.end() && std::ranges::any_of(users->second, [&](const LiftedInstruction *user) {
+                    return !user->operands.empty() && user->operands[0].type == LiftedOperandType::Register && user->operands[0].value.reg == reg;
+                });
             // a reader followed by an assignment that merges reads a variable: `result = f(result)`; an expression temp
             // written below its operands never merges
             const bool readThenAssigned = m_assignedRegisters.contains(reg) && users != m_currentFunction->users.end() &&
@@ -680,12 +677,14 @@ bool ASTLifter::StaysAsStatement(const LiftedInstruction *e) {
         // building a spilled constructor can raise at its own position
         return !ShouldInline(e);
     default:
-        return CanOperationRaise(e->operation) && !IsBareImport(*e) && !ShouldInline(e);
+        return CanOperationRaise(e->operation) && !ShouldInline(e);
     }
 }
 
-void ASTLifter::DeferIntoCondition(const LiftedInstruction &def, const SSARef &value, const LiftedInstruction *reader,
-                                   std::vector<std::pair<LiftedOperand, const LiftedInstruction *>> &pending) {
+void ASTLifter::DeferIntoCondition(
+    const LiftedInstruction &def, const SSARef &value, const LiftedInstruction *reader,
+    std::vector<std::pair<LiftedOperand, const LiftedInstruction *>> &pending
+) {
     const auto users = m_currentFunction->users.find(value);
     // a constructor that inlines renders with its population stores at its one reader
     const bool constructor = (def.operation == LiftedOperation::NEWTABLE || def.operation == LiftedOperation::DUPTABLE) && ShouldInline(&def);
@@ -711,7 +710,8 @@ void ASTLifter::DeferIntoCondition(const LiftedInstruction &def, const SSARef &v
                 pending.emplace_back(store->operands[2], store);
         }
 
-    if ((def.operation != LiftedOperation::CALL && def.operation != LiftedOperation::CALLFB) || def.operands.empty() || !m_currentFunction->implicitUses.contains(&def))
+    if ((def.operation != LiftedOperation::CALL && def.operation != LiftedOperation::CALLFB) || def.operands.empty() ||
+        !m_currentFunction->implicitUses.contains(&def))
         return;
     for (const auto &argument : CallArguments(def))
         pending.emplace_back(argument, &def);
@@ -951,7 +951,8 @@ static std::optional<int> InputRank(const LiftedInstruction &use, const SSARef &
     default:
         break;
     }
-    const bool store = use.operation == LiftedOperation::SETTABLE || use.operation == LiftedOperation::SETTABLEKS || use.operation == LiftedOperation::SETTABLEN;
+    const bool store =
+        use.operation == LiftedOperation::SETTABLE || use.operation == LiftedOperation::SETTABLEKS || use.operation == LiftedOperation::SETTABLEN;
     std::optional<int> rank;
     for (size_t i = 0; i < use.operands.size(); ++i) {
         const auto access = SSABuilder::GetRegisterAccess(use, i);
@@ -968,7 +969,8 @@ const LiftedInstruction *ASTLifter::ValueReader(const SSARef &ref) const {
         return nullptr;
     const LiftedInstruction *reader = nullptr;
     for (const auto *user : users->second) {
-        if ((IsTableStore(*user) && user->operands.size() > 1 && StoredTable(*user).value.reg == ref.regIndex && StoredTable(*user).ssaVersion == ref.version) ||
+        if ((IsTableStore(*user) && user->operands.size() > 1 && StoredTable(*user).value.reg == ref.regIndex &&
+             StoredTable(*user).ssaVersion == ref.version) ||
             IsFastCall(user->operation) || user == reader)
             continue;
         if (reader)
@@ -987,7 +989,8 @@ std::optional<SSARef> ASTLifter::InlinedChainInto(const LiftedInstruction &inst,
             auto next = static_cast<size_t>(current->instructionIndex) + 1;
             while (next < instructions.size() && instructions[next].operation == LiftedOperation::NOP)
                 ++next;
-            if (next >= instructions.size() || (instructions[next].operation != LiftedOperation::CALL && instructions[next].operation != LiftedOperation::CALLFB))
+            if (next >= instructions.size() ||
+                (instructions[next].operation != LiftedOperation::CALL && instructions[next].operation != LiftedOperation::CALLFB))
                 return std::nullopt;
             current = &instructions[next];
             continue;
@@ -1085,12 +1088,11 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
     }
     const bool defIsCallCallee = calleeDef == def;
     // a constructor element renders inside its `{ ... }`; that keeps it after `def` only when `def` feeds a constructor too
-    const bool useBuildsConstructor = def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE ||
-                                      use->operation == LiftedOperation::SETLIST ||
-                                      ((use->operation == LiftedOperation::SETTABLE || use->operation == LiftedOperation::SETTABLEKS ||
-                                        use->operation == LiftedOperation::SETTABLEN) &&
-                                       StoreTargetsFreshTable(use)) ||
-                                      IsConstructorElement(use);
+    const bool useBuildsConstructor =
+        def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE || use->operation == LiftedOperation::SETLIST ||
+        ((use->operation == LiftedOperation::SETTABLE || use->operation == LiftedOperation::SETTABLEKS || use->operation == LiftedOperation::SETTABLEN) &&
+         StoreTargetsFreshTable(use)) ||
+        IsConstructorElement(use);
 
     int32_t useOwnNameCall = -1;
     if (useIdx < static_cast<int32_t>(insts.size()) &&
@@ -1170,7 +1172,8 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         const SSARef ref{static_cast<uint8_t>(table.operands[0].value.reg), table.operands[0].ssaVersion};
         if (const auto users = m_currentFunction->users.find(ref); users != m_currentFunction->users.end())
             for (const auto *user : users->second)
-                if (IsTableStore(*user) && user->operands.size() > 1 && StoredTable(*user).value.reg == ref.regIndex && StoredTable(*user).ssaVersion == ref.version)
+                if (IsTableStore(*user) && user->operands.size() > 1 && StoredTable(*user).value.reg == ref.regIndex &&
+                    StoredTable(*user).ssaVersion == ref.version)
                     end = (std::max)(end, user->instructionIndex);
         return end;
     };
@@ -1259,6 +1262,7 @@ bool ASTLifter::CanOperationRaise(LiftedOperation op) {
     case LiftedOperation::GETTABLE:
     case LiftedOperation::GETTABLEKS:
     case LiftedOperation::GETTABLEN:
+    case LiftedOperation::GETGLOBAL:
     case LiftedOperation::GETIMPORT:
     case LiftedOperation::ADD:
     case LiftedOperation::SUB:

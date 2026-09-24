@@ -207,6 +207,9 @@ class Deserializer {
             case LBC_TYPE_NUMBER:
                 typeName = "number";
                 break;
+            case LBC_TYPE_INTEGER:
+                typeName = "integer";
+                break;
             case LBC_TYPE_STRING:
                 typeName = "string";
                 break;
@@ -245,7 +248,7 @@ class Deserializer {
     }
 
     static std::optional<std::string> TryGetTypeName(DeserializedFunction *lpFunc, uint8_t arg) {
-        if (lpFunc == nullptr || lpFunc->typeinfo.empty() || lpFunc->uTypeVersion == 1)
+        if (lpFunc == nullptr || lpFunc->typeinfo.empty())
             return std::nullopt;
 
         BinaryReader reader{lpFunc->typeinfo.data(), lpFunc->typeinfo.size()};

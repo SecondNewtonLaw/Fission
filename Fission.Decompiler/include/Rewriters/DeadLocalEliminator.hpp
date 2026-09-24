@@ -7,6 +7,8 @@
 #pragma once
 #include "Rewriters/ASTRewriter.hpp"
 
+#include <bit>
+#include <cstdint>
 #include <memory>
 #include <string>
 #include <unordered_map>
@@ -109,7 +111,7 @@ class DeadLocalEliminator : public ASTRewriter {
         return Ty::Unknown;
     }
 
-    // "Pure" here means evaluation can never raise OR have effects. Reading locals/globals and
+    // "Pure" here means evaluation can never raise OR have effects. Reading locals and
     // creating closures/tables is effect-free, but arithmetic, comparison, concat, and length all
     // raise on wrong runtime types (or run metamethods), so they only pass with operand types that
     // are statically known safe. When in doubt, keep the statement.
@@ -118,9 +120,12 @@ class DeadLocalEliminator : public ASTRewriter {
             return true;
         if (std::dynamic_pointer_cast<NilLiteralNode>(e) || std::dynamic_pointer_cast<BooleanLiteralNode>(e) ||
             std::dynamic_pointer_cast<NumberLiteralNode>(e) || std::dynamic_pointer_cast<IntegerLiteralNode>(e) ||
-            std::dynamic_pointer_cast<StringLiteralNode>(e) || std::dynamic_pointer_cast<VectorNode>(e) ||
-            std::dynamic_pointer_cast<IdentifierExpressionNode>(e) || std::dynamic_pointer_cast<Identifier>(e))
+            std::dynamic_pointer_cast<StringLiteralNode>(e) || std::dynamic_pointer_cast<VectorNode>(e))
             return true;
+        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e))
+            return id->identifier && !id->identifier->bIsGlobal;
+        if (auto id = std::dynamic_pointer_cast<Identifier>(e))
+            return !id->bIsGlobal;
         if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(e)) {
             if (!IsPure(un->operand))
                 return false;
@@ -136,6 +141,9 @@ class DeadLocalEliminator : public ASTRewriter {
         // table constructor key=value entry: the store into a fresh table cannot run metamethods,
         // but a nil (or unknown-and-possibly-nil) key raises "table index is nil".
         if (auto tentry = std::dynamic_pointer_cast<TableBinaryExpressionNode>(e)) {
+            if (auto key = std::dynamic_pointer_cast<NumberLiteralNode>(tentry->left);
+                key && (std::bit_cast<uint64_t>(key->value) & 0x7fffffffffffffffULL) > 0x7ff0000000000000ULL)
+                return false;
             const Ty kt = TypeOf(tentry->left);
             return (kt == Ty::Number || kt == Ty::String || kt == Ty::Bool) && IsPure(tentry->left) && IsPure(tentry->right);
         }

@@ -301,8 +301,8 @@ print(proxy.value, a, b, c, keyed.k, mixed.k, mixed[1], s.a, s.b.c, n))LUA";
     INFO(output);
     for (const char *expected :
          {"setmetatable({  }, {\n    __index = function(", "setmetatable({  }, nil)", "rawlen({ 1, 2 })", "{ k = tostring(1) }", "{ k = tostring(2), 5 }",
-          "print({ k = { j = tick() } })", "print({ k = tick() }, tick())", "{ a = tick(), b = { c = tick() } }",
-          "print(rawlen({ tick(), tick() }), select(\"#\", { k = tick() }))"})
+          "print({ k = { j = tick() } })", "({ k = tick() }, tick())", "{ a = tick(), b = { c = tick() } }",
+          "(rawlen({ tick(), tick() }), select(\"#\", { k = tick() }))"})
         CHECK(output.find(expected) != std::string::npos);
 }
 

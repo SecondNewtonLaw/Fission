@@ -307,12 +307,12 @@ TEST_CASE("Regress: nested REF upvalue capture aliases instead of redefining", "
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(local\s+uv_\d+\s*=)")));
     // The shared variable is declared once, BEFORE the closure that captures it.
     std::smatch valueDecl;
-    REQUIRE(std::regex_search(out, valueDecl, std::regex(R"(local\s+v\d+\s*=\s*_G\.globalValue)")));
+    REQUIRE(std::regex_search(out, valueDecl, std::regex(R"(local\s+(\w+)\s*=\s*_G\.globalValue)")));
     const size_t closurePos = out.find("local function f");
     REQUIRE(closurePos != std::string::npos);
     CHECK(static_cast<size_t>(valueDecl.position(0)) < closurePos);
     // Exactly one declaration of it; the trailing write is an assignment, not a 2nd local.
-    CHECK(CountOccurrences(out, "local v") == 1);
+    CHECK(CountOccurrences(out, "local " + valueDecl[1].str() + " ") == 1);
 }
 
 // A LUA_TINTEGER constant only reaches the bytecode via a library-member-constant

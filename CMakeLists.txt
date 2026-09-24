@@ -371,6 +371,7 @@ if (BUILD_TESTING)
             Fission.Tests/TestLibassertHandler.cpp
             Fission.Tests/Decoding/BytecodeV6Decoding.cpp
             Fission.Tests/Decoding/BytecodeV10V12Decoding.cpp
+            Fission.Tests/Decoding/LegacyTypeEncodingRegression.cpp
             Fission.Tests/CFG/CFGCoherence.cpp
             Fission.Tests/Decompiler/DecompilationRoundtrip.cpp
             Fission.Tests/Decompiler/DebugNotesRegressions.cpp
@@ -405,6 +406,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/LoopShapeMatrix.cpp
             Fission.Tests/Decompiler/PlacementMatrix.cpp
             Fission.Tests/Decompiler/SemanticOracleRegressions.cpp
+            Fission.Tests/Decompiler/CompilerLiftingAuditRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticEvaluationRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp

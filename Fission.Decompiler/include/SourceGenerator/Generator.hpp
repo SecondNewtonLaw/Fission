@@ -31,7 +31,7 @@ class SourceGenerator : public Visitor {
     bool m_firstStmtInBlock = false;
 
     // Cache table renderings and bound hostile or cyclic nesting.
-    static constexpr int kMaxTableDepth = 100;
+    static constexpr int kMaxTableDepth = 256;
     int m_tableDepth = 0;
     std::unordered_map<const TableLiteralNode *, std::string> m_tableInlineCache;
 
@@ -816,13 +816,8 @@ class SourceGenerator : public Visitor {
             return;
         }
 
-        // Bound deep or self-referential tables.
-        if (m_tableDepth >= kMaxTableDepth) {
-            buffer << std::format("{{ --[[ FISSION WARN: +{} nested table structure; refusing to lift further! ]] }}", kMaxTableDepth);
-            if (lpNode->bUseParenthesis)
-                buffer << ")";
-            return;
-        }
+        if (m_tableDepth >= kMaxTableDepth)
+            throw Fission::DecompilerError("table nesting too deep");
         ++m_tableDepth;
 
         // Cache inline forms so nested width measurement remains linear.

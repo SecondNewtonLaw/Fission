@@ -115,9 +115,9 @@ class ShortCircuitChainFolder : public ASTRewriter {
     static std::optional<std::string> ExtractIdentifierName(const std::shared_ptr<Expression> &expr) {
         if (!expr)
             return std::nullopt;
-        if (auto idExpr = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); idExpr && idExpr->identifier)
+        if (auto idExpr = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); idExpr && idExpr->identifier && !idExpr->identifier->bIsGlobal)
             return idExpr->identifier->name;
-        if (auto id = std::dynamic_pointer_cast<Identifier>(expr); id)
+        if (auto id = std::dynamic_pointer_cast<Identifier>(expr); id && !id->bIsGlobal)
             return id->name;
         return std::nullopt;
     }
@@ -610,11 +610,12 @@ class ShortCircuitChainFolder : public ASTRewriter {
                 continue;
             exprs.push_back(finalTerminal->second);
             stmts[i] = BuildTerminalReplacement(finalTerminal->first, MakeOrChain(exprs));
-            stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1, stmts.begin() + static_cast<std::ptrdiff_t>(cursor + finalTerminal->first.consumed));
+            stmts.erase(
+                stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1, stmts.begin() + static_cast<std::ptrdiff_t>(cursor + finalTerminal->first.consumed)
+            );
             return true;
         }
 
         return false;
     }
-
 };
