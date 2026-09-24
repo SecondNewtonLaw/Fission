@@ -75,12 +75,14 @@ jobs:
         run: ccache --cleanup && ccache --show-stats
 
       - name: Save CPM sources
+        if: success() || failure()
         uses: actions/cache/save@v5
         with:
           path: ${{ env.CPM_SOURCE_CACHE }}
           key: cpm-${{ runner.os }}-${{ github.job }}-${{ hashFiles('CMakeLists.txt', 'cmake/CPM.cmake', 'cmake/patches/**') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Save compiler cache
+        if: success() || failure()
         uses: actions/cache/save@v5
         with:
           path: .ccache
