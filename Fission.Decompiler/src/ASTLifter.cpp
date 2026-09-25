@@ -1122,10 +1122,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // fuck you luauc.
         if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
             if (visited.contains(currentBlockId)) {
-                // a shared short-circuit value arm reached via a second branch edge: re-lift its value
-                // into this branch instead of dropping it. only at the branch entry, and only for
-                // side-effect-free value blocks; a visited block met as a linear continuation is a real
-                // convergence and still stops.
+                // Re-lift a visited pure value region when exclusive branches share it.
                 constexpr uint32_t kMaxValueArmDuplications = 8192;
                 const bool canDup = atEntryBlock && m_valueArmDuplications < kMaxValueArmDuplications;
                 // a sibling arm lifted this forward-entered block: it is a tail shared by exclusive paths, not a convergence
