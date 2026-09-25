@@ -742,9 +742,9 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                     int32_t r = baseReg + i;
                     int32_t v = CurrentVersion(r);
                     if (inst->operation != LiftedOperation::FORNLOOP && inst->operation != LiftedOperation::FORNPREP && block.loopLatch &&
-                        block.predecessors.size() == 2) {
+                        block.predecessors.size() == 2 && std::ranges::find(block.predecessors, *block.loopLatch) != block.predecessors.end()) {
                         for (const auto &phi : block.phiNodes)
-                            if (phi.operands[0].value.reg == r)
+                            if (phi.operands[0].value.reg == r && phi.operands[0].ssaVersion == v)
                                 for (size_t pred = 0; pred < block.predecessors.size(); ++pred)
                                     if (block.predecessors[pred] != *block.loopLatch && pred + 1 < phi.operands.size() &&
                                         phi.operands[pred + 1].ssaVersion >= 0)

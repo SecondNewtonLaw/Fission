@@ -306,6 +306,20 @@ TEST_CASE("SSA: reaching definitions match VM dataflow", "[SSA][Invariant][Oracl
     // generic-for state from a branch merge; prep reads see only the entry value
     CheckSSA("local function f(c, a, b) local s = 0 for _, v in next, if c then a else b do s += v end return s end return f");
     CheckSSA("local function f(t) local s = 0 for k, v in t do s = s + v end return s end return f");
+    CheckSSA(
+        R"(makeIterator = function()
+        return function(_, index)
+            if index < 1 then return index + 1 end
+        end, nil, 0
+    end
+    local function f(flag)
+        print(flag, if flag then 1 else 2, function() end)
+        for value in makeIterator() do break end
+        return 0
+    end
+    return f(true), f(false))",
+        2
+    );
     // numeric-for limit from a branch merge inside an outer loop
     CheckSSA("local function f(c) local n = 0 repeat for i = 1, (if c then 2 else 3) do print(i) end n += 1 until n == 2 end return f");
 }
