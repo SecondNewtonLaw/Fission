@@ -296,7 +296,7 @@ TEST_CASE("Compiler arithmetic chains remain recompilable", "[Decompiler][Compil
     lifting_semantics_test::CheckSameTrace(source, output, 0);
 }
 
-TEST_CASE("Compiler method debug name does not shadow a live local", "[Decompiler][CompilerAudit][Semantics]") {
+TEST_CASE("Compiler method debug name does not shadow visible bindings", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     const std::string capturesOuter = R"LUA(local function count()
     print("outer")
@@ -315,11 +315,23 @@ function obj:count()
     return 4
 end
 print(obj:count(), count()))LUA";
+    const std::string shadowsGlobal = R"LUA(local obj = {}
+function obj:print()
+    print("inner")
+    return 4
+end
+print("outer")
+print(obj:print()))LUA";
     for (int optLevel : {0, 1}) {
         for (const auto &source : {capturesOuter, usesOuterLater}) {
             const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
             INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
             lifting_semantics_test::CheckSameTrace(source, output, optLevel);
         }
+    }
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(shadowsGlobal, optLevel);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(shadowsGlobal, output, optLevel);
     }
 }

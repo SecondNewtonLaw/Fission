@@ -43,6 +43,7 @@ class ASTLifter {
     void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
 
     boost::unordered_flat_set<int32_t> m_definedRegisters;
+    std::unordered_set<std::string> m_globalNames;
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_pinnedRegisters;
     // Captured-register declarations must remain before their closures.
     boost::unordered_flat_set<int32_t> m_capturedRegisters;

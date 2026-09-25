@@ -12,7 +12,7 @@ States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `sh
 
 ## Verification checkpoint, 2026-09-24
 
-GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeeded after C24. Latest CTest passed 634/634; `Samples/StressTests/run_all.ps1` passed 22/22 using the C24 CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c24`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
+GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeeded after the C24 global-name follow-up. Latest CTest passed 634/634; `Samples/StressTests/run_all.ps1` passed 22/22 using the updated CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c25`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
 
 ## Investigation completion gate
 
@@ -128,6 +128,8 @@ Compiler does not remove a nonconstant `local unused = global` at O1: `areLocals
 
 **Long-jump follow-up:** A compiler-produced O0 program with 36,000 independent assignments in a cold branch emitted `LOP_JUMPX`. Luau's `BytecodeBuilder::foldJumps` skips forwarding-jump folding when a long jump exists. CFA retained eleven forwarding blocks between a jump and loop latch; the distant jump stayed `Standard` beyond the eight-hop `continue` bound. Decompiled output recompiled and matched VM trace on this case. This proves the cap is reachable but not a semantic failure. Temporary structural probe removed; C13 remains a candidate.
 
+**Producer check:** Luau `AstStatContinue` emits one `LOP_JUMP` and the loop compiler patches it to its continuation label (`Compiler.cpp:4806-4824,4249-4256`; repeat uses `:3941-3975`). The observed eleven-bridge jump came from nested `if/else` joins, not a source `continue`; classifying it `Standard` was appropriate. A long chain can still matter to `exitAfterLatch` or `joinedExit`, so C13 stays open for those paths rather than treating the observed cap hit as a failure.
+
 ### C14 — repeat exit fallback selects unrelated return (`candidate`)
 
 When a repeat latch has no identified exit, `ControlFlowAnalyzer.cpp:1084-1117` scans *all* basic blocks and assigns the first `Return`, without checking reachability from the repeat condition. Compiler `compileStatRepeat` emits condition branching over a `JUMPBACK` to post-loop code (`Compiler/src/Compiler.cpp:3873-3973`); ASTLifter trusts recorded non-latch exits (`ASTLifter.cpp:1598-1607`). This fallback is suspicious, but a compiler-produced route into it remains unproved. Do not change it without a red example.
@@ -194,11 +196,13 @@ At 10,000 dependent assignments, decompilation also stack-overflowed (`0xc00000f
 
 With C22 repaired, 36,000 dependent assignments decompile without crashing, but Luau rejects generated source with `Out of registers when trying to allocate 1 registers: exceeded limit 255`. Smaller inline chunks instead hit `Out of local registers ... exceeded limit 200`. This is the previously known output-local limit that the user explicitly shelved. Do not conflate it with C22's recursion and expression-depth defects; leave general lifetime/name compaction for later work.
 
-### C24 — method closure debug name shadows a live local (`fixed`)
+### C24 — method closure debug name shadows a live local or global (`fixed`)
 
 Luau writes a function's source debug name to its proto at debug level 1+ (`Compiler.cpp:561-562`). A later `function obj:count()` can therefore carry the same debug name as an earlier live `local function count()`, even though the bytecode stores distinct closures. ASTLifter used each proto name for a same-scope `local function count`, so the second declaration rebound reads of the first. With the method capturing `count`, its body became `return count()` and called itself until stack overflow. With no capture, a later `count()` called the method closure and returned the wrong value. The public semantic oracle diverged at O0/O1 on both compiler-produced cases before repair.
 
 `SeedEnclosingNames` already collects visible parent bindings for a nested function. ASTLifter now uses that set to suffix a colliding closure name, pinning the distinct name to only its destination SSA version before capture aliases and the nested body are lifted. Only a new binding qualifies: the first version also renamed `f = function() ... end` and `fib = memo(fib)`, breaking two existing semantic regressions. That trial failed 2/634 full CTest tests and was narrowed; both reassignment regressions then passed. A single new regression covers capturing and noncapturing method closures at O0/O1; both were red before the fix and pass after it. The original pcall/method multret case and a nested recursive same-name closure also match VM traces after the change. Final CTest passed 634/634 and stress samples 22/22.
+
+**Global-name follow-up:** Luau compiled `function obj:print() print("inner") end; print("outer")` with a method debug name `print` and global lookups of `print`. The earlier local-only fix still emitted `local function print`, so the method called itself and the public semantic oracle stack-overflowed at O0/O1/O2 (six failed trace/status assertions in the focused regression). ASTLifter already collects `GETGLOBAL`/`GETIMPORT`/`SETGLOBAL` names across its function subtree for capture naming; it now retains that set for closure-name disambiguation. A new closure binding cannot take a name that would hide those compiled global references. The expanded regression passes all 28 assertions, including both local-name shapes; final CTest passed 634/634 and stress samples 22/22. No extra bytecode scan per closure was added.
 
 ## Source audit log
 

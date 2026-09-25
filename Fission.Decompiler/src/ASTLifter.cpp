@@ -179,14 +179,16 @@ static bool IsValidLuauIdent(const std::string &s) {
 }
 
 static std::string DisambiguateClosureName(
-    AnalyzedFunction &parent, const AnalyzedFunction &child, const LiftedOperand &destination, int32_t bytecodeId, bool createsBinding, std::string name
+    AnalyzedFunction &parent, const AnalyzedFunction &child, const std::unordered_set<std::string> &globalNames, const LiftedOperand &destination,
+    int32_t bytecodeId, bool createsBinding, std::string name
 ) {
-    if (!createsBinding || parent.IsConsumedByPhi(destination) || !child.enclosingNames.contains(name))
+    const auto occupied = [&](const std::string &candidate) { return child.enclosingNames.contains(candidate) || globalNames.contains(candidate); };
+    if (!createsBinding || parent.IsConsumedByPhi(destination) || !occupied(name))
         return name;
 
     const std::string base = std::format("{}_{}", name, bytecodeId);
     std::string unique = base;
-    for (size_t index = 2; child.enclosingNames.contains(unique); ++index)
+    for (size_t index = 2; occupied(unique); ++index)
         unique = std::format("{}_{}", base, index);
     parent.ssaOverrides[{static_cast<uint8_t>(destination.value.reg), destination.ssaVersion}] = unique;
     return unique;
@@ -230,6 +232,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         );
     Explain("function {}: lifting {} CFG blocks", m_debugFunction, analyzedFunction.basicBlocks.size());
     this->m_definedRegisters.clear();
+    this->m_globalNames.clear();
     this->m_pinnedRegisters.clear();
     this->m_capturedRegisters.clear();
     this->m_referenceCapturedValues.clear();
@@ -416,12 +419,11 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         const auto &constants = analyzedFunction.lpLiftedFunction->lpDeserialized->constants;
         const auto &subs = analyzedFunction.lpLiftedFunction->lpDeserialized->subfunctions;
         // Lifted locals lose their `do` scope, so a debug name shared with a global would capture it.
-        std::unordered_set<std::string> globalNames;
         const std::function<void(const LiftedFunction &)> collectGlobals = [&](const LiftedFunction &function) {
             const auto &functionConstants = function.lpDeserialized->constants;
             auto add = [&](int32_t index) {
                 if (index >= 0 && static_cast<size_t>(index) < functionConstants.size() && functionConstants[index].kType == LUA_TSTRING)
-                    globalNames.insert(std::get<std::string>(functionConstants[index].constantData));
+                    m_globalNames.insert(std::get<std::string>(functionConstants[index].constantData));
             };
             for (const auto &global : function.instructions)
                 if ((global.operation == LiftedOperation::GETGLOBAL || global.operation == LiftedOperation::SETGLOBAL) && global.operands.size() >= 2)
@@ -433,10 +435,10 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         };
         collectGlobals(*analyzedFunction.lpLiftedFunction);
         const auto localName = [&](const std::string &name, uint8_t reg) {
-            if (!globalNames.contains(name))
+            if (!m_globalNames.contains(name))
                 return name;
             std::string renamed = std::format("{}_{}", name, reg);
-            for (int index = 2; globalNames.contains(renamed); ++index)
+            for (int index = 2; m_globalNames.contains(renamed); ++index)
                 renamed = std::format("{}_{}_{}", name, reg, index);
             return renamed;
         };
@@ -3282,7 +3284,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 name != m_currentFunction->ssaOverrides.end())
                 funcName = name->second;
             funcName = DisambiguateClosureName(
-                *m_currentFunction, *targetFunc, inst.operands[0], duplicatedFunction->bytecodeId,
+                *m_currentFunction, *targetFunc, m_globalNames, inst.operands[0], duplicatedFunction->bytecodeId,
                 !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]), std::move(funcName)
             );
 
@@ -3558,7 +3560,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 name != m_currentFunction->ssaOverrides.end())
                 funcName = name->second;
             funcName = DisambiguateClosureName(
-                *m_currentFunction, *targetFunc, inst.operands[0], proto->bytecodeId,
+                *m_currentFunction, *targetFunc, m_globalNames, inst.operands[0], proto->bytecodeId,
                 !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]), std::move(funcName)
             );
 
