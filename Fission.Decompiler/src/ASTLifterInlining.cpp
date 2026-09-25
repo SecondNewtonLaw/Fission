@@ -344,10 +344,15 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
             }
 
             const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+            // only an operand rendered by its register's name can see a later write to that register
+            const auto namedOperand = [&](const LiftedOperand &operand) {
+                const auto *definition = operand.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(operand) : nullptr;
+                return operand.type == LiftedOperandType::Register && !(definition && definition->instructionIndex < inst->instructionIndex && ShouldInline(definition));
+            };
             for (int32_t k = inst->instructionIndex + 1; k < user->instructionIndex; ++k)
                 if (const auto defs = m_defsByInstruction.find(&instructions[k]); defs != m_defsByInstruction.end())
                     for (size_t i = 1; i < inst->operands.size(); ++i)
-                        if (inst->operands[i].type == LiftedOperandType::Register &&
+                        if (namedOperand(inst->operands[i]) &&
                             std::ranges::any_of(defs->second, [&](const SSARef &defined) { return defined.regIndex == inst->operands[i].value.reg; })) {
                             ExplainKeep(inst, "constructor operand register is overwritten before population", user, &instructions[k]);
                             return false;
@@ -641,7 +646,8 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                                                       return AssignedLocal(*next) == reg && m_currentFunction->IsConsumedByPhi(next->operands[0]);
                                               return false;
                                           });
-            if (!selfReassigned && !readThenAssigned)
+            const bool declaresUnreadLocal = (users == m_currentFunction->users.end() || users->second.empty()) && BeginsDebugLocal(*inst, reg);
+            if (!selfReassigned && !readThenAssigned && !declaresUnreadLocal)
                 return true;
         }
     }
@@ -1130,6 +1136,9 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
             calleeDef = m_currentFunction->GetDefinition(calleeDef->operands[1]);
     }
     const bool defIsCallCallee = calleeDef == def;
+    // loaded straight into the call's base register, the lookup is this call's own `f` in `f(args)`: only arguments follow it
+    const bool calleeOfThisCall = defIsCallCallee && use == directUse && !def->operands.empty() && def->operands[0].type == LiftedOperandType::Register &&
+                                  def->operands[0].value.reg == use->operands[0].value.reg && def->operands[0].ssaVersion == use->operands[0].ssaVersion;
     // a constructor element renders inside its `{ ... }`; that keeps it after `def` only when `def` feeds a constructor too
     const bool useBuildsConstructor =
         def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE || use->operation == LiftedOperation::SETLIST ||
@@ -1228,7 +1237,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
             k = constructorEnd(k);
             continue;
         }
-        if (defIsCallCallee && (insts[k].operation == LiftedOperation::CALL || insts[k].operation == LiftedOperation::CALLFB)) {
+        if (defIsCallCallee && !calleeOfThisCall && (insts[k].operation == LiftedOperation::CALL || insts[k].operation == LiftedOperation::CALLFB)) {
             ExplainKeep(def, "callee must be evaluated before argument calls", use, &insts[k]);
             return true;
         }

@@ -230,6 +230,7 @@ class AstJsonSerializer : public Visitor {
         args += "]";
         Obj(lpNode, "FunctionDeclaration",
             {{"name", Quote(lpNode->functionName)},
+             {"exported", Bool(lpNode->bExported)},
              {"argumentCount", std::to_string(lpNode->argumentCount)},
              {"arguments", args},
              {"isVararg", Bool(lpNode->bIsVarArg)},
@@ -363,7 +364,8 @@ class AstJsonSerializer : public Visitor {
     }
 
     void Visit(VariableDeclarationNode *lpNode) override {
-        Obj(lpNode, "VariableDeclaration", {{"identifier", Render(lpNode->identifier)}, {"value", Render(lpNode->value)}, {"type", Render(lpNode->type)}});
+        Obj(lpNode, "VariableDeclaration",
+            {{"identifier", Render(lpNode->identifier)}, {"value", Render(lpNode->value)}, {"type", Render(lpNode->type)}, {"exported", Bool(lpNode->bExported)}});
     }
 
     void Visit(NoExpressionNode *lpNode) override {

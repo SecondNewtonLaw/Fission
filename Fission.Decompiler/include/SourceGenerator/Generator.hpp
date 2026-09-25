@@ -11,6 +11,7 @@
 #include <bit>
 #include <cstdint>
 #include <format>
+#include <limits>
 #include <sstream>
 #include <string>
 #include <unordered_map>
@@ -163,16 +164,23 @@ class SourceGenerator : public Visitor {
 
     void EmitQuotedString(const std::string &value) {
         buffer << "\"";
+        EmitStringBody(value, '"');
+        buffer << "\"";
+    }
+
+    // `quote` is escaped; an interpolated (backtick) body also escapes `{`.
+    void EmitStringBody(const std::string &value, char quote) {
         const size_t n = value.size();
         for (size_t i = 0; i < n;) {
             const unsigned char c = static_cast<unsigned char>(value[i]);
+            if (c == static_cast<unsigned char>(quote) || (quote == '`' && c == '{')) {
+                buffer << '\\' << static_cast<char>(c);
+                ++i;
+                continue;
+            }
             switch (c) {
             case '\\':
                 buffer << "\\\\";
-                ++i;
-                continue;
-            case '"':
-                buffer << "\\\"";
                 ++i;
                 continue;
             case '\n':
@@ -210,7 +218,45 @@ class SourceGenerator : public Visitor {
                 ++i;
             }
         }
-        buffer << "\"";
+    }
+
+    // Luau lowers `` `a{x}b` `` to `("a%*b"):format(x)` with literal `%` doubled; read that call back as the interpolation.
+    bool TryEmitInterpolation(NameCallExpressionNode *lpNode) {
+        const auto format = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->calledOn);
+        const auto method = std::dynamic_pointer_cast<IdentifierExpressionNode>(lpNode->callWhat);
+        if (!format || !method || !method->identifier || method->identifier->name != "format" || lpNode->bIsVariadicCall || lpNode->arguments.empty())
+            return false;
+        std::vector<std::string> texts(1);
+        for (size_t i = 0; i < format->value.size(); ++i) {
+            if (format->value[i] != '%') {
+                texts.back() += format->value[i];
+                continue;
+            }
+            if (i + 1 >= format->value.size())
+                return false;
+            if (format->value[++i] == '%')
+                texts.back() += '%';
+            else if (format->value[i] == '*')
+                texts.emplace_back();
+            else
+                return false;
+        }
+        if (texts.size() != lpNode->arguments.size() + 1)
+            return false;
+        buffer << '`';
+        for (size_t i = 0; i < lpNode->arguments.size(); ++i) {
+            EmitStringBody(texts[i], '`');
+            std::stringstream valueBuf;
+            valueBuf.swap(buffer);
+            EmitWithPrecedence(0, lpNode->arguments[i].get());
+            valueBuf.swap(buffer);
+            const std::string value = valueBuf.str();
+            // Luau rejects `{{` inside an interpolated string
+            buffer << (value.starts_with('{') ? "{ " : "{") << value << '}';
+        }
+        EmitStringBody(texts.back(), '`');
+        buffer << '`';
+        return true;
     }
 
     void Visit(NoExpressionNode *lpNode) override { (void)lpNode; }
@@ -221,7 +267,7 @@ class SourceGenerator : public Visitor {
         bool first = true;
         for (const auto &body : lpNode->programBody) {
             if (first && !m_vectorConstructorAlias.empty() && !std::dynamic_pointer_cast<CommentNode>(body)) {
-                buffer << "local " << m_vectorConstructorAlias << " = Vector3.new\n";
+                buffer << "local " << m_vectorConstructorAlias << " = " << vectorConstructor << "\n";
                 first = false;
             }
             m_firstStmtInBlock = first;
@@ -264,7 +310,9 @@ class SourceGenerator : public Visitor {
         }
 
         buffer << this->GetIndentation();
-        if (lpNode->bIsLocalDeclaration)
+        if (lpNode->bExported)
+            buffer << "export ";
+        else if (lpNode->bIsLocalDeclaration)
             buffer << "local ";
         buffer << std::format("function {}(", lpNode->functionName);
 
@@ -310,6 +358,8 @@ class SourceGenerator : public Visitor {
 
     // Drop informational comments but retain warnings.
     bool bOmitInformationalComments = false;
+    // Roblox compiles `Vector3.new` to vector constants; stock Luau only has `vector.create`.
+    std::string vectorConstructor = "Vector3.new";
 
     void Visit(CommentNode *lpNode) override {
 
@@ -429,10 +479,19 @@ class SourceGenerator : public Visitor {
         (void)lpNode;
         EmitPrefix(lpNode->left);
         buffer << "[";
-        if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->right))
+        if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->right)) {
             EmitQuotedString(str->value);
-        else
-            EmitWithPrecedence(11, lpNode->right.get());
+        } else {
+            std::stringstream keyBuf;
+            keyBuf.swap(buffer);
+            EmitWithPrecedence(0, lpNode->right.get());
+            keyBuf.swap(buffer);
+            const std::string key = keyBuf.str();
+            // `t[[[a` would lex as a long string opener
+            if (!key.empty() && key.front() == '[')
+                buffer << ' ';
+            buffer << key;
+        }
         buffer << "]";
     }
 
@@ -760,6 +819,8 @@ class SourceGenerator : public Visitor {
     void Visit(VariableDeclarationNode *lpNode) override {
         (void)lpNode;
         buffer << this->GetIndentation();
+        if (lpNode->bExported)
+            buffer << "export ";
         buffer << "local ";
         lpNode->identifier->Accept(this);
         if (lpNode->type && ShouldEmitTypeAnnotation(*lpNode->type)) {
@@ -872,6 +933,8 @@ class SourceGenerator : public Visitor {
                 buffer << this->GetIndentation();
             if (!m_firstStmtInBlock && !lpNode->inlineCall && StartsWithOpenParen(lpNode->calledOn))
                 buffer << ";"; // a bare `(expr):m(...)` statement would merge with the previous line
+            if (lpNode->inlineCall && TryEmitInterpolation(lpNode))
+                return;
             const bool wrapOne = lpNode->inlineCall && lpNode->bAdjustToOne;
             if (wrapOne)
                 buffer << "("; // truncate a multiret method call to one value in a spread position
@@ -906,17 +969,19 @@ class SourceGenerator : public Visitor {
                 buffer << ", ";
         }
         buffer << " = ";
-        EmitPrefix(lpNode->calledOn);
-        buffer << ":";
-        lpNode->callWhat->Accept(this);
-        buffer << "(";
-        for (size_t i = 0; i < lpNode->arguments.size(); i++) {
-            lpNode->arguments.at(i)->Accept(this);
-            if (i < lpNode->arguments.size() - 1)
-                buffer << ", ";
-        }
+        if (lpNode->rets.size() > 1 || !TryEmitInterpolation(lpNode)) {
+            EmitPrefix(lpNode->calledOn);
+            buffer << ":";
+            lpNode->callWhat->Accept(this);
+            buffer << "(";
+            for (size_t i = 0; i < lpNode->arguments.size(); i++) {
+                lpNode->arguments.at(i)->Accept(this);
+                if (i < lpNode->arguments.size() - 1)
+                    buffer << ", ";
+            }
 
-        buffer << ")";
+            buffer << ")";
+        }
 
         if (!lpNode->inlineCall)
             this->NextLine();
@@ -930,8 +995,11 @@ class SourceGenerator : public Visitor {
         lpNode->startVariable->Accept(this);
         buffer << ", ";
         lpNode->maxIncreased->Accept(this);
-        buffer << ", ";
-        lpNode->increaseBy->Accept(this);
+        // an omitted step compiles to the same `LOADN 1`
+        if (const auto step = dynamic_cast<NumberLiteralNode *>(lpNode->increaseBy.get()); !step || step->value != 1) {
+            buffer << ", ";
+            lpNode->increaseBy->Accept(this);
+        }
         buffer << " do";
         this->NextLine();
         this->IncreaseIndentation();
@@ -1030,7 +1098,11 @@ class SourceGenerator : public Visitor {
     void Visit(IntegerLiteralNode *lpNode) override {
         if (lpNode->bUseParenthesis)
             buffer << "(";
-        buffer << std::format("{}i", lpNode->value);
+        // 2^63 has no literal; -2^63 is exact as a number
+        if (lpNode->value == std::numeric_limits<int64_t>::min())
+            buffer << "integer.create(-9223372036854775808)";
+        else
+            buffer << std::format("{}i", lpNode->value);
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }
@@ -1052,7 +1124,7 @@ class SourceGenerator : public Visitor {
                 const auto [x, y, z, w] = components;
                 (void)w;
                 const auto emitConstructor = [&] {
-                    buffer << (m_vectorConstructorAlias.empty() ? "Vector3.new" : m_vectorConstructorAlias) << "(";
+                    buffer << (m_vectorConstructorAlias.empty() ? vectorConstructor : m_vectorConstructorAlias) << "(";
                     emitComponent(x);
                     buffer << ", ";
                     emitComponent(y);

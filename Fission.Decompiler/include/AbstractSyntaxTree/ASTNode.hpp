@@ -332,6 +332,7 @@ class VariableDeclarationNode : public Declaration {
   public:
     std::shared_ptr<Expression> identifier;
     std::shared_ptr<Expression> value;
+    bool bExported = false;
     std::optional<std::shared_ptr<Expression>> type = std::nullopt;
     VariableDeclarationNode(std::shared_ptr<Identifier> identifier) : identifier(std::make_shared<IdentifierExpressionNode>(identifier)), value(nullptr) {
         this->nodeKind = ASTNodeKind::VariableDeclaration;
@@ -413,6 +414,7 @@ class VectorNode : public LiteralNode {
 class FunctionDeclarationNode : public Expression {
   public:
     std::string functionName;
+    bool bExported = false;
     int32_t argumentCount = 0;
     std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argumentsNames{}; // arg1 -> it's name inside syntax
     bool bIsVarArg = false;

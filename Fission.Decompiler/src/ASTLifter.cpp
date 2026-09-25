@@ -1000,6 +1000,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
         }
         auto left = LiftExpression(a);
         auto right = LiftExpression(b);
+        // `x > 3` lowers to LT(3, x); a literal has no evaluation order, so read it back variable-first
+        if (std::string_view(op) != mirrored && std::dynamic_pointer_cast<LiteralNode>(left) && !std::dynamic_pointer_cast<LiteralNode>(right))
+            return std::make_shared<BinaryExpressionNode>(mirrored, right, left);
         return std::make_shared<BinaryExpressionNode>(op, left, right);
     };
 

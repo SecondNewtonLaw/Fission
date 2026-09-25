@@ -9,6 +9,7 @@
 #include "Rewriters/ConstructorResultRenamer.hpp"
 #include "Rewriters/DeadLocalEliminator.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
+#include "Rewriters/ExportDeclarationRewriter.hpp"
 #include "Rewriters/GetterRenamer.hpp"
 #include "Rewriters/GlobalAssignmentRenamer.hpp"
 #include "Rewriters/IfChainSimplifier.hpp"
@@ -26,6 +27,7 @@
 #include "Rewriters/ShortCircuitFolder.hpp"
 #include "SafetyGuard.hpp"
 #include "SourceGenerator/AstJsonSerializer.hpp"
+#include "Luau/Bytecode.h"
 
 #include <libassert/assert.hpp>
 
@@ -878,12 +880,15 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto autoNameVariables = (flags & DecompilerFlags::AutoNameVariables) == DecompilerFlags::AutoNameVariables;
     if (inferRobloxTypes || autoNameVariables)
         RobloxTypeInferer{}.Infer(liftedAST, inferRobloxTypes, autoNameVariables);
+    if (deserializedBytecode->lpMainFunction->flags & LPF_USES_EXPORT)
+        ExportDeclarationRewriter::Run(liftedAST.statements);
     ScopeAwareRenamer::PruneStaleRenameComments(liftedAST.statements);
     const auto robloxPropagationEnd = std::chrono::steady_clock::now();
 
     RootNode root{liftedAST.statements};
 
     sourceGenerator.bOmitInformationalComments = (flags & DecompilerFlags::OmitFissionComments) == DecompilerFlags::OmitFissionComments;
+    sourceGenerator.vectorConstructor = dynamic_cast<Fission::RobloxClientDecoder *>(decoder) ? "Vector3.new" : "vector.create";
     const auto sgenStart = std::chrono::steady_clock::now();
     auto generator = sourceGenerator.GenerateSource(&root);
     if (sourceGenerator.SawVectorConstant()) {
