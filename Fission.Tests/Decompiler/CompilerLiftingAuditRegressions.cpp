@@ -530,6 +530,39 @@ end)()))LUA";
     lifting_semantics_test::CheckSameTrace(branchedSource, branchedOutput, 2);
 }
 
+TEST_CASE("Inlined early return skips a following loop", "[Decompiler][CompilerAudit][Semantics]") {
+    const std::string body = R"LUA(flag = true
+print((function()
+    local x = 0
+    if flag then
+        while x < 1 do
+            if early then return x end
+            x += 1
+        end
+    end
+    local y = 0
+    while y < 1 do
+        y += 1
+    end
+    print("after", x, y)
+    return x
+end)()))LUA";
+    Luau::CompileOptions options{};
+    options.optimizationLevel = 2;
+    options.debugLevel = 2;
+    const auto prelude = Luau::compile("", options);
+    for (const std::string prefix : {"", "early = true\n"}) {
+        const auto source = prefix + body;
+        const auto output = lifting_semantics_test::DecompileOrFail(source, 2);
+        INFO("decompiled:\n" << output);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
+        const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output, options), prelude);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+        REQUIRE(reconstructed.status == original.status);
+        CHECK(reconstructed.trace == original.trace);
+    }
+}
+
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     std::string source = "local u = 1\nlocal function f()\nlocal a0 = u\n";

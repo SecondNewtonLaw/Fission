@@ -677,11 +677,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 if (seen[id])
                     continue;
                 seen[id] = true;
-                for (const uint32_t successor : blocks[id].successors) {
-                    if (successor <= id)
-                        return false;
+                for (const uint32_t successor : blocks[id].successors)
                     pending.push_back(successor);
-                }
             }
             return true;
         };
