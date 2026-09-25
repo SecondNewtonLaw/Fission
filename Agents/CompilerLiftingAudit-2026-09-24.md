@@ -32,6 +32,8 @@ After C32, CTest passed 642/642 and stress samples passed 22/22. Saved replay pr
 
 After C33, CTest passed 643/643 and stress samples passed 22/22. Saved replay again processed 2,968 sources with 560 semantic passes and 2,408 unchecked cases, without a reported divergence. A compiler-produced O2 early-return path through a loop followed by another loop failed status parity before the fix and matched afterward.
 
+After C34, CTest passed 646/646 and stress samples passed 22/22. Saved replay processed 2,968 sources with 560 semantic passes and 2,408 unchecked cases, without a reported divergence. Three new O2 compiler-produced shared-closure regressions failed VM trace parity before the fix and passed afterward.
+
 ## Investigation completion gate
 
 Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
@@ -59,7 +61,7 @@ Source comparison pass is complete at emitter-family/inverse-boundary level. It 
 | Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched; unbounded dependent arithmetic expression C22 confirmed. |
 | If/elseif, while, repeat, numeric/generic for, break/continue | BytecodeLifter, CFA, SSA, ASTLifter control flow | candidate | Numeric-for shorthand C4 explained; folded jumps and repeat/continue still under review. |
 | Calls, method calls, FASTCALL, FASTPCALL, CALLFB | BytecodeLifter, SSA, ASTLifter expressions | candidate | Fallback layout aligns; FASTCALL3 union write C3 fixed; variable arity still under review. |
-| Closures, captures, upvalues, closing | BytecodeLifter, SSA, ASTLifter inlining/declarations | candidate | VAL/REF/UPVAL source maps to CAPTURE; debug-name shadowing C24 fixed, other identity/effect order still under review. |
+| Closures, captures, upvalues, closing | BytecodeLifter, SSA, ASTLifter inlining/declarations | candidate | VAL/REF/UPVAL source maps to CAPTURE; debug-name shadowing C24 and repeated shared-closure identity C34 fixed, other identity/effect order still under review. |
 | Tables and all key/list store variants | Deserializer, BytecodeLifter, SSA, ASTLifter expressions/rewriters | candidate | `DUPTABLE` seed/store order source-consistent (C2 resolved); delayed variadic `SETLIST` C21 fixed, other key/list combinations under review. |
 | O2 inlining/unrolling/constant folding | CFA, SSA, ASTLifter | candidate | Inlined body reuses ordinary opcodes and joins return JUMPs; branch/phi output still under review. |
 | BytecodeBuilder jump folding/expansion | BytecodeLifter, CFA | candidate | Forward jump threading and JUMPX trampoline mapped; long-loop behavior still under review. |
@@ -319,6 +321,12 @@ Luau O2 inlines an immediately invoked function with `if flag then while x < 1 d
 Luau O2 inlines an early return from a first `while` loop into a shared terminal return. The normal path then executes a second `while` loop and a print before reaching that return. CFA's C32 join check rejected every back-edge on the path to the shared return, so it chose the first loop's natural exit. AST lifting rendered the early path as a call inside the first loop without leaving it. Original VM printed `0` once; reconstructed VM repeated `0` until the semantic oracle stopped execution.
 
 **Red/green:** A compiler-produced O2 regression with both normal and early paths failed the early-path VM status check before the correction, then passed all eight focused assertions. Joined-exit traversal now visits cycle edges once and rejects alternate terminal exits, while candidate discovery still requires a forward route to the common return. The shared-tail region checker can duplicate a following loop wholly contained between the normal exit and terminal return. Full CTest, stress, and saved replay results are recorded above.
+
+### C34 — repeated `DUPCLOSURE` loads lose function identity (`fixed` for matching captures)
+
+Luau `Compiler.cpp:1597-1705` emits `DUPCLOSURE` for shareable closures. O2 inlining can repeat one constant-pool closure load in a parent function. VM `lvmexecute.cpp:2911-2970` returns that constant closure again when its environment and captured values match. ASTLifter previously rendered each load as a fresh function declaration, so `a == b` changed from true to false. A reduced no-capture factory and a conditional-arm variant showed this at O2; a factory capturing an immutable top-level local reproduced it with dynamic input.
+
+**Red/green:** Three public compiler-produced VM-trace tests failed before the fix and pass now. For repeated zero-capture loads, ASTLifter emits one local function at the parent entry and reuses its binding. For repeated captured loads with identical CAPTURE mode/source/SSA signatures, it declares one cache and initializes it on the first executed load. Phi inputs receive their merged assignment. Differing capture signatures still follow the old path; VM can reuse a closure when distinct SSA values happen to compare equal, so that case remains to be proved with a compiler-produced counterexample. Full verification is recorded above.
 
 ## Source audit log
 

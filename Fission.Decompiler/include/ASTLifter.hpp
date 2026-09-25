@@ -105,6 +105,14 @@ class ASTLifter {
 
     // Single-use call-argument closures, keyed by SSA reference.
     std::unordered_map<SSARef, std::shared_ptr<FunctionDeclarationNode>> m_inlineableClosures;
+    struct SharedClosure {
+        size_t count = 0;
+        bool sameCaptures = true;
+        std::vector<std::tuple<int32_t, int32_t, int32_t>> captures;
+        std::string name;
+        std::shared_ptr<FunctionDeclarationNode> declaration;
+    };
+    std::unordered_map<int32_t, SharedClosure> m_sharedClosures;
     // Constructor fields holding a closure lifted after the constructor; its handler fills them in place.
     std::unordered_map<SSARef, std::vector<std::shared_ptr<FunctionDeclarationNode>>> m_closureSlots;
     // Renders a closure at a constructor slot or its own block's return instead of declaring it; true when handled.

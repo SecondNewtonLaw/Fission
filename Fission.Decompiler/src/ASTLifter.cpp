@@ -242,6 +242,26 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         if (const int32_t local = AssignedLocal(instruction); local >= 0)
             this->m_assignedRegisters.insert(local);
     this->m_hoistedRegisters.clear();
+    this->m_sharedClosures.clear();
+    this->m_valueTermOverrides.clear();
+    const auto &closureInstructions = analyzedFunction.lpLiftedFunction->instructions;
+    for (size_t index = 0; index < closureInstructions.size(); ++index)
+        if (const auto &instruction = closureInstructions[index]; instruction.operation == LiftedOperation::DUPCLOSURE && instruction.operands.size() > 1) {
+            std::vector<std::tuple<int32_t, int32_t, int32_t>> captures;
+            for (size_t next = index + 1; next < closureInstructions.size() && closureInstructions[next].operation == LiftedOperation::CAPTURE; ++next) {
+                const auto &capture = closureInstructions[next];
+                if (capture.operands.size() < 2)
+                    break;
+                const int32_t mode = capture.operands[0].value.imm.n;
+                const auto &source = capture.operands[1];
+                captures.emplace_back(mode, mode == 2 ? source.value.imm.n : source.value.reg, mode == 2 ? -1 : source.ssaVersion);
+            }
+            auto &shared = m_sharedClosures[instruction.operands[1].value.imm.k];
+            if (shared.count++ == 0)
+                shared.captures = std::move(captures);
+            else if (shared.captures != captures)
+                shared.sameCaptures = false;
+        }
     this->m_capturedVariableWrites.clear();
     this->m_processedInstructions.clear();
     this->m_earlyForExits.clear();
@@ -773,6 +793,21 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         KeepOrderedCompoundAssignments();
         boost::unordered_flat_set<uint32_t> visited;
         ast.statements = LiftControlFlow(0, InvalidBlockId, visited).Run();
+        std::vector<std::shared_ptr<Statement>> sharedDeclarations;
+        std::unordered_set<int32_t> insertedShared;
+        for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions)
+            if (instruction.operation == LiftedOperation::DUPCLOSURE && instruction.operands.size() > 1) {
+                const int32_t constantIndex = instruction.operands[1].value.imm.k;
+                if (!insertedShared.insert(constantIndex).second)
+                    continue;
+                auto &shared = m_sharedClosures[constantIndex];
+                if (shared.declaration) {
+                    sharedDeclarations.push_back(std::move(shared.declaration));
+                } else if (!shared.name.empty() && !shared.captures.empty() && shared.sameCaptures) {
+                    sharedDeclarations.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(shared.name)));
+                }
+            }
+        ast.statements.insert(ast.statements.begin(), sharedDeclarations.begin(), sharedDeclarations.end());
         Explain("function {}: control-flow lift produced {} top-level statements", m_debugFunction, ast.statements.size());
 
         std::string ttinfo = "Unavailable";
@@ -3283,6 +3318,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]), std::move(funcName)
             );
 
+            const int32_t constantIndex = inst.operands[1].value.imm.k;
+
             size_t capIdx = 0;
             while (i + 1 + capIdx < m_currentFunction->lpLiftedFunction->instructions.size()) {
                 auto &cap = m_currentFunction->lpLiftedFunction->instructions[i + 1 + capIdx];
@@ -3416,6 +3453,43 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 std::make_shared<FunctionDeclarationNode>(funcName, duplicatedFunction->numparams, argNames, duplicatedFunction->isvararg, bodyBlock, true);
             for (const auto &capture : captureActions)
                 fnDecl->capturedNames.insert(capture.upName);
+            auto &shared = m_sharedClosures[constantIndex];
+            if (duplicatedFunction->nups == 0 && shared.count > 1) {
+                if (!shared.declaration) {
+                    shared.name = funcName;
+                    shared.declaration = fnDecl;
+                }
+                const auto &output = inst.operands[0];
+                m_valueTermOverrides[{static_cast<uint8_t>(output.value.reg), output.ssaVersion}] =
+                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name));
+                if (m_currentFunction->IsConsumedByPhi(output))
+                    statements.push_back(
+                        std::make_shared<AssignmentStatementNode>(
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output))),
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name))
+                        )
+                    );
+                m_processedInstructions.insert(i);
+                break;
+            }
+            if (duplicatedFunction->nups > 0 && shared.count > 1 && shared.sameCaptures) {
+                if (shared.name.empty())
+                    shared.name = funcName;
+                fnDecl->bAnonymousInline = true;
+                fnDecl->bIsLocalDeclaration = false;
+                const auto cache = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name));
+                statements.push_back(std::make_shared<AssignmentStatementNode>(cache, std::make_shared<BinaryExpressionNode>("or", cache, fnDecl)));
+                const auto &output = inst.operands[0];
+                m_valueTermOverrides[{static_cast<uint8_t>(output.value.reg), output.ssaVersion}] = cache;
+                if (m_currentFunction->IsConsumedByPhi(output))
+                    statements.push_back(
+                        std::make_shared<AssignmentStatementNode>(
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output))), cache
+                        )
+                    );
+                m_processedInstructions.insert(i);
+                break;
+            }
             if (RenderClosureInPlace(inst, fnDecl, !duplicatedFunction->debugName.has_value()))
                 break;
 
