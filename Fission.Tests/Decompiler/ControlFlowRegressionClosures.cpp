@@ -99,7 +99,7 @@ TEST_CASE("Regress: numeric for with continue and break", "[Decompiler][Loop][Re
     CHECK(ContainsRegex(out, std::regex(R"(for\s+\w+\s*=)")));
     // The body's guarded statement and the real break both survive.
     CHECK(ContainsRegex(out, std::regex(R"(\bbreak\b)")));
-    CHECK(ContainsRegex(out, std::regex(R"(print\(v\d+\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(print\(v\))")));
     // The post-loop statement must be present (not swallowed into the break path).
     CHECK(ContainsRegex(out, std::regex(R"(print\("done"\))")));
     // Exactly one break; the `continue` path must NOT have become a second break.
@@ -359,7 +359,7 @@ TEST_CASE("Constants: vector constants emit in expr and table positions, not sil
     REQUIRE(result.resultCode == DecompileResult::Success);
     const auto out = std::move(result.decompilationOutput);
     INFO("decompile:\n" << out);
-    CHECK(Contains(out, "local __fissionVectorCtor = Vector3.new"));
+    CHECK(Contains(out, "local __fissionVectorCtor = vector.create"));
     CHECK(Contains(out, "__fissionVectorCtor(1, 2, 3)")); // LOADK vector
     CHECK(Contains(out, "__fissionVectorCtor(4, 5, 6)")); // vector inside a constant table
     CHECK(Contains(out, "__fissionVectorCtor(7, 8, 9)"));

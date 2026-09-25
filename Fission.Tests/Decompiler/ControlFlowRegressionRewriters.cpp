@@ -129,7 +129,7 @@ TEST_CASE("Regress: mixed truthiness paths retain their shared effectful body", 
     const auto out = DecompileOrFail(source);
     INFO(out);
     REQUIRE(Recompiles(out));
-    CHECK(Contains(out, "not arg0 and arg1[1] or arg0 and arg1[2]"));
+    CHECK(Contains(out, "not parsed and dates[1] or parsed and dates[2]"));
     const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("")});
     INFO(verdict.decompiled.trace);
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
@@ -248,7 +248,7 @@ TEST_CASE("Regress: optional fallback preserves value at shared return join", "[
     const auto out = DecompileOrFail(source);
     INFO("decompile:\n" << out);
     REQUIRE(Recompiles(out));
-    CHECK(CountOccurrences(out, "value = v") == 1);
+    CHECK(CountOccurrences(out, "value = selected") == 1);
     const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("")});
     INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);

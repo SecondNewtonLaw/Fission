@@ -36,12 +36,12 @@ namespace control_flow_regression {
                 flag->value = true;
     }
 
-    std::string DecompileOrFail(const std::string &source, int optLevel) {
+    std::string DecompileOrFail(const std::string &source, int optLevel, int debugLevel) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         Luau::CompileOptions opts{};
         opts.optimizationLevel = optLevel;
-        opts.debugLevel = 2;
+        opts.debugLevel = debugLevel;
         auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), opts);
         REQUIRE(result.resultCode == DecompileResult::Success);
         return std::move(result.decompilationOutput);

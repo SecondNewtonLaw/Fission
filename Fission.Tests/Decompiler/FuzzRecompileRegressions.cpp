@@ -7,6 +7,8 @@
 #include <catch2/generators/catch_generators.hpp>
 #include <cctype>
 #include <cstring>
+#include <iterator>
+#include <regex>
 #include <string>
 
 static void EnableLuauFFlagsOnce() {
@@ -593,7 +595,7 @@ return n
     CHECK(Recompiles(result.decompilationOutput, &err));
     INFO("recompile error: " << err);
     // The comparison (and its potential throw) must be preserved, not NOPed away.
-    CHECK(result.decompilationOutput.find("< tostring") != std::string::npos);
+    CHECK(result.decompilationOutput.find("tostring > \"\"") != std::string::npos);
 }
 
 // An INFINITE repeat (`repeat BODY until <false const>`, e.g. `until nil`) compiles to an
@@ -699,8 +701,8 @@ return k
     CHECK(Recompiles(result.decompilationOutput, &err));
     INFO("recompile error: " << err);
     // (a and b) and c or d simplifies to `a and (b and c) or d`; Luau lowers the inner `a and b and c`
-    // to a right-nested `arg1 and arg2 or arg3` on the a-true path. The fallback `arg3` must survive.
-    CHECK(result.decompilationOutput.find("arg1 and arg2 or arg3") != std::string::npos);
+    // to a right-nested `b and c or d` on the a-true path. The fallback `d` must survive.
+    CHECK(result.decompilationOutput.find("b and c or d") != std::string::npos);
 }
 
 // DEEPER shape than the two above: the shared value block has a FURTHER truthiness test before the merge.
@@ -728,11 +730,10 @@ return f(true, false, true, 3, 9)
     std::string err;
     CHECK(Recompiles(result.decompilationOutput, &err));
     INFO("recompile error: " << err);
-    // The `d` value (arg3) must be materialised on both shared edges (b-truthy and c-truthy). The buggy
-    // output assigned it on only the b-truthy edge and left the c-truthy edge empty -> exactly one `arg3`.
+    // The `d` value must be materialised on both shared edges (b-truthy and c-truthy). The buggy
+    // output assigned it on only the b-truthy edge and left the c-truthy edge empty -> exactly one `d`.
     const std::string &out = result.decompilationOutput;
-    size_t arg3Count = 0;
-    for (size_t p = out.find("arg3"); p != std::string::npos; p = out.find("arg3", p + 4))
-        ++arg3Count;
-    CHECK(arg3Count >= 2);
+    const std::regex dWord(R"(\bd\b)");
+    const auto dCount = std::distance(std::sregex_iterator(out.begin(), out.end(), dWord), std::sregex_iterator());
+    CHECK(dCount >= 2);
 }

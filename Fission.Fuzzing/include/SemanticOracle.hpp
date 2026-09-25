@@ -310,12 +310,13 @@ namespace fuzz {
         } else {
             result.status = SemTrace::Status::Ok;
         }
-        result.trace = detail::NormalizeAddresses(trace);
+        // printed `pcall` messages carry the same source locations as uncaught errors
+        result.trace = detail::NormalizeError(trace);
         result.comparable = runBudget.comparable;
         result.prints = std::move(runBudget.prints);
         for (auto &print : result.prints)
             if (print)
-                *print = detail::NormalizeAddresses(*print);
+                *print = detail::NormalizeError(*print);
         lua_close(L);
         return result;
     }

@@ -348,7 +348,7 @@ TEST_CASE("Lift: generated-name shadowing preserves global bindings", "[Decompil
     opts.debugLevel = 2;
     const auto check = [&](const std::string &source, const std::string &preludeSource, const std::string &localName, const std::string &globalName,
                            const std::string &expected) {
-        const auto output = DecompileOrFail(source, opts.optimizationLevel);
+        const auto output = DecompileOrFail(source, opts.optimizationLevel, static_cast<DecompilerFlags>(0), 1);
         INFO("decompiled output:\n" << output);
         CHECK(std::regex_search(output, std::regex("local\\s+" + localName + R"(\b)")));
         CHECK_FALSE(std::regex_search(output, std::regex("local\\s+" + globalName + R"(\b)")));

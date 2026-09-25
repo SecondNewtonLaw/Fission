@@ -75,11 +75,11 @@ print(full(1), full(-1), full(0), partial(1), partial(-1), partial(0)))LUA";
     const auto output = fuzz::FullDecompile(source).output;
     INFO(output);
     size_t chains = 0;
-    for (auto at = output.find("elseif 0 < arg0 then\n        print(\"up\")"); at != std::string::npos;
-         at = output.find("elseif 0 < arg0 then\n        print(\"up\")", at + 1))
+    for (auto at = output.find("elseif arg0 > 0 then\n        print(\"up\")"); at != std::string::npos;
+         at = output.find("elseif arg0 > 0 then\n        print(\"up\")", at + 1))
         ++chains;
     CHECK(chains == 2);
-    CHECK(output.find("not (0 < arg0)") == std::string::npos);
+    CHECK(output.find("not (arg0 > 0)") == std::string::npos);
 }
 
 TEST_CASE("Compiler audit: an empty while after a loop sharing the repeat header still tests its condition", "[Decompiler][ReplayRegress][Semantics]") {

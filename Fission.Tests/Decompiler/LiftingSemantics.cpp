@@ -37,12 +37,12 @@ namespace lifting_semantics_test {
     // exact bytecode shape they are exercising (e.g. an explicit `if not v then
     // v = X end` chain that opt=1 would otherwise fold into return-and-comparison
     // form before the lifter ever sees the OR opcode).
-    std::string DecompileOrFail(const std::string &source, int optLevel, DecompilerFlags flags) {
+    std::string DecompileOrFail(const std::string &source, int optLevel, DecompilerFlags flags, int debugLevel) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         Luau::CompileOptions opts{};
         opts.optimizationLevel = optLevel;
-        opts.debugLevel = 2;
+        opts.debugLevel = debugLevel;
         auto result = decompiler.DecompileTestCode(source, flags, opts);
         REQUIRE(result.resultCode == DecompileResult::Success);
         return std::move(result.decompilationOutput);

@@ -376,7 +376,7 @@ print(read(), v))LUA";
     REQUIRE(foundVector);
     const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
     INFO("decompiled:\n" << output);
-    REQUIRE(lifting_semantics_test::Contains(output, "local __fissionVectorCtor = Vector3.new"));
+    REQUIRE(lifting_semantics_test::Contains(output, "local __fissionVectorCtor = vector.create"));
     REQUIRE(lifting_semantics_test::Contains(output, "__fissionVectorCtor(1, 2, 3)"));
     const auto prelude = Luau::compile("", options);
     const auto original = fuzz::RunLuauTrace(bytecode, prelude);
@@ -407,7 +407,7 @@ TEST_CASE("Compiler vector.create constant survives a Vector3 global write", "[D
     REQUIRE(foundVector);
     const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
     INFO("decompiled:\n" << output);
-    const auto captureAt = output.find("local __fissionVectorCtor = Vector3.new");
+    const auto captureAt = output.find("local __fissionVectorCtor = vector.create");
     REQUIRE(captureAt != std::string::npos);
     REQUIRE(captureAt < output.find("Vector3 = 5"));
     REQUIRE(lifting_semantics_test::Contains(output, "print(__fissionVectorCtor(1, 2, 3))"));
@@ -449,7 +449,7 @@ print(vector.create(1, 2, 3)))LUA"},
         REQUIRE(foundVector);
         const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
         INFO("source:\n" << source << "\ndecompiled:\n" << output);
-        const auto captureAt = output.find("local __fissionVectorCtor = Vector3.new");
+        const auto captureAt = output.find("local __fissionVectorCtor = vector.create");
         REQUIRE(captureAt != std::string::npos);
         REQUIRE(captureAt < output.find("_G"));
         if (source.find("local function key") != std::string::npos)

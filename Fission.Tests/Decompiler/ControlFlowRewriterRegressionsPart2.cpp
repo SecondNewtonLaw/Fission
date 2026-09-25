@@ -446,7 +446,7 @@ TEST_CASE("Regress: reverse-field naming names a local after its field", "[Decom
             return self
         end
         return make
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(local\s+health\s*=)")));
@@ -509,7 +509,7 @@ TEST_CASE("Regress: SETLIST safe elements still fold into a constructor", "[Deco
     SECTION("arithmetic over params folds") {
         const auto out = DecompileOrFail("local function f(a, b) return { a + 1, b * 2, a - b } end return f");
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\{\s*arg0\s*\+\s*1,\s*arg1\s*\*\s*2,\s*arg0\s*-\s*arg1\s*\})")));
+        CHECK(ContainsRegex(out, std::regex(R"(\{\s*a\s*\+\s*1,\s*b\s*\*\s*2,\s*a\s*-\s*b\s*\})")));
         CHECK(NoForwardReference(out));
         CHECK(Recompiles(out));
     }
@@ -540,9 +540,9 @@ TEST_CASE("Regress: variadic SETLIST keeps every element and does not duplicate"
             return f
         )");
         INFO("decompile:\n" << out);
-        // every element survives (the param `g` is auto-named arg0 at flags=0)...
+        // every element survives...
         for (int i = 1; i <= 5; ++i) {
-            const std::string call = "arg0(" + std::to_string(i) + ")";
+            const std::string call = "g(" + std::to_string(i) + ")";
             INFO("element " << call);
             CHECK(CountOccurrences(out, call) == 1); // present exactly once -- not dropped, not duplicated
         }

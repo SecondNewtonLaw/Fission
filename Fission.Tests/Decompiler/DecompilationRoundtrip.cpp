@@ -53,8 +53,8 @@ TEST_CASE("Roundtrip: while loop", "[Decompiler][Roundtrip]") {
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"((?:while|repeat)[\s\S]*v\d+\s*\+=\s*1[\s\S]*return\s+v\d+)")));
-    CHECK_FALSE(ContainsRegex(out, std::regex(R"((?:while|repeat)[\s\S]*\breturn\s+v\d+[\s\S]*(?:until|end))")));
+    CHECK(ContainsRegex(out, std::regex(R"((?:while|repeat)[\s\S]*i\s*\+=\s*1[\s\S]*return\s+i)")));
+    CHECK_FALSE(ContainsRegex(out, std::regex(R"((?:while|repeat)[\s\S]*\breturn\s+i[\s\S]*(?:until|end))")));
 }
 
 TEST_CASE("Roundtrip: nested calls", "[Decompiler][Roundtrip]") {
@@ -64,7 +64,7 @@ TEST_CASE("Roundtrip: nested calls", "[Decompiler][Roundtrip]") {
     // faithful reconstruction keeps both nested and needs no argument spilled to a local. (An earlier
     // over-count in the B==0 arg estimator forced b/c into `local vN = argK` temporaries; the
     // producer-scan estimate no longer invents those.)
-    CHECK(ContainsRegex(out, std::regex(R"(return\s+math\.max\(arg0,\s*math\.min\((?:arg1|v\d+),\s*(?:arg2|v\d+)\)\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(return\s+math\.max\(a,\s*math\.min\(b,\s*c\)\))")));
 }
 
 TEST_CASE("Roundtrip: table literal", "[Decompiler][Roundtrip]") {
@@ -96,14 +96,14 @@ TEST_CASE("Roundtrip: numeric for loop", "[Decompiler][Roundtrip]") {
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*for\s+[A-Za-z_][A-Za-z_0-9]*\s*=\s*1,\s*10,\s*1\s+do)")));
-    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*v\d+\s*\+=\s*[A-Za-z_][A-Za-z_0-9]*)")));
+    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*for\s+[A-Za-z_][A-Za-z_0-9]*\s*=\s*1,\s*10\s+do)")));
+    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*s\s*\+=\s*i\b)")));
 }
 
 TEST_CASE("Roundtrip: variable assignment with binary expression", "[Decompiler][Roundtrip]") {
     const auto out = DecompileOrFail("return function(a, b) return a + b end");
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(return\s+arg0\s*\+\s*arg1)")));
+    CHECK(ContainsRegex(out, std::regex(R"(return\s+a\s*\+\s*b)")));
 }
 
 TEST_CASE("Roundtrip: if statement", "[Decompiler][Roundtrip]") {
@@ -132,7 +132,7 @@ TEST_CASE("Roundtrip: repeat-until loop", "[Decompiler][Roundtrip]") {
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(repeat\s+v\d+\s*\+=\s*1\s+until\s*\(10\s*<=\s*v\d+\)\s+return\s+v\d+)")));
+    CHECK(ContainsRegex(out, std::regex(R"(repeat\s+i\s*\+=\s*1\s+until\s*\(?i\s*>=\s*10\)?\s+return\s+i)")));
     CHECK(CountRegex(out, std::regex(R"((?:^|\n)\s*return\b)")) == 1u);
 }
 

@@ -32,7 +32,7 @@ TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][
     SECTION("multret call tail: return 1, 2, g()") {
         const auto out = DecompileOrFail("local function f(g) return 1, 2, g() end return f");
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(return\s+1,\s*2,\s*arg0\(\))")));
+        CHECK(ContainsRegex(out, std::regex(R"(return\s+1,\s*2,\s*g\(\))")));
         CHECK(Recompiles(out));
     }
     SECTION("vararg tail: return 1, ...") {
@@ -44,7 +44,7 @@ TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][
     SECTION("pure multret: return g()") {
         const auto out = DecompileOrFail("local function f(g) return g() end return f");
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(return\s+arg0\(\))")));
+        CHECK(ContainsRegex(out, std::regex(R"(return\s+g\(\))")));
         CHECK(Recompiles(out));
     }
     SECTION("pure vararg: return ...") {
@@ -56,13 +56,13 @@ TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][
     SECTION("fixed multi-return unaffected: return a, b, c") {
         const auto out = DecompileOrFail("local function f(a, b, c) return a, b, c end return f");
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(return\s+arg0,\s*arg1,\s*arg2)")));
+        CHECK(ContainsRegex(out, std::regex(R"(return\s+a,\s*b,\s*c)")));
         CHECK(Recompiles(out));
     }
     SECTION("multret in non-tail position is truncated to one value: return g(), b") {
         const auto out = DecompileOrFail("local function f(g, b) return g(), b end return f");
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(return\s+arg0\(\),\s*arg1)")));
+        CHECK(ContainsRegex(out, std::regex(R"(return\s+g\(\),\s*b)")));
         CHECK(Recompiles(out));
     }
 }
@@ -77,7 +77,7 @@ TEST_CASE("Regress: register auto-name does not overwrite a same-named global", 
         local g = not v6()
         v681(631)
         return #("a-b"), select(nil, 31)[{ ["data"] = g }], g, a, b, c, d, e, f
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     // the colliding register local is prefixed (the global `v6` is referenced as a bare call).
@@ -99,7 +99,7 @@ TEST_CASE("Regress: SETGLOBAL back-propagates a lower-first global name", "[Deco
             return a
         end
         return f
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+blahBlah\b)")));        // lower-first local
@@ -118,7 +118,7 @@ TEST_CASE("Regress: reverse-field back-prop lowers a capitalized field name", "[
             return a
         end
         return f
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+health\b)")));      // lower-first local
@@ -137,7 +137,7 @@ TEST_CASE("Regress: lower-first global is not back-propagated (would shadow)", "
             return a
         end
         return f
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(\blocal\s+score\b)"))); // would shadow the global `score`
@@ -158,7 +158,7 @@ TEST_CASE("Feature: Instance.new names the local after the class string", "[Deco
             return a
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+part\s*=\s*Instance\.new)")));
     CHECK(Recompiles(out));
@@ -173,7 +173,7 @@ TEST_CASE("Feature: Instance.new lower-firsts a PascalCase class string", "[Deco
             return a
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+screenGui\b)")));
     CHECK(Recompiles(out));
@@ -188,7 +188,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
                 return a + a
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+vector3\s*=\s*Vector3\.new)")));
         CHECK(Recompiles(out));
@@ -201,7 +201,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
                 return a, a
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+color3\s*=\s*Color3\.fromRGB)")));
         CHECK(Recompiles(out));
@@ -214,7 +214,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
                 return a
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+myClass\s*=\s*MyClass\.new)")));
         CHECK(Recompiles(out));
@@ -236,7 +236,7 @@ TEST_CASE("Feature: nested numeric for loops use i, j, k", "[Decompiler][Naming]
             return a
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+i\s*=)")));
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+j\s*=)")));
@@ -253,7 +253,7 @@ TEST_CASE("Feature: sibling numeric for loops both reuse i", "[Decompiler][Namin
             return a
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(CountOccurrences(out, "for i =") == 2); // both siblings -> i
     CHECK(Recompiles(out));
@@ -267,7 +267,7 @@ TEST_CASE("Feature: generic for ipairs uses i, v", "[Decompiler][Naming][Loop]")
             return t
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+i,\s*v\s+in\s+ipairs\b)")));
     CHECK(Recompiles(out));
@@ -280,7 +280,7 @@ TEST_CASE("Feature: generic for pairs uses k, v", "[Decompiler][Naming][Loop]") 
             return t
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+k,\s*v\s+in\s+pairs\b)")));
     CHECK(Recompiles(out));
@@ -324,13 +324,13 @@ TEST_CASE("Feature: module-table method recovers self (colon form)", "[Decompile
     )");
     INFO("decompile:\n" << out);
     // member-write method -> colon + self
-    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+v\d+:setValue\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+\w+:setValue\b)")));
     CHECK(ContainsRegex(out, std::regex(R"(\bself\.value\s*=)")));
     // member-read method -> colon + self
-    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+v\d+:getValue\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+\w+:getValue\b)")));
     CHECK(ContainsRegex(out, std::regex(R"(\breturn\s+self\.value\b)")));
     // free function (no receiver use) -> stays dot, no self
-    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+v\d+\.freeFn\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+\w+\.freeFn\b)")));
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(:freeFn\b)")));
     CHECK(Recompiles(out));
 }
@@ -361,7 +361,7 @@ TEST_CASE("Feature: length operator names the local count", "[Decompiler][Naming
             return n + n
         end
         return f
-    )");
+    )", 1, 1);
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+count\s*=\s*#)")));
     CHECK(Recompiles(out));
@@ -391,7 +391,7 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
         )");
         INFO("decompile:\n" << out);
         CHECK_FALSE(ContainsRegex(out, leak));                               // no global leak
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+v\d+\s*=\s*\{)"))); // table is a local
+        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+\w+\s*=\s*\{)"))); // table is a local
         CHECK(NoForwardReference(out));
         CHECK(Recompiles(out));
     }
@@ -425,7 +425,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
                 return a
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*,\s*result\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
@@ -438,7 +438,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
                 return a
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
@@ -450,7 +450,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
                 return a, b
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*,\s*result\s*=\s*xpcall\b)")));
         CHECK(Recompiles(out));
@@ -465,7 +465,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
                 return a, b
             end
             return f
-        )");
+        )", 1, 1);
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*=\s*pcall\b)")));
         CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok2\s*=\s*pcall\b)")));

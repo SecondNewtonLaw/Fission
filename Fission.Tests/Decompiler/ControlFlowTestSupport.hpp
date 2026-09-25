@@ -11,7 +11,7 @@
 
 namespace control_flow_test {
     void EnableLuauFFlagsOnce();
-    std::string DecompileOrFail(const std::string &source, int optLevel = 1);
+    std::string DecompileOrFail(const std::string &source, int optLevel = 1, int debugLevel = 2);
     bool Contains(const std::string &haystack, const std::string &needle);
     bool ContainsRegex(const std::string &haystack, const std::regex &pattern);
     bool Recompiles(const std::string &src);

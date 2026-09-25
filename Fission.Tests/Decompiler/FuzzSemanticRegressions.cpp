@@ -266,8 +266,8 @@ return classify(-7)
     std::string err;
     CHECK(Recompiles(result.decompilationOutput, &err));
     INFO("recompile error: " << err);
-    // The `sign` register (v1) must be declared exactly once -- a second, nested `local v1` is the shadow.
-    CHECK(CountLocalDeclsOf(result.decompilationOutput, "v1") == 1);
+    // `sign` must be declared exactly once -- a second, nested `local sign` is the shadow.
+    CHECK(CountLocalDeclsOf(result.decompilationOutput, "sign") == 1);
 }
 
 // `return (select(n, ...))`: the source parens truncate a multiret call to ONE value. The bytecode

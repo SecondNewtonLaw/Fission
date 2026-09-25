@@ -12,7 +12,7 @@
 
 namespace lifting_semantics_test {
     void EnableLuauFFlagsOnce();
-    std::string DecompileOrFail(const std::string &source, int optLevel = 1, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    std::string DecompileOrFail(const std::string &source, int optLevel = 1, DecompilerFlags flags = static_cast<DecompilerFlags>(0), int debugLevel = 2);
     std::string DecompileVanillaOrFail(const std::string &bytecode);
     std::string ExtractFirstNumericForLoopVar(const std::string &source);
     bool Contains(const std::string &haystack, const std::string &needle);

@@ -82,7 +82,7 @@ end), (if print then f0:method("x") else f0:set(91.5));
     CHECK(Recompiles(result.decompilationOutput, &error));
     INFO("recompile error: " << error);
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
-    CHECK(result.decompilationOutput.find("local function f0(p1, arg1, ...)") != std::string::npos);
+    CHECK(result.decompilationOutput.find("local function f0(p1, p2, ...)") != std::string::npos);
 }
 
 TEST_CASE("Regress generic-for capture survives sibling loop binding", "[Decompiler][FuzzRegress][GenericFor][Semantic]") {

@@ -38,12 +38,12 @@ namespace control_flow_test {
                 flag->value = true;
     }
 
-    std::string DecompileOrFail(const std::string &source, int optLevel) {
+    std::string DecompileOrFail(const std::string &source, int optLevel, int debugLevel) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         Luau::CompileOptions opts{};
         opts.optimizationLevel = optLevel;
-        opts.debugLevel = 2;
+        opts.debugLevel = debugLevel;
         auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), opts);
         REQUIRE(result.resultCode == DecompileResult::Success);
         return std::move(result.decompilationOutput);
@@ -111,7 +111,7 @@ TEST_CASE("Regress: repeat-until body is not eaten (simple counter)", "[Decompil
     const auto repeatBody = FirstBetween(out, "repeat", "until");
     CHECK(Contains(out, "repeat"));
     REQUIRE_FALSE(repeatBody.empty());
-    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*v\d+\s*\+=\s*1\b)")));
+    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*i\s*\+=\s*1\b)")));
     CHECK_FALSE(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*return\b)")));
 }
 
@@ -130,8 +130,8 @@ TEST_CASE("Regress: repeat-until with computation body is preserved", "[Decompil
     INFO("decompile:\n" << out);
     const auto repeatBody = FirstBetween(out, "repeat", "until");
     REQUIRE_FALSE(repeatBody.empty());
-    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*arg\d+\s*\+=\s*arg\d+\b)")));
-    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*arg\d+\s*-?=\s*(?:arg\d+\s*-\s*)?1\b)")));
+    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*acc\s*\+=\s*x\b)")));
+    CHECK(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*x\s*-?=\s*(?:x\s*-\s*)?1\b)")));
     CHECK_FALSE(ContainsRegex(repeatBody, std::regex(R"((?:^|\n)\s*return\b)")));
 }
 
@@ -155,7 +155,7 @@ TEST_CASE("Regress: while-true-break keeps body statements", "[Decompiler][Loop]
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(repeat\s+v\d+\s*\+=\s*1\s+until\s*\(100\s*<=\s*v\d+\)\s+return\s+v\d+)")));
+    CHECK(ContainsRegex(out, std::regex(R"(repeat\s+x\s*\+=\s*1\s+until\s*\(?x\s*>=\s*100\)?\s+return\s+x)")));
 }
 
 // And-or mixed short-circuit
@@ -169,8 +169,8 @@ TEST_CASE("Regress: and-or mixed short-circuit does not produce self-assign", "[
     )");
 
     INFO("decompile:\n" << out);
-    CHECK_FALSE(ContainsRegex(out, std::regex(R"(\b(v\d+|arg\d+)\s*=\s*\1\b)")));
-    CHECK(ContainsRegex(out, std::regex(R"(return\s+arg0\s+and\s+arg1\s+or\s+arg2\s+and\s+arg3\b)")));
+    CHECK_FALSE(ContainsRegex(out, std::regex(R"(\b(\w+)\s*=\s*\1\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(return\s+a\s+and\s+b\s+or\s+c\s+and\s+d\b)")));
 }
 
 // OR-chain dispatch (multiple `==` sharing one body) must not clobber
@@ -235,7 +235,7 @@ TEST_CASE("Regress: break in else branch does not kill enclosing loop", "[Decomp
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*for\s+[A-Za-z_][A-Za-z_0-9]*\s*=\s*1,\s*20,\s*1\s+do)")));
+    CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*for\s+[A-Za-z_][A-Za-z_0-9]*\s*=\s*1,\s*20\s+do)")));
     CHECK_FALSE(Contains(out, "break"));
 }
 
@@ -262,7 +262,7 @@ TEST_CASE("Regress: while-true-break with multiple exit conditions preserves bod
     CHECK(ContainsRegex(
         out,
         std::regex(
-            R"((?:while\s+true|repeat)[\s\S]*v\d+\s*\+=\s*1[\s\S]*if\s+100\s*<\s*v\d+\s+then\s+break[\s\S]*v\d+\s*\+=\s*v\d+[\s\S]*(?:if\s+500\s*<\s*v\d+\s+then\s+break|until\s+\(500\s*<\s*v\d+\))[\s\S]*return\s+v\d+)"
+            R"((?:while\s+true|repeat)[\s\S]*x\s*\+=\s*1[\s\S]*if\s+x\s*>\s*100\s+then\s+break[\s\S]*y\s*\+=\s*x[\s\S]*(?:if\s+y\s*>\s*500\s+then\s+break|until\s+\(?y\s*>\s*500\)?)[\s\S]*return\s+y)"
         )
     ));
     CHECK(Recompiles(out));
@@ -529,7 +529,7 @@ TEST_CASE("Generic loop bindings do not suppress later local declarations", "[De
             local a, b, c = one(), two(), three()
             sink(a.field ~= nil, b, c)
         end
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+v3\b)")));
@@ -551,7 +551,7 @@ TEST_CASE("Branch-local register reuse does not leak a global", "[Decompiler][Sc
         end
         sink(y)
         return y
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(CountOccurrences(out, "local v1") == 2);
@@ -576,7 +576,7 @@ TEST_CASE("Sibling branches keep independent local bindings", "[Decompiler][Scop
             sink(value)
         end
         finish()
-    )");
+    )", 1, 1);
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(if\s+flag\s+then\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));

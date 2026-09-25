@@ -394,6 +394,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/TypeInference.cpp
             Fission.Tests/Decompiler/IREquivalence.cpp
             Fission.Tests/Decompiler/ClassDeclarations.cpp
+            Fission.Tests/Decompiler/CheckPendingRegressions.cpp
             Fission.Tests/Decompiler/ScopeCaptureRegressions.cpp
             Fission.Tests/Decompiler/FuzzCampaignRegressions.cpp
             Fission.Tests/Decompiler/FuzzRecompileRegressions.cpp

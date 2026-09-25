@@ -381,8 +381,8 @@ TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow]
     const auto out = DecompileOrFail(source);
     INFO("decompile:\n" << out);
     CHECK(CountSubstr(out, "step(") == 1);
-    const bool emittedRepeat = ContainsRegex(out, std::regex(R"(repeat[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*until\s+\(10\s*<=\s*v\d+\))"));
-    const bool emittedWhile = ContainsRegex(out, std::regex(R"(while\s+true[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*if\s+10\s*<=\s*v\d+\s+then\s+break)"));
+    const bool emittedRepeat = ContainsRegex(out, std::regex(R"(repeat[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*until\s+\(?x\s*>=\s*10\)?)"));
+    const bool emittedWhile = ContainsRegex(out, std::regex(R"(while\s+true[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*if\s+x\s*>=\s*10\s+then\s+break)"));
     CHECK((emittedRepeat || emittedWhile));
     CHECK(CountWord(out, "break") == (emittedRepeat ? 1 : 2));
     const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("step = function() end")});
