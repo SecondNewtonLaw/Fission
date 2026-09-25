@@ -359,9 +359,10 @@ TEST_CASE("Constants: vector constants emit in expr and table positions, not sil
     REQUIRE(result.resultCode == DecompileResult::Success);
     const auto out = std::move(result.decompilationOutput);
     INFO("decompile:\n" << out);
-    CHECK(Contains(out, "Vector3.new(1, 2, 3)")); // LOADK vector
-    CHECK(Contains(out, "Vector3.new(4, 5, 6)")); // vector inside a constant table
-    CHECK(Contains(out, "Vector3.new(7, 8, 9)"));
+    CHECK(Contains(out, "local __fissionVectorCtor = Vector3.new"));
+    CHECK(Contains(out, "__fissionVectorCtor(1, 2, 3)")); // LOADK vector
+    CHECK(Contains(out, "__fissionVectorCtor(4, 5, 6)")); // vector inside a constant table
+    CHECK(Contains(out, "__fissionVectorCtor(7, 8, 9)"));
     CHECK_FALSE(Contains(out, "nil")); // no constant silently dropped to nil
 }
 

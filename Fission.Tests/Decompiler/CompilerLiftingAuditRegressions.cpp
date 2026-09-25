@@ -376,7 +376,8 @@ print(read(), v))LUA";
     REQUIRE(foundVector);
     const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
     INFO("decompiled:\n" << output);
-    REQUIRE(lifting_semantics_test::Contains(output, "Vector3.new(1, 2, 3)"));
+    REQUIRE(lifting_semantics_test::Contains(output, "local __fissionVectorCtor = Vector3.new"));
+    REQUIRE(lifting_semantics_test::Contains(output, "__fissionVectorCtor(1, 2, 3)"));
     const auto prelude = Luau::compile("", options);
     const auto original = fuzz::RunLuauTrace(bytecode, prelude);
     const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output, options), prelude);
@@ -416,6 +417,49 @@ TEST_CASE("Compiler vector.create constant survives a Vector3 global write", "[D
     REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
     CHECK(reconstructed.status == original.status);
     CHECK(reconstructed.trace == original.trace);
+}
+
+TEST_CASE("Compiler vector constant survives a Vector3 write through _G", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    Luau::CompileOptions options{};
+    options.optimizationLevel = 2;
+    options.debugLevel = 2;
+    options.vectorLib = "Vector3";
+    options.vectorCtor = "new";
+    options.vectorType = "Vector3";
+    const auto prelude = Luau::compile("", options);
+    for (const std::string &source : {
+             std::string{"_G.Vector3 = 5\nlocal v = vector.create(1, 2, 3)\nprint(v)"},
+             std::string{R"LUA(local function key(n)
+    if n == 0 then return "Vector3" end
+    return key(n - 1)
+end
+_G[key(1)] = 5
+print(vector.create(1, 2, 3)))LUA"},
+         }) {
+        const auto bytecode = Luau::compile(source, options);
+        REQUIRE_FALSE(bytecode.empty());
+        REQUIRE(bytecode[0] != '\0');
+        Deserializer deserializer{};
+        const auto decoded = deserializer.Deserialize(bytecode);
+        REQUIRE(decoded.has_value());
+        bool foundVector = false;
+        for (const auto &constant : decoded->lpMainFunction->constants)
+            foundVector |= constant.kType == LUA_TVECTOR;
+        REQUIRE(foundVector);
+        const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
+        INFO("source:\n" << source << "\ndecompiled:\n" << output);
+        const auto captureAt = output.find("local __fissionVectorCtor = Vector3.new");
+        REQUIRE(captureAt != std::string::npos);
+        REQUIRE(captureAt < output.find("_G"));
+        if (source.find("local function key") != std::string::npos)
+            REQUIRE(lifting_semantics_test::Contains(output, "_G["));
+        const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+        const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output, options), prelude);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+        CHECK(reconstructed.status == original.status);
+        CHECK(reconstructed.trace == original.trace);
+    }
 }
 
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {

@@ -887,27 +887,10 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto sgenStart = std::chrono::steady_clock::now();
     auto generator = sourceGenerator.GenerateSource(&root);
     if (sourceGenerator.SawVectorConstant()) {
-        const auto writesVector3 = [&](const auto &self, const LiftedFunction &function) -> bool {
-            const auto &constants = function.lpDeserialized->constants;
-            for (const auto &instruction : function.instructions) {
-                if (instruction.operation != LiftedOperation::SETGLOBAL || instruction.operands.size() < 2)
-                    continue;
-                const int32_t index = instruction.operands[1].value.imm.k;
-                if (index >= 0 && static_cast<size_t>(index) < constants.size() && constants[index].kType == LUA_TSTRING &&
-                    std::get<std::string>(constants[index].constantData) == "Vector3")
-                    return true;
-            }
-            for (const auto &child : function.subfunctions)
-                if (self(self, child))
-                    return true;
-            return false;
-        };
-        if (writesVector3(writesVector3, liftedBytecode)) {
-            std::string alias = "__fissionVectorCtor";
-            while (generator.find(alias) != std::string::npos)
-                alias += '_';
-            generator = sourceGenerator.GenerateSource(&root, std::move(alias));
-        }
+        std::string alias = "__fissionVectorCtor";
+        while (generator.find(alias) != std::string::npos)
+            alias += '_';
+        generator = sourceGenerator.GenerateSource(&root, std::move(alias));
     }
     const auto sgenEnd = std::chrono::steady_clock::now();
     m_debugNotes.Add(FissionDebugStage::Pipeline, "source generation emitted {} bytes", generator.size());

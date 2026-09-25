@@ -24,6 +24,8 @@ After C29, CTest passed 639/639 and stress samples passed 22/22. Saved semantic 
 
 The same saved corpus at O1 checked 325,420 reads in 12,041 functions with no skipped function or missing/wrong reaching definition; its remaining `EXTRA_REACHING` category counts matched O2. A fresh bounded O2 SSA campaign (seed 250926, 500 compiler-produced sources) checked 35,167 reads in 1,548 functions, with 38 `EXTRA_REACHING` files and no missing/wrong definition. A separate semantic campaign on the same seed had 212 VM matches, 288 semantically unchecked generated sources, and no reported divergence or hard fault. All 288 unchecked cases were labelled `generic`, meaning the generator supplied no semantic family label; their counts are not semantic coverage.
 
+After C30, CTest passed 640/640, stress samples passed 22/22, and saved replay again reported 560 semantic passes and 2,408 unchecked sources among 2,968 unique inputs, with no reported divergence. Both direct and computed `_G` writes have Roblox-profile compiler-produced trace regressions. These checks do not establish parity for unchecked cases.
+
 ## Investigation completion gate
 
 Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
@@ -46,7 +48,7 @@ Source comparison pass is complete at emitter-family/inverse-boundary level. It 
 
 | Compiler family | Inverse stages to inspect | State | Notes |
 |---|---|---|---|
-| Constants, local aliases, imports, register allocation | BytecodeLifter, SSA, ASTLifter expressions, source generation | candidate | Import pool index mismatch C1; vector global-write rendering C28 fixed; other aliases/O0/O2 still under review. |
+| Constants, local aliases, imports, register allocation | BytecodeLifter, SSA, ASTLifter expressions, source generation | candidate | Import pool index mismatch C1; direct and indirect vector global-write rendering C28/C30 fixed; other aliases/O0/O2 still under review. |
 | Unary/binary ops, comparisons, logical values, if-expressions | BytecodeLifter, CFA, SSA, ASTLifter conditions/expressions | candidate | Operand shapes align; shared pure fallback C27 fixed; other boolean diamonds and effect order still under review. |
 | Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched; unbounded dependent arithmetic expression C22 confirmed. |
 | If/elseif, while, repeat, numeric/generic for, break/continue | BytecodeLifter, CFA, SSA, ASTLifter control flow | candidate | Numeric-for shorthand C4 explained; folded jumps and repeat/continue still under review. |
@@ -266,7 +268,15 @@ Luau O2 can compile `print(flag, if flag then 1 else 2, function() end); for val
 
 **Red/green:** A compiler-produced SSA invariant test failed two assertions before the fix: the `FORGPREP` read did not match VM reaching definitions, and its chosen definition did not dominate the read. The override now applies only when the latch is an actual predecessor and the current version is the phi's output; intervening calls keep their own definitions. The focused test passes, the reduced source has no SSA-oracle mismatch, and the original saved finding no longer reports `WRONG_REACHING`. Full CTest, stress and replay results are in the checkpoint above. This is a structural SSA correction; the reduced program's baseline VM traces matched before the fix, so it is not claimed as an observed output divergence.
 
+### C30 — vector constant follows an indirect Vector3 write (`fixed`)
+
+Luau O2 under `vectorLib="Vector3"`, `vectorCtor="new"`, and `vectorType="Vector3"` still folds `vector.create(1,2,3)` to `LUA_TVECTOR` when `_G.Vector3 = 5` precedes it. That write emits a table store, not `SETGLOBAL Vector3`, so C28's opcode scan missed it. The original VM printed `vec(1,2,3)`; Fission emitted `_G.Vector3 = 5; print(Vector3.new(1,2,3))`, which raised `attempt to index number with 'new'`. A recursive key function keeps `_G[key(...)]` dynamic through compiler lowering, so exact string-key scans cannot soundly identify every overwrite.
+
+**Red/green:** The Roblox-profile regression asserted a compiler vector constant and failed because no constructor capture preceded the `_G` write. Source generation now captures `Vector3.new` at chunk entry whenever a vector node survives first rendering, then constructs at the original expression site through that saved value. This uses the user-approved assumption that Roblox's `Vector3` constructor exists at chunk start. A direct-key and a dynamic-key case both preserve original VM status and trace. Three older source-spelling checks now assert the capture and components; CTest 640/640, stress 22/22, saved replay 560 passes/2,408 unchecked.
+
 ## Source audit log
+
+- **Table constructor lowering follow-up, 2026-09-25:** `Compiler.cpp:2634-2858` emits `SETLIST` only from table literals, flushes list chunks before keyed fields, and numbers chunks consecutively. The VM writes each chunk starting at its AUX index (`VM/src/lvmexecute.cpp:2492-2524`). Fission folds consecutive list elements and preserves keyed stores in scan order (`ASTLifterExpressions.cpp:1082-1233`); deferred `SETLIST` uses AUX explicitly (`ASTLifter.cpp:3087-3113`). Directed O0/O1/O2 VM comparisons of an effectful mixed list/computed-key/multret table and a `[1]`/`[2]` numeric-key table matched evaluation traces and final values. A captured-upvalue read during a later table store also matched at O0/O2 because the store stayed after local table assignment. No permanent green-only tests were added; non-source table stores and broader aliasing remain unproven.
 
 - **SSA-oracle return normalization, 2026-09-25:** CFA `ConvergeReturns` rewrites copied raw `LOP_RETURN` instructions to lifted `JUMP` instructions that reach one shared return. The oracle compared the raw return's register reads at those PCs against the replacement jump and reported 341 saved O2 `MISSING_READ:JUMP` files. A reduced two-arm dispatch failed the existing SSA-oracle invariant before correction. The oracle now omits reads at these transformed instructions; the shared lifted return still checks them. `EXTRA_REACHING:RETURN` remains because raw CFG dataflow sees only the original final-return path while Fission's merged CFG sees all arms. It is an explicitly tolerated over-approximation, not an independent SSA defect.
 

@@ -154,8 +154,9 @@ TEST_CASE("Deser: float and double vector constants preserve width", "[BytecodeD
     Decompiler decompiler{};
     const auto result = decompiler.DecompileVanillaBytecode(bb.getBytecode(), static_cast<DecompilerFlags>(0));
     REQUIRE(result.resultCode == DecompileResult::Success);
-    CHECK(result.decompilationOutput.find("Vector3.new(0.03, 0.5, -2)") != std::string::npos);
-    CHECK(result.decompilationOutput.find("Vector3.new(0.03, 0.03333333, -2)") != std::string::npos);
+    CHECK(result.decompilationOutput.find("local __fissionVectorCtor = Vector3.new") != std::string::npos);
+    CHECK(result.decompilationOutput.find("__fissionVectorCtor(0.03, 0.5, -2)") != std::string::npos);
+    CHECK(result.decompilationOutput.find("__fissionVectorCtor(0.03, 0.03333333, -2)") != std::string::npos);
 }
 
 TEST_CASE("Decompile: mapped userdata names replace generic userdata annotations", "[BytecodeDecoder][Types]") {
