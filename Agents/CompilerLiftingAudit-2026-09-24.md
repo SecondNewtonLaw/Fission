@@ -8,11 +8,11 @@ Started 2026-09-24. Source of truth: Luau 0.738 at `F:/cpm_cache/luau/1735` (`Lu
 2. Record suspicious inverses with exact source locations and expected bytecode shape. Analyse first; use focused generated examples only when the source comparison cannot settle a candidate.
 3. After the source audit, take candidates one at a time: reduced source → failing public decompile/compile/VM parity test (red) → narrow root-cause fix (green) → neighbouring shapes and full regression suite. Mark ambiguous or unrecoverable source constructs separately.
 
-States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `unrecoverable`. “Source-consistent” means no source-level contradiction found; it does not prove semantic parity.
+States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `shelved`, `unrecoverable`. “Source-consistent” means no source-level contradiction found; it does not prove semantic parity.
 
 ## Verification checkpoint, 2026-09-24
 
-GCC Debug build of `Fission.CLI` and `Fission.Tests` succeeded after C3. Latest CTest passed 632/632; `Samples/StressTests/run_all.ps1` passed 22/22 using the C3 CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-fastcall3`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
+GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeeded after C22. Latest CTest passed 633/633; `Samples/StressTests/run_all.ps1` passed 22/22 using the C22 CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c22`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
 
 ## Investigation completion gate
 
@@ -38,7 +38,7 @@ Source comparison pass is complete at emitter-family/inverse-boundary level. It 
 |---|---|---|---|
 | Constants, local aliases, imports, register allocation | BytecodeLifter, SSA, ASTLifter expressions | candidate | Import pool index mismatch C1; aliases/O0/O2 still under review. |
 | Unary/binary ops, comparisons, logical values, if-expressions | BytecodeLifter, CFA, SSA, ASTLifter conditions/expressions | candidate | Operand shapes align; boolean diamonds and effect order still under review. |
-| Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched, wider multiple-value cases remain. |
+| Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched; unbounded dependent arithmetic expression C22 confirmed. |
 | If/elseif, while, repeat, numeric/generic for, break/continue | BytecodeLifter, CFA, SSA, ASTLifter control flow | candidate | Numeric-for shorthand C4 explained; folded jumps and repeat/continue still under review. |
 | Calls, method calls, FASTCALL, FASTPCALL, CALLFB | BytecodeLifter, SSA, ASTLifter expressions | candidate | Fallback layout aligns; FASTCALL3 union write C3 fixed; variable arity still under review. |
 | Closures, captures, upvalues, closing | BytecodeLifter, SSA, ASTLifter inlining/declarations | candidate | VAL/REF/UPVAL source maps to CAPTURE; identity/effect order still under review. |
@@ -124,6 +124,8 @@ Compiler does not remove a nonconstant `local unused = global` at O1: `areLocals
 
 **Directed probe:** Ten nested `if/else` arms around a `repeat` at O0 and O1 produced many branch blocks. The O0 post-latch exit was directly visible to `exitAt`; O1 jump folding produced return blocks. Both decompiled successfully with the same apparent branch and loop behavior. This does not exercise any hop cap and is not a regression test.
 
+**Long-jump follow-up:** A compiler-produced O0 program with 36,000 independent assignments in a cold branch emitted `LOP_JUMPX`. Luau's `BytecodeBuilder::foldJumps` skips forwarding-jump folding when a long jump exists. CFA retained eleven forwarding blocks between a jump and loop latch; the distant jump stayed `Standard` beyond the eight-hop `continue` bound. Decompiled output recompiled and matched VM trace on this case. This proves the cap is reachable but not a semantic failure. Temporary structural probe removed; C13 remains a candidate.
+
 ### C14 — repeat exit fallback selects unrelated return (`candidate`)
 
 When a repeat latch has no identified exit, `ControlFlowAnalyzer.cpp:1084-1117` scans *all* basic blocks and assigns the first `Return`, without checking reachability from the repeat condition. Compiler `compileStatRepeat` emits condition branching over a `JUMPBACK` to post-loop code (`Compiler/src/Compiler.cpp:3873-3973`); ASTLifter trusts recorded non-latch exits (`ASTLifter.cpp:1598-1607`). This fallback is suspicious, but a compiler-produced route into it remains unproved. Do not change it without a red example.
@@ -179,6 +181,16 @@ Luau `compileExprTable` flushes fixed list chunks before keyed items, then emits
 **Neighbouring forms:** Directed compiler/VM probes of arithmetic keys (`[base + 1]`, `[base + 2]`) with a variadic tail and an inline `return {[key()] = value(), 10, [key()] = value(), ...}` both matched after the fix. These probes were removed; the permanent tests target the two forms that failed before repair.
 
 **Conditional-key follow-up:** Two keys selected by `c and "x" or "y"` and `c and "a" or "b"` cross CFG branches and become SSA PHIs. `storeSiteSnapshotableKey` rejected PHIs because their synthetic `instructionIndex` is `-1` and `BlockOf` has no raw-instruction slot for them. The generic `SETLIST` fallback again truncated `(10, false)` to one result at O0/O1/O2 (3 failed trace assertions). A PHI key is materialized by branch reconstruction before the store, so the store can snapshot its value without replaying the condition. Accepting that key restores delayed table reconstruction; all three table regressions pass (36 assertions), full CTest 632/632, stress samples 22/22. A directed side-effecting branch-key probe also matched after the fix. No fuzzing run.
+
+### C22 — dependent arithmetic assignments form an uncompileable expression and overflow table-use recursion (`fixed`)
+
+Luau O0 compiles each `x += 1` into a register arithmetic operation. In a branch containing 1,000 dependent assignments, ASTLifter's single-use inliner joins them into one left-deep binary expression. SourceGenerator prints that tree as `v0 = v0 + 1 + ...`; Luau rejects the output with `Exceeded allowed recursion depth; simplify your expression to make the code compile`. A public `DecompileOrFail`/`CompilesOk` regression failed before repair (1 failed assertion). ASTLifter now materializes binary results before an inline left spine reaches 128 nodes, keeping expressions within Luau's parser depth.
+
+At 10,000 dependent assignments, decompilation also stack-overflowed (`0xc00000fd`). The debugger showed repeated `ASTLifter::IsConstructorElement` frames at `ASTLifterInlining.cpp:820`: constructor-use classification recursively followed every later arithmetic consumer, even where no table existed. It now computes that invariant once in reverse instruction order and caches results. The permanent compiler-produced 10,000-assignment regression recompiles and matches VM trace (5 assertions); an independent 10,000-assignment semantic-oracle replay also matches. Full CTest passed 633/633 and stress samples passed 22/22. At 36,000 assignments the pipeline now completes without a crash, but generated locals exhaust Luau registers (C23).
+
+### C23 — many materialized SSA versions exhaust Luau local/register limits (`shelved`)
+
+With C22 repaired, 36,000 dependent assignments decompile without crashing, but Luau rejects generated source with `Out of registers when trying to allocate 1 registers: exceeded limit 255`. Smaller inline chunks instead hit `Out of local registers ... exceeded limit 200`. This is the previously known output-local limit that the user explicitly shelved. Do not conflate it with C22's recursion and expression-depth defects; leave general lifetime/name compaction for later work.
 
 ## Source audit log
 

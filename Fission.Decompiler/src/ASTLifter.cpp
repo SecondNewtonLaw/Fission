@@ -236,6 +236,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_phiConsumers.clear();
     this->m_deferToConditionInline.clear();
     this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
+    this->m_inlineBinaryDepth.clear();
+    this->m_constructorElementMemo.clear();
     this->m_shouldInlineActive.clear();
     this->m_mergeCache.clear(); // keyed by this function's block ids
     this->m_forwardReach.clear();

@@ -284,3 +284,14 @@ make(false, 10, false))LUA";
         lifting_semantics_test::CheckSameTrace(source, output, optLevel);
     }
 }
+
+TEST_CASE("Compiler arithmetic chains remain recompilable", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    std::string source = "local x = 0\ncold = true\nif cold then\n";
+    for (int i = 0; i < 10000; ++i)
+        source += "x += 1\n";
+    source += "end\nreturn x\n";
+    const auto output = lifting_semantics_test::DecompileOrFail(source, 0);
+    REQUIRE(lifting_semantics_test::CompilesOk(output));
+    lifting_semantics_test::CheckSameTrace(source, output, 0);
+}

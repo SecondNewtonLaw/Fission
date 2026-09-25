@@ -232,6 +232,7 @@ void ASTLifter::KeepOrderedCompoundAssignments() {
     for (bool dropped = true; dropped;) {
         dropped = false;
         m_shouldInlineMemo.clear();
+        m_inlineBinaryDepth.clear();
         for (auto it = m_compoundAssignments.begin(); it != m_compoundAssignments.end(); ++it) {
             const auto *store = it->first, *op = it->second.operation, *load = it->second.inlined.front();
             const SSARef loaded{static_cast<uint8_t>(load->operands[0].value.reg), load->operands[0].ssaVersion};
@@ -255,6 +256,7 @@ void ASTLifter::KeepOrderedCompoundAssignments() {
             if (instructions[k].operation != LiftedOperation::NOP)
                 m_compoundInlined.insert(&instructions[k]);
     m_shouldInlineMemo.clear();
+    m_inlineBinaryDepth.clear();
 }
 
 // The analysis a decision reads is fixed for the whole function lift, so answers are memoized.
@@ -265,9 +267,26 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     // answer is still being computed stays materialized
     if (!m_shouldInlineActive.insert(inst).second)
         return false;
-    const bool r = ShouldInlineImpl(inst);
+    bool r = ShouldInlineImpl(inst);
+    uint8_t binaryDepth = 0;
+    if (r && !m_compoundInlined.contains(inst) && BinaryOperatorSymbol(inst->operation) && inst->operands.size() > 1) {
+        binaryDepth = 1;
+        if (inst->operands[1].type == LiftedOperandType::Register) {
+            const auto *input = m_currentFunction->GetDefinition(inst->operands[1]);
+            if (input && input->instructionIndex < inst->instructionIndex && BinaryOperatorSymbol(input->operation)) {
+                const auto prior = m_inlineBinaryDepth.find(input);
+                if (prior == m_inlineBinaryDepth.end())
+                    r = false;
+                else
+                    binaryDepth += prior->second;
+            }
+        }
+        if (binaryDepth >= 128)
+            r = false;
+    }
     m_shouldInlineActive.erase(inst);
     m_shouldInlineMemo[inst] = r;
+    m_inlineBinaryDepth[inst] = r ? binaryDepth : 0;
     return r;
 }
 
@@ -762,53 +781,66 @@ bool ASTLifter::RendersInline(const LiftedInstruction *inst) {
 
 // True if the value `e` produces only feeds table-constructor building, so it renders inside a `{ ... }` literal.
 bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
-    if (e->operands.empty() || e->operands[0].type != LiftedOperandType::Register)
-        return false;
-    if (e->operation == LiftedOperation::NAMECALL || e->operation == LiftedOperation::NAMECALLUDATA) {
-        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
-        for (int32_t i = e->instructionIndex + 1; i < static_cast<int32_t>(instructions.size()); ++i) {
-            if (instructions[i].operation == LiftedOperation::NOP)
-                continue;
-            return (instructions[i].operation == LiftedOperation::CALL || instructions[i].operation == LiftedOperation::CALLFB) &&
-                   IsConstructorElement(&instructions[i]);
-        }
-        return false;
-    }
-
-    std::vector<SSARef> refs;
-    if (const auto defs = m_defsByInstruction.find(e); defs != m_defsByInstruction.end())
-        refs = defs->second;
-    else
-        refs.push_back({e->operands[0].value.reg, e->operands[0].ssaVersion});
-
-    bool found = false;
-    for (const auto &ref : refs) {
-        const auto users = m_currentFunction->users.find(ref);
-        if (users == m_currentFunction->users.end() || users->second.empty())
-            continue;
-        found = true;
-        for (const auto *user : users->second) {
-            if (user->operation == LiftedOperation::SETLIST) {
-                const auto *tableDef = user->operands.empty() ? nullptr : m_currentFunction->GetDefinition(user->operands[0]);
-                if (tableDef && tableDef->instructionIndex < e->instructionIndex)
+    const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+    const auto evaluate = [&](const LiftedInstruction *current) {
+        if (current->operands.empty() || current->operands[0].type != LiftedOperandType::Register)
+            return false;
+        if (current->operation == LiftedOperation::NAMECALL || current->operation == LiftedOperation::NAMECALLUDATA) {
+            for (int32_t i = current->instructionIndex + 1; i < static_cast<int32_t>(instructions.size()); ++i) {
+                if (instructions[i].operation == LiftedOperation::NOP)
                     continue;
-                return false;
-            }
-            if (user->instructionIndex > e->instructionIndex &&
-                (user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB || m_defsByInstruction.contains(user)) &&
-                IsConstructorElement(user))
-                continue;
-            if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
-                 user->operation == LiftedOperation::SETTABLEN) &&
-                StoreTargetsFreshTable(user)) {
-                const auto *tableDef = user->operands.size() > 1 ? m_currentFunction->GetDefinition(user->operands[1]) : nullptr;
-                if (tableDef && tableDef->instructionIndex < e->instructionIndex)
-                    continue;
+                const auto next = m_constructorElementMemo.find(&instructions[i]);
+                return (instructions[i].operation == LiftedOperation::CALL || instructions[i].operation == LiftedOperation::CALLFB) &&
+                       next != m_constructorElementMemo.end() && next->second;
             }
             return false;
         }
+
+        std::vector<SSARef> refs;
+        if (const auto defs = m_defsByInstruction.find(current); defs != m_defsByInstruction.end())
+            refs = defs->second;
+        else
+            refs.push_back({current->operands[0].value.reg, current->operands[0].ssaVersion});
+
+        bool found = false;
+        for (const auto &ref : refs) {
+            const auto users = m_currentFunction->users.find(ref);
+            if (users == m_currentFunction->users.end() || users->second.empty())
+                continue;
+            found = true;
+            for (const auto *user : users->second) {
+                if (user->operation == LiftedOperation::SETLIST) {
+                    const auto *tableDef = user->operands.empty() ? nullptr : m_currentFunction->GetDefinition(user->operands[0]);
+                    if (tableDef && tableDef->instructionIndex < current->instructionIndex)
+                        continue;
+                    return false;
+                }
+                if (user->instructionIndex > current->instructionIndex &&
+                    (user->operation == LiftedOperation::CALL || user->operation == LiftedOperation::CALLFB || m_defsByInstruction.contains(user))) {
+                    const auto next = m_constructorElementMemo.find(user);
+                    if (next != m_constructorElementMemo.end() && next->second)
+                        continue;
+                }
+                if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
+                     user->operation == LiftedOperation::SETTABLEN) &&
+                    StoreTargetsFreshTable(user)) {
+                    const auto *tableDef = user->operands.size() > 1 ? m_currentFunction->GetDefinition(user->operands[1]) : nullptr;
+                    if (tableDef && tableDef->instructionIndex < current->instructionIndex)
+                        continue;
+                }
+                return false;
+            }
+        }
+        return found;
+    };
+
+    if (m_constructorElementMemo.empty()) {
+        m_constructorElementMemo.reserve(instructions.size());
+        for (auto it = instructions.rbegin(); it != instructions.rend(); ++it)
+            m_constructorElementMemo.emplace(&*it, evaluate(&*it));
     }
-    return found;
+    const auto result = m_constructorElementMemo.find(e);
+    return result != m_constructorElementMemo.end() ? result->second : evaluate(e);
 }
 
 // True if a store fills a fresh NEWTABLE/DUPTABLE constructor rather than mutating an existing table.
