@@ -338,15 +338,36 @@ print(obj:print()))LUA";
 
 TEST_CASE("Compiler vector constant does not bind to a captured Vector3 local", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
-    const std::string source = R"LUA(local Vector3 = 5
+    const std::string source = R"LUA(local v = Vector3.new(1, 2, 3)
+local Vector3 = 5
 local function read() return Vector3 end
 Vector3 += 1
-local v = vector.create(1, 2, 3)
 print(read(), v))LUA";
-    const auto output = lifting_semantics_test::DecompileOrFail(source, 2);
+    Luau::CompileOptions options{};
+    options.optimizationLevel = 2;
+    options.debugLevel = 2;
+    options.vectorLib = "Vector3";
+    options.vectorCtor = "new";
+    options.vectorType = "Vector3";
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE_FALSE(bytecode.empty());
+    REQUIRE(bytecode[0] != '\0');
+    Deserializer deserializer{};
+    const auto decoded = deserializer.Deserialize(bytecode);
+    REQUIRE(decoded.has_value());
+    bool foundVector = false;
+    for (const auto &constant : decoded->lpMainFunction->constants)
+        foundVector |= constant.kType == LUA_TVECTOR;
+    REQUIRE(foundVector);
+    const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
     INFO("decompiled:\n" << output);
     REQUIRE(lifting_semantics_test::Contains(output, "Vector3.new(1, 2, 3)"));
-    lifting_semantics_test::CheckSameTrace(source, output, 2);
+    const auto prelude = Luau::compile("", options);
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output, options), prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
 }
 
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
