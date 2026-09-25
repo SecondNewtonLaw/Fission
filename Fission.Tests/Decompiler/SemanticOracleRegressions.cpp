@@ -15,3 +15,14 @@ TEST_CASE("Semantic oracle normalizes runtime addresses in printed strings", "[F
     CHECK(verdict.original.trace == "\"function: <address>\"\nreturn: 1\n");
     CHECK(verdict.decompiled.trace == verdict.original.trace);
 }
+
+TEST_CASE("Semantic oracle runs Roblox Vector3 constants", "[Fuzz][SemanticOracle]") {
+    const std::string prelude = Luau::compile("");
+    const auto verdict = fuzz::CompareSemantics(
+        Luau::compile("return vector.create(1, 2, 3), vector.zero, vector.create(1, 0, 0)"),
+        Luau::compile("return Vector3.new(1, 2, 3), Vector3.zero, Vector3.xAxis"), {prelude}
+    );
+
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+    CHECK(verdict.original.trace == "return: vec(1,2,3)\tvec(0,0,0)\tvec(1,0,0)\n");
+}

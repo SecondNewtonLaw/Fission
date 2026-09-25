@@ -233,6 +233,24 @@ namespace fuzz {
             return result;
         luaL_openlibs(L);
 
+        lua_getglobal(L, "vector");
+        lua_getglobal(L, "table");
+        lua_getfield(L, -1, "clone");
+        lua_pushvalue(L, -3);
+        lua_call(L, 1, 1);
+        lua_getfield(L, -3, "create");
+        lua_setfield(L, -2, "new");
+        for (int axis = 0; axis < 3; ++axis) {
+#if LUA_VECTOR_SIZE == 4
+            lua_pushvector(L, axis == 0, axis == 1, axis == 2, 0);
+#else
+            lua_pushvector(L, axis == 0, axis == 1, axis == 2);
+#endif
+            lua_setfield(L, -2, axis == 0 ? "xAxis" : axis == 1 ? "yAxis" : "zAxis");
+        }
+        lua_setglobal(L, "Vector3");
+        lua_pop(L, 2);
+
         std::string trace;
         lua_pushlightuserdata(L, &trace);
         lua_pushcclosure(L, detail::TracePrint, "print", 1);
