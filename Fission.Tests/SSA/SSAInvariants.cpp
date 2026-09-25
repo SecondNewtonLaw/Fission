@@ -322,6 +322,16 @@ TEST_CASE("SSA: reaching definitions match VM dataflow", "[SSA][Invariant][Oracl
     );
     // numeric-for limit from a branch merge inside an outer loop
     CheckSSA("local function f(c) local n = 0 repeat for i = 1, (if c then 2 else 3) do print(i) end n += 1 until n == 2 end return f");
+    CheckSSA(
+        R"(local function dispatch(n)
+        local result = 1
+        if n == 1 then result += 2 return result end
+        if n == 2 then result += 3 return result end
+        return result
+    end
+    return dispatch(1), dispatch(2), dispatch(3))",
+        2
+    );
 }
 
 TEST_CASE("SSA: straight-line code is sound", "[SSA][Invariant]") {

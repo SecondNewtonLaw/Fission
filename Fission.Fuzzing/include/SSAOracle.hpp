@@ -495,7 +495,9 @@ namespace fuzz {
                     const int32_t pc = opStarts[k];
                     const auto &access = accesses[k];
                     const LiftedInstruction *inst = fissionAt[pc];
-                    if (inst && inst->operation != LiftedOperation::NOP) {
+                    // CFA redirects copied returns to a shared return; the original read moves there.
+                    if (inst && inst->operation != LiftedOperation::NOP &&
+                        !(LUAU_INSN_OP(code[pc]) == LOP_RETURN && inst->operation == LiftedOperation::JUMP)) {
                         std::map<int, std::set<int32_t>> versions;
                         for (size_t i = 0; i < inst->operands.size(); ++i) {
                             const auto &operand = inst->operands[i];
