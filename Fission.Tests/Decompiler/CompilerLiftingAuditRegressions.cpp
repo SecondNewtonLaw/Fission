@@ -490,6 +490,46 @@ TEST_CASE("Compiler nonfinite vector components survive source generation", "[De
     CHECK(reconstructed.trace == original.trace);
 }
 
+TEST_CASE("Inlined early return preserves the natural loop exit", "[Decompiler][CompilerAudit][Semantics]") {
+    const std::string body = R"LUA(print((function()
+    local x = 0
+    if flag then
+        while x < 1 do
+            if early then return x end
+            x += 1
+        end
+    end
+    print("after short", x)
+    return x
+end)()))LUA";
+    for (const std::string prefix : {"flag = true\n", "early = true\nflag = true\n", "flag = false\n"}) {
+        const auto source = prefix + body;
+        const auto output = lifting_semantics_test::DecompileOrFail(source, 2);
+        INFO("decompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(source, output, 2);
+    }
+
+    std::string longBody = body;
+    const auto returnAt = longBody.find("    return x\n");
+    REQUIRE(returnAt != std::string::npos);
+    for (int i = 0; i < 20; ++i)
+        longBody.insert(returnAt, "    print(\"tail\", x)\n");
+    const auto longSource = "flag = true\n" + longBody;
+    const auto longOutput = lifting_semantics_test::DecompileOrFail(longSource, 2);
+    INFO("decompiled long tail:\n" << longOutput);
+    lifting_semantics_test::CheckSameTrace(longSource, longOutput, 2);
+
+    std::string branchedBody = body;
+    const auto branchAt = branchedBody.find("    return x\n");
+    REQUIRE(branchAt != std::string::npos);
+    for (int i = 0; i < 8; ++i)
+        branchedBody.insert(branchAt, "    if branch" + std::to_string(i) + " then print(\"yes\", x) else print(\"no\", x) end\n");
+    const auto branchedSource = "flag = true\n" + branchedBody;
+    const auto branchedOutput = lifting_semantics_test::DecompileOrFail(branchedSource, 2);
+    INFO("decompiled branched tail:\n" << branchedOutput);
+    lifting_semantics_test::CheckSameTrace(branchedSource, branchedOutput, 2);
+}
+
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     std::string source = "local u = 1\nlocal function f()\nlocal a0 = u\n";

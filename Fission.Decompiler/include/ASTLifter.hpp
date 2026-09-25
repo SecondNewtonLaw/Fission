@@ -265,8 +265,8 @@ class ASTLifter {
     bool IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) const;
     // Extend safe re-lifting across pure short-circuit regions that reconverge at one merge.
     bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
-    // Blocks of a small forward region entered only at `start` and ending at `stop` or a return.
-    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop) const;
+    // Blocks of a forward region entered only at `start` and ending at `stop` or a return.
+    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6) const;
     // Cap value-arm re-lifts for pathological CFGs.
     uint32_t m_valueArmDuplications = 0;
 

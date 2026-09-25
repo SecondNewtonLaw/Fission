@@ -227,12 +227,11 @@ bool ASTLifter::IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) con
     return feedsMergePhi;
 }
 
-std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop) const {
+std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions, size_t maxBlocks) const {
     const auto &blocks = m_currentFunction->basicBlocks;
     if (start >= blocks.size() || stop >= blocks.size() || start == stop)
         return std::nullopt;
-    // small, forward-only, entered only through `start`, and ending at `stop`, a return, or a `break` out of the innermost loop
-    constexpr size_t kMaxBlocks = 6, kMaxInstructions = 64;
+    // forward-only, entered only through `start`, and ending at `stop`, a return, or a `break` out of the innermost loop
     const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
     std::vector<uint32_t> region;
     boost::unordered_flat_set<uint32_t> inRegion;
@@ -248,11 +247,11 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
         if (!inRegion.insert(id).second)
             continue;
         const auto &block = blocks[id];
-        if (inRegion.size() > kMaxBlocks || !block.lpHead || (block.successors.empty() && block.bType != BlockType::Return) ||
+        if (inRegion.size() > maxBlocks || !block.lpHead || (block.successors.empty() && block.bType != BlockType::Return) ||
             std::ranges::find(m_liftingBlocks, id) != m_liftingBlocks.end())
             return std::nullopt;
         instructions += static_cast<size_t>(block.lpTail - block.lpHead) + 1;
-        if (instructions > kMaxInstructions)
+        if (instructions > maxInstructions)
             return std::nullopt;
         for (const uint32_t successor : block.successors) {
             // a loop wholly inside the tail is copied with it; a back-edge out of the region is not

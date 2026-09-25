@@ -2261,6 +2261,22 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         bodyVisited.erase(currentBlockId);
                         bodyVisited.insert(latchIdx);
                         if (deferredExit) {
+                            for (const uint32_t successor : headerBlock.successors) {
+                                if (successor == *block.loopExit || !bodyVisited.contains(successor) ||
+                                    CanReach(successor, latchIdx, currentBlockId, {currentBlockId}) ||
+                                    !CanReach(successor, *block.loopExit, currentBlockId, {currentBlockId}))
+                                    continue;
+                                if (const auto region = SharedTailRegion(
+                                        successor, *block.loopExit, m_currentFunction->lpLiftedFunction->instructions.size(),
+                                        m_currentFunction->basicBlocks.size()
+                                    ))
+                                    for (const uint32_t id : *region) {
+                                        bodyVisited.erase(id);
+                                        const auto &tail = m_currentFunction->basicBlocks[id];
+                                        for (const LiftedInstruction *instruction = tail.lpHead; instruction && instruction <= tail.lpTail; ++instruction)
+                                            m_processedInstructions.erase(instruction->instructionIndex);
+                                    }
+                            }
                             bodyVisited.insert(*block.loopExit);
                             m_loopExitStack.push_back(*block.loopExit);
                             // a value first written by the loop's break arms is read after it: declare it ahead of the loop

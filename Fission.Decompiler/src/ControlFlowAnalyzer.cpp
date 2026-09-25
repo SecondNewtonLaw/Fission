@@ -633,9 +633,20 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                 }
         }
         const auto chain = [&](uint32_t start) {
-            std::vector<uint32_t> path{start};
-            for (int hops = 0; hops < 16 && blocks[path.back()].successors.size() == 1 && blocks[path.back()].successors[0] > path.back(); ++hops)
-                path.push_back(blocks[path.back()].successors[0]);
+            std::vector<uint32_t> path;
+            std::vector<uint32_t> pending{start};
+            std::vector<bool> seen(blocks.size());
+            while (!pending.empty()) {
+                const uint32_t id = pending.back();
+                pending.pop_back();
+                if (id >= blocks.size() || seen[id])
+                    continue;
+                seen[id] = true;
+                path.push_back(id);
+                for (const uint32_t successor : blocks[id].successors)
+                    if (successor > id)
+                        pending.push_back(successor);
+            }
             return path;
         };
         std::vector<std::vector<uint32_t>> exits;
@@ -649,15 +660,37 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     exits.push_back(chain(succ));
             }
         }
-        const bool bypassesNatural = std::ranges::any_of(exits, [&](const auto &path) {
-            return path.front() < latch.dwBlockId && std::ranges::find(path, *natural) == path.end();
-        });
+        const bool bypassesNatural =
+            std::ranges::any_of(exits, [&](const auto &path) { return path.front() < latch.dwBlockId && std::ranges::find(path, *natural) == path.end(); });
         if (exits.size() < 2 || !bypassesNatural)
             return exit;
+        const auto postDominates = [&](uint32_t start, uint32_t candidate) {
+            std::vector<uint32_t> pending{start};
+            std::vector<bool> seen(blocks.size());
+            while (!pending.empty()) {
+                const uint32_t id = pending.back();
+                pending.pop_back();
+                if (id == candidate)
+                    continue;
+                if (id >= blocks.size() || blocks[id].successors.empty())
+                    return false;
+                if (seen[id])
+                    continue;
+                seen[id] = true;
+                for (const uint32_t successor : blocks[id].successors) {
+                    if (successor <= id)
+                        return false;
+                    pending.push_back(successor);
+                }
+            }
+            return true;
+        };
         for (const uint32_t candidate : exits.front()) {
             if (candidate <= latch.dwBlockId)
                 continue;
-            if (std::ranges::all_of(exits, [&](const auto &path) { return std::ranges::find(path, candidate) != path.end(); }))
+            if (std::ranges::all_of(exits, [&](const auto &path) {
+                    return std::ranges::find(path, candidate) != path.end() && postDominates(path.front(), candidate);
+                }))
                 return candidate == *natural ? exit : candidate;
         }
         return exit;
