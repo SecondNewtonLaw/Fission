@@ -537,6 +537,9 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         if (users.size() == 1) {
             // `x = f()` into an existing local lands in a temporary and moves down into the local's register
             const auto *user = *users.begin();
+            if (BeginsDebugLocal(*inst, usedRef.regIndex) && IsTableStore(*user) && user->operands.size() > 1 &&
+                StoredTable(*user).value.reg == usedRef.regIndex && StoredTable(*user).ssaVersion == usedRef.version)
+                return false;
             const bool assignsLocal = user->operation == LiftedOperation::MOVE && user->operands.size() > 1 &&
                                       user->operands[1].type == LiftedOperandType::Register && user->operands[0].value.reg < user->operands[1].value.reg;
             if (EvaluatesInlinedCall(user->operation, true) || assignsLocal)
@@ -1094,7 +1097,14 @@ bool ASTLifter::ReadLocationChanged(const LiftedInstruction *def) {
         return true;
     if (!reads.capturedLocal && reads.globals.empty() && reads.upvalues.empty())
         return false;
-    const SSARef value{static_cast<uint8_t>(def->operands[0].value.reg), def->operands[0].ssaVersion};
+    const auto defs = m_defsByInstruction.find(def);
+    if (defs == m_defsByInstruction.end())
+        return true;
+    const auto result = std::ranges::find_if(defs->second, [&](const SSARef &ref) { return ref.regIndex == def->operands[0].value.reg; });
+    if (result == defs->second.end())
+        return true;
+    // CALL operand 0 carries the callee's input version, not the result's version.
+    const SSARef value = *result;
     const auto writes = [&](const LiftedInstruction &inst, const LiftedInstruction *user) {
         if (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB)
             return !RendersAfter(inst, value, user);

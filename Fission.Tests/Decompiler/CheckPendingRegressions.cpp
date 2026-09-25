@@ -219,6 +219,26 @@ print(`v={n} 100%`, `{f(5)}{"lit"}\{`, t[1]))LUA";
     CheckTraceWith(source, optimization, 1);
 }
 
+TEST_CASE("Check pending N4 O0: nested arguments keep the callee inline", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(print(type(rawget(_G, "x")), type(rawget(_G, "y"))))LUA";
+    const auto output = DecompileWith(source, 0, 1, static_cast<DecompilerFlags>(0));
+    INFO(output);
+    CHECK_FALSE(lifting_semantics_test::Contains(output, "= print"));
+    CHECK(lifting_semantics_test::Contains(output, "print(type(rawget(_G, \"x\")), type(rawget(_G, \"y\")))"));
+    CheckTraceWith(source, 0, 1);
+    const std::string mutatingArgument = R"LUA(
+local original = print
+print = function(a, b) original("before", a, b) end
+local function change()
+    print = function(a, b) original("after", a, b) end
+    return "x"
+end
+print(change(), type(rawget(_G, "missing")))
+)LUA";
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(mutatingArgument, optimization, 1);
+}
+
 TEST_CASE("Check pending: the most negative integer constant renders as valid source", "[Decompiler][CheckPending][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     Luau::BytecodeBuilder builder{};
