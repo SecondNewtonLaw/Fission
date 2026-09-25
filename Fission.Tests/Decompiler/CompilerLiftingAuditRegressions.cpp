@@ -615,7 +615,7 @@ print(a == b, a(), b()))LUA";
     }
 }
 
-TEST_CASE("O2 shared captured closures retain identity", "[Decompiler][CompilerAudit][Semantics]") {
+TEST_CASE("Shared captured closures retain identity across repeated factory calls", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     const std::string source = R"LUA(input = 7
 local stable = input
@@ -625,20 +625,22 @@ end
 local a = factory()
 local b = factory()
 print(a == b, a(), b()))LUA";
-    Luau::CompileOptions options{};
-    options.optimizationLevel = 2;
-    options.debugLevel = 0;
-    Decompiler decompiler{};
-    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), options);
-    REQUIRE(result.resultCode == DecompileResult::Success);
-    const auto prelude = Luau::compile("", options);
-    const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
-    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.decompilationOutput, options), prelude);
-    INFO("decompiled:\n" << result.decompilationOutput);
-    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
-    REQUIRE(original.trace.find("true") != std::string::npos);
-    REQUIRE(reconstructed.status == original.status);
-    CHECK(reconstructed.trace == original.trace);
+    for (int optLevel : {1, 2}) {
+        Luau::CompileOptions options{};
+        options.optimizationLevel = optLevel;
+        options.debugLevel = 0;
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), options);
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        const auto prelude = Luau::compile("", options);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
+        const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.decompilationOutput, options), prelude);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << result.decompilationOutput);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+        REQUIRE(original.trace.find("true") != std::string::npos);
+        REQUIRE(reconstructed.status == original.status);
+        CHECK(reconstructed.trace == original.trace);
+    }
 }
 
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
