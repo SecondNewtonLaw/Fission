@@ -12,7 +12,7 @@ States: `unchecked`, `source-consistent`, `candidate`, `confirmed`, `fixed`, `sh
 
 ## Verification checkpoint, 2026-09-24
 
-GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeeded after C22. Latest CTest passed 633/633; `Samples/StressTests/run_all.ps1` passed 22/22 using the C22 CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c22`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
+GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeeded after C24. Latest CTest passed 634/634; `Samples/StressTests/run_all.ps1` passed 22/22 using the C24 CLI and isolated `cmake-build-fuzz-current/stress-audit-2026-09-24-c24`. Individual “Full suite pending” notes below describe their earlier red/green checkpoints and are superseded by these results. `clang-tidy` could not parse this GCC build's standard library (`'array' file not found`); its default invocation also emitted pre-existing repository warnings, so tidy provides no clean gate here. No fuzzing was run.
 
 ## Investigation completion gate
 
@@ -41,7 +41,7 @@ Source comparison pass is complete at emitter-family/inverse-boundary level. It 
 | Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched; unbounded dependent arithmetic expression C22 confirmed. |
 | If/elseif, while, repeat, numeric/generic for, break/continue | BytecodeLifter, CFA, SSA, ASTLifter control flow | candidate | Numeric-for shorthand C4 explained; folded jumps and repeat/continue still under review. |
 | Calls, method calls, FASTCALL, FASTPCALL, CALLFB | BytecodeLifter, SSA, ASTLifter expressions | candidate | Fallback layout aligns; FASTCALL3 union write C3 fixed; variable arity still under review. |
-| Closures, captures, upvalues, closing | BytecodeLifter, SSA, ASTLifter inlining/declarations | candidate | VAL/REF/UPVAL source maps to CAPTURE; identity/effect order still under review. |
+| Closures, captures, upvalues, closing | BytecodeLifter, SSA, ASTLifter inlining/declarations | candidate | VAL/REF/UPVAL source maps to CAPTURE; debug-name shadowing C24 fixed, other identity/effect order still under review. |
 | Tables and all key/list store variants | Deserializer, BytecodeLifter, SSA, ASTLifter expressions/rewriters | candidate | `DUPTABLE` seed/store order source-consistent (C2 resolved); delayed variadic `SETLIST` C21 fixed, other key/list combinations under review. |
 | O2 inlining/unrolling/constant folding | CFA, SSA, ASTLifter | candidate | Inlined body reuses ordinary opcodes and joins return JUMPs; branch/phi output still under review. |
 | BytecodeBuilder jump folding/expansion | BytecodeLifter, CFA | candidate | Forward jump threading and JUMPX trampoline mapped; long-loop behavior still under review. |
@@ -193,6 +193,12 @@ At 10,000 dependent assignments, decompilation also stack-overflowed (`0xc00000f
 ### C23 — many materialized SSA versions exhaust Luau local/register limits (`shelved`)
 
 With C22 repaired, 36,000 dependent assignments decompile without crashing, but Luau rejects generated source with `Out of registers when trying to allocate 1 registers: exceeded limit 255`. Smaller inline chunks instead hit `Out of local registers ... exceeded limit 200`. This is the previously known output-local limit that the user explicitly shelved. Do not conflate it with C22's recursion and expression-depth defects; leave general lifetime/name compaction for later work.
+
+### C24 — method closure debug name shadows a live local (`fixed`)
+
+Luau writes a function's source debug name to its proto at debug level 1+ (`Compiler.cpp:561-562`). A later `function obj:count()` can therefore carry the same debug name as an earlier live `local function count()`, even though the bytecode stores distinct closures. ASTLifter used each proto name for a same-scope `local function count`, so the second declaration rebound reads of the first. With the method capturing `count`, its body became `return count()` and called itself until stack overflow. With no capture, a later `count()` called the method closure and returned the wrong value. The public semantic oracle diverged at O0/O1 on both compiler-produced cases before repair.
+
+`SeedEnclosingNames` already collects visible parent bindings for a nested function. ASTLifter now uses that set to suffix a colliding closure name, pinning the distinct name to only its destination SSA version before capture aliases and the nested body are lifted. Only a new binding qualifies: the first version also renamed `f = function() ... end` and `fib = memo(fib)`, breaking two existing semantic regressions. That trial failed 2/634 full CTest tests and was narrowed; both reassignment regressions then passed. A single new regression covers capturing and noncapturing method closures at O0/O1; both were red before the fix and pass after it. The original pcall/method multret case and a nested recursive same-name closure also match VM traces after the change. Final CTest passed 634/634 and stress samples 22/22.
 
 ## Source audit log
 

@@ -178,6 +178,20 @@ static bool IsValidLuauIdent(const std::string &s) {
     return true;
 }
 
+static std::string DisambiguateClosureName(
+    AnalyzedFunction &parent, const AnalyzedFunction &child, const LiftedOperand &destination, int32_t bytecodeId, bool createsBinding, std::string name
+) {
+    if (!createsBinding || parent.IsConsumedByPhi(destination) || !child.enclosingNames.contains(name))
+        return name;
+
+    const std::string base = std::format("{}_{}", name, bytecodeId);
+    std::string unique = base;
+    for (size_t index = 2; child.enclosingNames.contains(unique); ++index)
+        unique = std::format("{}_{}", base, index);
+    parent.ssaOverrides[{static_cast<uint8_t>(destination.value.reg), destination.ssaVersion}] = unique;
+    return unique;
+}
+
 std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Expression> &cond) {
     if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
         return unary->operand;
@@ -3267,6 +3281,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
                 name != m_currentFunction->ssaOverrides.end())
                 funcName = name->second;
+            funcName = DisambiguateClosureName(
+                *m_currentFunction, *targetFunc, inst.operands[0], duplicatedFunction->bytecodeId,
+                !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]), std::move(funcName)
+            );
 
             size_t capIdx = 0;
             while (i + 1 + capIdx < m_currentFunction->lpLiftedFunction->instructions.size()) {
@@ -3539,6 +3557,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
                 name != m_currentFunction->ssaOverrides.end())
                 funcName = name->second;
+            funcName = DisambiguateClosureName(
+                *m_currentFunction, *targetFunc, inst.operands[0], proto->bytecodeId,
+                !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]), std::move(funcName)
+            );
 
             size_t capIdx = 0;
             while (i + 1 + capIdx < m_currentFunction->lpLiftedFunction->instructions.size()) {

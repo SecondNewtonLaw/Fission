@@ -295,3 +295,31 @@ TEST_CASE("Compiler arithmetic chains remain recompilable", "[Decompiler][Compil
     REQUIRE(lifting_semantics_test::CompilesOk(output));
     lifting_semantics_test::CheckSameTrace(source, output, 0);
 }
+
+TEST_CASE("Compiler method debug name does not shadow a live local", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string capturesOuter = R"LUA(local function count()
+    print("outer")
+    return 3
+end
+local obj = {}
+function obj:count()
+    return count()
+end
+print(obj:count(), count()))LUA";
+    const std::string usesOuterLater = R"LUA(local function count()
+    return 3
+end
+local obj = {}
+function obj:count()
+    return 4
+end
+print(obj:count(), count()))LUA";
+    for (int optLevel : {0, 1}) {
+        for (const auto &source : {capturesOuter, usesOuterLater}) {
+            const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+            INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+            lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+        }
+    }
+}
