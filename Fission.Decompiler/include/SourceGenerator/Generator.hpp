@@ -34,6 +34,10 @@ class SourceGenerator : public Visitor {
     static constexpr int kMaxTableDepth = 256;
     int m_tableDepth = 0;
     std::unordered_map<const TableLiteralNode *, std::string> m_tableInlineCache;
+    std::string m_vectorConstructorAlias;
+    bool m_sawVectorConstant = false;
+
+    bool SawVectorConstant() const { return m_sawVectorConstant; }
 
     // Luau precedence from lparser.cpp; lower numbers bind less tightly.
     static int OperatorPrecedence(const std::string &op) {
@@ -216,6 +220,10 @@ class SourceGenerator : public Visitor {
         // Header comments do not end first-statement context.
         bool first = true;
         for (const auto &body : lpNode->programBody) {
+            if (first && !m_vectorConstructorAlias.empty() && !std::dynamic_pointer_cast<CommentNode>(body)) {
+                buffer << "local " << m_vectorConstructorAlias << " = Vector3.new\n";
+                first = false;
+            }
             m_firstStmtInBlock = first;
             body->Accept(this);
             if (!std::dynamic_pointer_cast<CommentNode>(body))
@@ -735,10 +743,12 @@ class SourceGenerator : public Visitor {
         lpNode->identifier->Accept(this);
     }
 
-    std::string GenerateSource(RootNode *lpRoot) {
+    std::string GenerateSource(RootNode *lpRoot, std::string vectorConstructorAlias = {}) {
         // A SourceGenerator instance is reused across decompiles.
         buffer.str("");
         buffer.clear();
+        m_vectorConstructorAlias = std::move(vectorConstructorAlias);
+        m_sawVectorConstant = false;
         dwIndentationLevel = 0;
         m_minPrecedence = 0;
         m_tableDepth = 0;
@@ -1026,10 +1036,16 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(VectorNode *lpNode) override {
+        m_sawVectorConstant = true;
         std::visit(
             [&](const auto &components) {
                 const auto [x, y, z, w] = components;
                 (void)w;
+
+                if (!m_vectorConstructorAlias.empty()) {
+                    buffer << m_vectorConstructorAlias << "(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
+                    return;
+                }
 
                 if (x == 0 && y == 0 && z == 0)
                     buffer << "Vector3.zero";
