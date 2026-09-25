@@ -22,6 +22,8 @@ After C28, CTest passed 639/639, stress samples passed 22/22, and saved replay a
 
 After C29, CTest passed 639/639 and stress samples passed 22/22. Saved semantic replay still reported 560 passes and 2,408 unchecked sources among 2,968 unique inputs, with no reported divergence or compile failure. O2 SSA-oracle replay over 3,536 saved corpus files (including duplicates) checked 303,364 reads in 12,191 functions, skipped none, and reported no `WRONG_REACHING` or `MISSING_READ`. It still reported 392 files with `EXTRA_REACHING` over-approximations; those are not proof of exact SSA.
 
+The same saved corpus at O1 checked 325,420 reads in 12,041 functions with no skipped function or missing/wrong reaching definition; its remaining `EXTRA_REACHING` category counts matched O2. A fresh bounded O2 SSA campaign (seed 250926, 500 compiler-produced sources) checked 35,167 reads in 1,548 functions, with 38 `EXTRA_REACHING` files and no missing/wrong definition. A separate semantic campaign on the same seed had 212 VM matches, 288 semantically unchecked generated sources, and no reported divergence or hard fault. All 288 unchecked cases came from the generic AST generator; their counts are not semantic coverage.
+
 ## Investigation completion gate
 
 Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
