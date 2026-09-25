@@ -1037,7 +1037,6 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         std::vector<uint32_t> pending{start};
         bool reachesContinuation = false;
         bool reachesReturn = false;
-        bool hasEffect = false;
         while (!pending.empty()) {
             const uint32_t id = pending.back();
             pending.pop_back();
@@ -1047,7 +1046,6 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             }
             if (!m_loopExitStack.empty() && id == m_loopExitStack.back()) {
                 reachesReturn = true;
-                hasEffect = true;
                 continue;
             }
             if (id >= blocks.size())
@@ -1061,24 +1059,6 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 reachesReturn = true;
                 continue;
             }
-            if (candidate.lpHead && candidate.lpTail)
-                for (auto *instruction = candidate.lpHead; instruction <= candidate.lpTail; ++instruction)
-                    switch (instruction->operation) {
-                    case LiftedOperation::CALL:
-                    case LiftedOperation::CALLFB:
-                    case LiftedOperation::NAMECALL:
-                    case LiftedOperation::NAMECALLUDATA:
-                    case LiftedOperation::SETGLOBAL:
-                    case LiftedOperation::SETUPVAL:
-                    case LiftedOperation::SETTABLE:
-                    case LiftedOperation::SETTABLEKS:
-                    case LiftedOperation::SETTABLEN:
-                    case LiftedOperation::SETUDATAKS:
-                        hasEffect = true;
-                        break;
-                    default:
-                        break;
-                    }
             for (const uint32_t successor : candidate.successors) {
                 if (successor >= blocks.size())
                     return false;
@@ -1087,7 +1067,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 pending.push_back(successor);
             }
         }
-        return reachesContinuation && reachesReturn && hasEffect;
+        return reachesContinuation && reachesReturn;
     };
 
     // the innermost loop's latch is the one exiting to the innermost loop exit
@@ -1155,7 +1135,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
                     // single pure value block whose successor IS the merge: fall through and re-lift inline.
                     ++m_valueArmDuplications;
-                } else if (canDup && IsDuplicablePureRegion(currentBlockId, stopBlockId)) {
+                } else if ((canDup || (siblingTail && visitedBlock.bType == BlockType::IfHeader)) && IsDuplicablePureRegion(currentBlockId, stopBlockId)) {
                     // deeper shape (`a and (b or c) and d or e`): the shared value block is followed by
                     // further truthiness tests before the merge, so its successor is not the merge and the
                     // single-block check above rejects it. re-lift the whole pure reconverging sub-region

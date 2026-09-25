@@ -16,6 +16,8 @@ GCC Debug build of `Fission.CLI`, `Fission.Tests`, and `Fission.Fuzzing` succeed
 
 Current `Fission.Fuzzing.exe --replay-dir` over the saved 2026-09-22 four-batch campaign (`cmake-build-fuzz-current/ast-4x100k-20260922-155109`) processed 2,968 unique compiler-produced sources: 560 semantic passes (546 with differing opcode sequences), 2,408 semantically unchecked, and no current invalid output, forward reference, or reported semantic divergence. Five formerly divergent examples named in that campaign's `RESULTS.md` now produce identical error traces. This does not prove all 2,408 unchecked programs equivalent or diagnose the old campaign's abnormal process exit.
 
+After C27, `ctest --test-dir cmake-build-fuzz-current --output-on-failure` passed 638/638, stress samples passed 22/22, and a fresh replay of the same 2,968 unique sources reported 560 semantic passes and 2,408 unchecked cases with no reported failure. A separate effectful nested fallback preserved call order at O0/O1/O2. These checks bound the fix; unchecked replay cases remain unchecked.
+
 ## Investigation completion gate
 
 Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
@@ -27,7 +29,7 @@ Family-level opcode inventory alone is insufficient to prove lifting correctness
 | BytecodeLifter | All opcode operands, signs, register ranges, AUX ownership, synthetic NOPs and branch offsets | source review done for compiler output; C1/C3 fixed, semantic parity open |
 | CFA | Leaders, edge linking, jump direction, loop headers/latches, break/continue, graph rewriting and reachability | source review done for principal compiler shapes; C13/C14 parity open |
 | SSA | Explicit and implicit reads/defs, multret, phi placement, liveness, capture and loop edge versions | source review done for principal compiler shapes; C6 fixed, C19 resolved; C20 is a source-level abstraction |
-| ASTLifter | Expression, call, table, closure, condition, loop, inlining and statement placement paths | source review done for principal compiler shapes; C15 fixed, C14 and table/multret parity remain |
+| ASTLifter | Expression, call, table, closure, condition, loop, inlining and statement placement paths | source review done for principal compiler shapes; C15/C27 fixed, C14 and table/multret parity remain |
 | Rewriters and source generator | Every transformation that deletes, duplicates, reorders or aliases evaluation; rendering of all emitted nodes | source review done for principal mutation paths; C7/C9/C11/C18 fixed, C10 candidate |
 
 Record exact paths and outcomes, including rejected suspicions. Source review found concrete defects and remaining candidates; test each candidate against compiler-produced bytecode before changing production code.
@@ -39,7 +41,7 @@ Source comparison pass is complete at emitter-family/inverse-boundary level. It 
 | Compiler family | Inverse stages to inspect | State | Notes |
 |---|---|---|---|
 | Constants, local aliases, imports, register allocation | BytecodeLifter, SSA, ASTLifter expressions | candidate | Import pool index mismatch C1; aliases/O0/O2 still under review. |
-| Unary/binary ops, comparisons, logical values, if-expressions | BytecodeLifter, CFA, SSA, ASTLifter conditions/expressions | candidate | Operand shapes align; boolean diamonds and effect order still under review. |
+| Unary/binary ops, comparisons, logical values, if-expressions | BytecodeLifter, CFA, SSA, ASTLifter conditions/expressions | candidate | Operand shapes align; shared pure fallback C27 fixed; other boolean diamonds and effect order still under review. |
 | Assignment, compound assignment, multiple values | BytecodeLifter, SSA, ASTLifter expressions/statements, rewriters | candidate | Compiler evaluates complex l-values before right-hand values, then writes left to right; indexed-target order probe matched; unbounded dependent arithmetic expression C22 confirmed. |
 | If/elseif, while, repeat, numeric/generic for, break/continue | BytecodeLifter, CFA, SSA, ASTLifter control flow | candidate | Numeric-for shorthand C4 explained; folded jumps and repeat/continue still under review. |
 | Calls, method calls, FASTCALL, FASTPCALL, CALLFB | BytecodeLifter, SSA, ASTLifter expressions | candidate | Fallback layout aligns; FASTCALL3 union write C3 fixed; variable arity still under review. |
@@ -229,6 +231,12 @@ With Roblox compiler options `vectorLib="Vector3"` and `vectorCtor="new"`, Luau 
 Luau O0 emits `GETUPVAL` followed by `MOVE` instructions for a chain of local aliases. ASTLifter's `CollectReads` follows single-use definitions but stops after 64 register reads. It previously returned this partial result without marking it incomplete. At the end of a 65-alias chain, `ReadLocationChanged` missed the original upvalue read and allowed the chain to inline past `SETUPVAL`; `InputRebound` cannot see an upvalue write because it only checks register definitions.
 
 **Red/green:** A compiler-produced closure copied `u = 1` through `a0` to `a65`, assigned `u = 2`, then returned `a65`. Original bytecode returned `1`; decompiled output returned `2` (one failed oracle trace assertion). The 64-read bound remains for performance, but the scan now marks unfinished traversal. Both read-location and register-rebinding checks conservatively keep the expression materialized if traversal was incomplete. The focused regression passes (4 assertions), full CTest passes 637/637, and stress samples pass 22/22.
+
+### C27 — shared pure short-circuit fallback omitted after early return (`fixed`)
+
+Luau `compileExprAndOr` and condition-value lowering (`Compiler/src/Compiler.cpp:2105-2158,2259-2305`) can branch from a false intermediate value into a shared fallback region. For `return (x and y) or (z and 42) or "fallback"`, O0/O1 CFA retains that edge, but ASTLifter dropped it when the fallback was first lifted under another sibling. Raw AST already lost the path, before rewriters ran. O1's branch merge detection rejected a pure early-return arm because `reachesContinuationOrReturns` also demanded a side effect. O0 stopped at the visited shared conditional region because pure-region duplication was limited to a branch entry.
+
+**Red/green:** The public regression calls the function with `y=false` and `y=nil` and compares VM traces at O0/O1/O2. Before repair, O0 returned `false, nil, 5` rather than `"fallback", 42, 5`; O1 also lost the first two results. ASTLifter now recognizes a reachable return regardless of effects and re-lifts a visited pure conditional fallback for an exclusive sibling tail. `IsDuplicablePureRegion` still checks the region's operations and merge. A broader merge override failed six existing tests and was removed; an unrestricted sibling-tail rule failed a source-shape test and was narrowed to an `IfHeader`. The new test passes at all three levels. Full CTest passed 638/638, stress passed 22/22, and saved replay reported no failure (560 semantic passes; 2,408 unchecked). An effectful neighboring case preserved call order at all three levels.
 
 ## Source audit log
 

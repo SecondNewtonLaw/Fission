@@ -229,6 +229,21 @@ return k(true, true, 5, 9))LUA";
     }
 }
 
+TEST_CASE("Compiler shared short-circuit fallback runs after a false first value", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local function nested(x, y, z)
+    return (x and y) or (z and 42) or "fallback"
+end
+print(nested(true, false, false))
+print(nested(true, nil, true))
+print(nested(true, 5, false)))LUA";
+    for (int optLevel : {0, 1, 2}) {
+        const auto output = lifting_semantics_test::DecompileOrFail(source, optLevel);
+        INFO("optimization level: " << optLevel << "\ndecompiled:\n" << output);
+        lifting_semantics_test::CheckSameTrace(source, output, optLevel);
+    }
+}
+
 TEST_CASE("Compiler variadic table list preserves all results after computed fields", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     const std::string source = R"LUA(local function key() print("key"); return "x" end
