@@ -335,3 +335,27 @@ print(obj:print()))LUA";
         lifting_semantics_test::CheckSameTrace(shadowsGlobal, output, optLevel);
     }
 }
+
+TEST_CASE("Compiler vector constant does not bind to a captured Vector3 local", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    const std::string source = R"LUA(local Vector3 = 5
+local function read() return Vector3 end
+Vector3 += 1
+local v = vector.create(1, 2, 3)
+print(read(), v))LUA";
+    const auto output = lifting_semantics_test::DecompileOrFail(source, 2);
+    INFO("decompiled:\n" << output);
+    REQUIRE(lifting_semantics_test::Contains(output, "Vector3.new(1, 2, 3)"));
+    lifting_semantics_test::CheckSameTrace(source, output, 2);
+}
+
+TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    std::string source = "local u = 1\nlocal function f()\nlocal a0 = u\n";
+    for (int i = 1; i <= 65; ++i)
+        source += "local a" + std::to_string(i) + " = a" + std::to_string(i - 1) + "\n";
+    source += "u = 2\nreturn a65\nend\nreturn f()";
+    const auto output = lifting_semantics_test::DecompileOrFail(source, 0);
+    INFO("decompiled:\n" << output);
+    lifting_semantics_test::CheckSameTrace(source, output, 0);
+}

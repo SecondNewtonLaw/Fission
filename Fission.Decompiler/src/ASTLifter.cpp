@@ -421,6 +421,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         // Lifted locals lose their `do` scope, so a debug name shared with a global would capture it.
         const std::function<void(const LiftedFunction &)> collectGlobals = [&](const LiftedFunction &function) {
             const auto &functionConstants = function.lpDeserialized->constants;
+            if (std::any_of(functionConstants.begin(), functionConstants.end(), [](const LuauConstant &constant) { return constant.kType == LUA_TVECTOR; }))
+                m_globalNames.insert("Vector3");
             auto add = [&](int32_t index) {
                 if (index >= 0 && static_cast<size_t>(index) < functionConstants.size() && functionConstants[index].kType == LUA_TSTRING)
                     m_globalNames.insert(std::get<std::string>(functionConstants[index].constantData));

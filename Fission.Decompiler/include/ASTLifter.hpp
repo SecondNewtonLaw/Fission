@@ -227,6 +227,7 @@ class ASTLifter {
         std::vector<LiftedOperand> registers;
         size_t directRegisters = 0;
         bool capturedLocal = false;
+        bool incomplete = false;
         boost::unordered_flat_set<int32_t> globals, upvalues;
     };
     ValueReads CollectReads(const LiftedInstruction *def);

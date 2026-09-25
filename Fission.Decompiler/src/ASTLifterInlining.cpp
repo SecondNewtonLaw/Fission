@@ -879,11 +879,14 @@ ASTLifter::ValueReads ASTLifter::CollectReads(const LiftedInstruction *def) {
                 pending.push_back(inputDef);
         }
     }
+    reads.incomplete = !pending.empty();
     return reads;
 }
 
 bool ASTLifter::InputRebound(const LiftedInstruction *def, const LiftedInstruction *use, int32_t skipIndex, bool sameRegister) {
     const auto reads = CollectReads(def);
+    if (reads.incomplete)
+        return true;
     if (reads.registers.empty())
         return false;
     const LiftedInstruction *barrier = nullptr;
@@ -1075,6 +1078,8 @@ bool ASTLifter::ReadLocationChanged(const LiftedInstruction *def) {
     if (def->operands.size() < 2 || def->operands[0].type != LiftedOperandType::Register)
         return false;
     const auto reads = CollectReads(def);
+    if (reads.incomplete)
+        return true;
     if (!reads.capturedLocal && reads.globals.empty() && reads.upvalues.empty())
         return false;
     const SSARef value{static_cast<uint8_t>(def->operands[0].value.reg), def->operands[0].ssaVersion};
