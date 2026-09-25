@@ -1,6 +1,7 @@
 #include "Analysis/RobloxTypeInferer.hpp"
 
 #include "AbstractSyntaxTree/Nodes/RootNode.hpp"
+#include "Rewriters/ScopeAwareRenamer.hpp"
 
 #include <cctype>
 #include <format>
@@ -466,6 +467,13 @@ void RobloxTypeInferer::VisitStatementList(const std::vector<std::shared_ptr<Sta
 void RobloxTypeInferer::Infer(ASTFunction &ast, bool inferTypes, bool autoNameVariables) {
     m_inferTypes = inferTypes;
     m_autoNameVariables = autoNameVariables;
+    // a generated local named after a global read in its scope would capture that read
+    if (autoNameVariables) {
+        std::unordered_set<std::string> globals;
+        for (const auto &statement : ast.statements)
+            ScopeAwareRenamer::CollectGlobalNames(statement, globals);
+        m_names.insert(globals.begin(), globals.end());
+    }
     VisitStatementList(ast.statements, {});
 }
 

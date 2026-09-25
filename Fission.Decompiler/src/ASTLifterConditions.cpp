@@ -155,6 +155,15 @@ void ASTLifter::HoistPhiLocals(
         // branch carries one, the value escapes the branch and must be hoisted.
         bool needsHoist = false;
         for (auto *body : branches) {
+            // A nested diamond hoisted its own `local <name>` into this arm; the outer merge owns the binding.
+            std::erase_if(*body, [&](const std::shared_ptr<Statement> &stmt) {
+                const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt);
+                const auto ident = decl ? std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier) : nullptr;
+                if (!ident || decl->value != nullptr || !ident->identifier || ident->identifier->name != name)
+                    return false;
+                needsHoist = true;
+                return true;
+            });
             for (auto &stmt : *body) {
                 // Case 1: `local <name> = <expr>` (VariableDeclarationNode). Convert to a
                 // bare assignment so the hoisted pre-declaration is the sole `local`.
@@ -352,23 +361,36 @@ bool ASTLifter::IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) c
     return feedsMergePhi;
 }
 
-int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
+int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJumpsExit) {
     if (branchA == branchB)
         return static_cast<int32_t>(branchA);
 
     const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
     if (branchB == loopExit)
         std::swap(branchA, branchB);
-    const auto cacheKey = std::make_tuple(branchA, branchB, loopExit);
+    const auto cacheKey = std::make_tuple(branchA, branchB, loopExit, loopJumpsExit);
     if (const auto it = m_mergeCache.find(cacheKey); it != m_mergeCache.end())
         return it->second;
 
     const auto &blocks = m_currentFunction->basicBlocks;
-    // a conditional jump into the innermost loop's latch is a `continue`, not flow into the merge
+    // a conditional jump into the innermost loop's latch is a `continue`, not flow into the merge; with
+    // `loopJumpsExit`, so is a lifted `continue` block's unconditional jump
     const auto continuesLoop = [&](const BasicBlock &from, uint32_t to) {
-        if (loopExit == InvalidBlockId || from.bTerminator != BlockTerminator::Conditional || blocks[to].bType != BlockType::LoopLatch)
+        if (loopExit == InvalidBlockId || (from.bTerminator != BlockTerminator::Conditional && !(loopJumpsExit && from.bType == BlockType::Continue)) ||
+            blocks[to].bType != BlockType::LoopLatch)
             return false;
         return std::ranges::find(blocks[to].successors, loopExit) != blocks[to].successors.end();
+    };
+    const auto sharedReturn = [&](uint32_t id) {
+        const auto &block = blocks[id];
+        return block.bType == BlockType::Return && block.predecessors.size() > 1 && block.lpHead &&
+               std::all_of(block.lpHead, block.lpTail + 1, [](const LiftedInstruction &instruction) {
+                   return instruction.operation == LiftedOperation::RETURN || instruction.operation == LiftedOperation::NOP;
+               });
+    };
+    // with `loopJumpsExit`, a statement jump into a shared `return` (an unrolled loop's `break`) lifts as its own `return`
+    const auto jumpsToSharedReturn = [&](const BasicBlock &from, uint32_t to) {
+        return loopJumpsExit && sharedReturn(to) && from.lpTail && from.lpTail->operation == LiftedOperation::JUMP;
     };
 
     // true iff every forward path from x hits M before an exit (back-edges skipped to stay acyclic). The
@@ -380,6 +402,7 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
         boost::unordered_flat_set<uint32_t> seen;
         std::vector<uint32_t> stack{x};
         bool reached = false;
+        bool leftRegion = false;
         const auto mergeReaches = [&](uint32_t target) {
             auto [reach, fresh] = m_forwardReach.try_emplace(m);
             if (fresh) {
@@ -412,8 +435,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
                 }
                 if (succ == m)
                     reached = true;
-                else if (continuesLoop(block, succ) || succ == loopExit)
-                    continue; // `continue` and `break` leave the region without flowing into any merge
+                else if (continuesLoop(block, succ) || succ == loopExit || jumpsToSharedReturn(block, succ))
+                    leftRegion = true; // `continue` and `break` leave the region without flowing into any merge
                 else
                     stack.push_back(succ);
             }
@@ -421,10 +444,11 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
             // Not when M returns too (arms ending in copies of one `return` are value arms) or M reaches that return (a join).
             if (block.successors.empty() &&
                 (block.bType != BlockType::Return ||
-                 (loopExit == InvalidBlockId && (blocks[m].bType == BlockType::Return || mergeReaches(cur)))))
+                 (loopExit == InvalidBlockId && m < blocks.size() && (blocks[m].bType == BlockType::Return || mergeReaches(cur)))))
                 return false;
         }
-        return reached;
+        // an arm that only leaves the region imposes no merge of its own
+        return reached || (loopJumpsExit && leftRegion);
     };
 
     int32_t result = -1;
@@ -467,7 +491,9 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
         while (!q.empty()) {
             const uint32_t cur = q.front();
             q.pop();
-            if ((branchA == loopExit || fromA.contains(cur)) && postDominates(cur, branchA) && postDominates(cur, branchB)) {
+            // the retry looks for a join before the region's shared exit, not the exit itself
+            const bool sharedExit = loopJumpsExit && sharedReturn(cur);
+            if (!sharedExit && (branchA == loopExit || fromA.contains(cur)) && postDominates(cur, branchA) && postDominates(cur, branchB)) {
                 result = static_cast<int32_t>(cur);
                 break;
             }
@@ -475,6 +501,18 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB) {
             for (const uint32_t succ : block.successors)
                 if (follows(block, cur, succ) && visited.insert(succ).second)
                     q.push(succ);
+        }
+        // one arm may only leave the region; then the join is where the other arm's flow continues
+        const auto onlyLeavesRegion = [&](uint32_t x) { return postDominates(InvalidBlockId, x); };
+        if (result < 0 && loopJumpsExit && onlyLeavesRegion(branchA) != onlyLeavesRegion(branchB)) {
+            std::set<uint32_t> candidates(fromA.begin(), fromA.end());
+            candidates.insert(visited.begin(), visited.end());
+            // the fallthrough arm is the `then` body, never the join
+            for (const uint32_t cur : candidates)
+                if (cur != branchB && postDominates(cur, branchA) && postDominates(cur, branchB)) {
+                    result = static_cast<int32_t>(cur);
+                    break;
+                }
         }
     }
 

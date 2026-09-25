@@ -72,6 +72,14 @@ class ScopeAwareRenamer {
         WalkStmt(stmt, collect);
     }
 
+    static void CollectGlobalNames(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &out) {
+        auto collect = [&](const std::shared_ptr<Identifier> &id) {
+            if (id && id->bIsGlobal)
+                out.insert(id->name);
+        };
+        WalkStmt(stmt, collect);
+    }
+
   private:
     static void PruneStaleRenameCommentsInScope(std::vector<std::shared_ptr<Statement>> &scope, const std::shared_ptr<FunctionDeclarationNode> &enclosingFn) {
         std::unordered_map<std::string, int> bindings;

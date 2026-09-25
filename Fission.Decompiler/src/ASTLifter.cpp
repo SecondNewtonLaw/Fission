@@ -222,6 +222,83 @@ std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Exp
 
 ASTLifter::ASTLifter() {}
 
+// The debug name of a loop variable bound right after its `for` prep instruction.
+std::optional<std::string> ASTLifter::LoopDebugName(int32_t reg, int32_t prepIndex) const {
+    for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
+        if (local.reg == reg && local.startpc == prepIndex + 1 && IsValidLuauIdent(local.varname) && !m_globalNames.contains(local.varname))
+            return local.varname;
+    return std::nullopt;
+}
+
+// A class name is hoisted: the compiler nils its register at block start and `NEWCLASS` fills it; both versions are the class.
+static std::optional<std::string> HoistedClassName(const AnalyzedFunction &function, const SSARef &ref) {
+    const auto found = function.definitionMap.find(ref);
+    if (found == function.definitionMap.end() || !found->second)
+        return std::nullopt;
+    const LiftedInstruction *definition = found->second;
+    const auto &instructions = function.lpLiftedFunction->instructions;
+    if (definition->operation == LiftedOperation::LOAD && definition->operands.size() > 1 && definition->operands[1].type == LiftedOperandType::ImmediateNil)
+        for (size_t index = static_cast<size_t>(definition->instructionIndex) + 1; index < instructions.size(); ++index)
+            if (instructions[index].operation == LiftedOperation::NEWCLASS && !instructions[index].operands.empty() &&
+                instructions[index].operands[0].value.reg == ref.regIndex) {
+                definition = &instructions[index];
+                break;
+            }
+    if (definition->operation != LiftedOperation::NEWCLASS || definition->operands.size() < 4)
+        return std::nullopt;
+    const auto &constants = function.lpLiftedFunction->lpDeserialized->constants;
+    const auto index = static_cast<size_t>(definition->operands[3].value.imm.k);
+    if (index >= constants.size() || !constants[index].IsClassShape())
+        return std::nullopt;
+    const auto &name = std::get<LuauClassShape>(constants[index].constantData).className;
+    return name.empty() ? std::nullopt : std::optional(name);
+}
+
+// Finds whether this function's own statements (not nested closures) declare and/or assign `name`.
+static void ScanBinding(const std::vector<std::shared_ptr<Statement>> &statements, const std::string &name, bool &declared, bool &assigned) {
+    const auto named = [&](const std::shared_ptr<Expression> &expression) {
+        const auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(expression);
+        return identifier && identifier->identifier && identifier->identifier->name == name;
+    };
+    const auto scanRets = [&](const std::vector<std::shared_ptr<Expression>> &rets, bool isDeclaration) {
+        if (std::ranges::any_of(rets, named))
+            (isDeclaration ? declared : assigned) = true;
+    };
+    for (const auto &statement : statements) {
+        if (const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statement)) {
+            declared |= named(declaration->identifier);
+        } else if (const auto function = std::dynamic_pointer_cast<FunctionDeclarationNode>(statement)) {
+            if (function->functionName == name)
+                (function->bIsLocalDeclaration ? declared : assigned) = true;
+        } else if (const auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statement)) {
+            assigned |= named(assignment->left);
+        } else if (const auto expression = std::dynamic_pointer_cast<ExpressionStatementNode>(statement)) {
+            if (const auto call = std::dynamic_pointer_cast<CallExpressionNode>(expression->expression))
+                scanRets(call->rets, call->bIsLocalDeclaration);
+            else if (const auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression))
+                scanRets(nameCall->rets, nameCall->bIsLocalDeclaration);
+        } else if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(statement)) {
+            for (const auto &arm : {branch->thenBranch, branch->elseBranch})
+                if (arm)
+                    ScanBinding(arm->body, name, declared, assigned);
+        } else if (const auto loop = std::dynamic_pointer_cast<WhileStatementNode>(statement); loop && loop->body) {
+            ScanBinding(loop->body->body, name, declared, assigned);
+        } else if (const auto repeat = std::dynamic_pointer_cast<RepeatStatementNode>(statement); repeat && repeat->body) {
+            ScanBinding(repeat->body->body, name, declared, assigned);
+        } else if (const auto numeric = std::dynamic_pointer_cast<ForNumericNode>(statement)) {
+            declared |= named(numeric->loopVariable);
+            if (numeric->lpLoopBody)
+                ScanBinding(numeric->lpLoopBody->body, name, declared, assigned);
+        } else if (const auto generic = std::dynamic_pointer_cast<ForGeneralNode>(statement)) {
+            declared |= std::ranges::any_of(generic->loopVariables, named);
+            if (generic->body)
+                ScanBinding(generic->body->body, name, declared, assigned);
+        } else if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(statement)) {
+            ScanBinding(block->body, name, declared, assigned);
+        }
+    }
+}
+
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_currentFunction = &analyzedFunction;
     if (m_debugNotes && m_debugNotes->Enabled())
@@ -578,8 +655,10 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                                             analyzedFunction.ssaOverrides[ref] = name;
                     } else if (mode == 1 && proto->upvalueNames.size() <= capIdx && reg >= analyzedFunction.lpLiftedFunction->numparams) {
                         // no debug locals: every value of the captured variable is one local
+                        const auto className = HoistedClassName(analyzedFunction, SSARef{reg, cap.operands[1].ssaVersion});
                         const std::string name =
-                            selfCapture && proto->debugName ? localName(*proto->debugName, reg)
+                            className ? *className
+                            : selfCapture && proto->debugName ? localName(*proto->debugName, reg)
                             : definitionCounts()[reg] > static_cast<int>(capturedVersions.size())
                                 ? localName(
                                       std::format(
@@ -808,6 +887,14 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 }
             }
         ast.statements.insert(ast.statements.begin(), sharedDeclarations.begin(), sharedDeclarations.end());
+        // Declarations follow registers, so a prefixed name given to a later version of an already-declared register is only ever
+        // assigned; without a binding of its own it would write a global.
+        for (const auto &[renamed, original] : analyzedFunction.prefixedLocalRenames) {
+            bool declared = false, assigned = false;
+            ScanBinding(ast.statements, renamed, declared, assigned);
+            if (assigned && !declared)
+                ast.statements.insert(ast.statements.begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(renamed)));
+        }
         Explain("function {}: control-flow lift produced {} top-level statements", m_debugFunction, ast.statements.size());
 
         std::string ttinfo = "Unavailable";
@@ -1147,10 +1234,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // Duplicate only return-only merges; every other merge may carry an effect. Arms jumping to a shared exit leave it
         // to render once after them.
         if (currentBlockId == stopBlockId &&
-            (!isReturnOnly(currentBlockId) || std::ranges::any_of(m_currentFunction->basicBlocks[currentBlockId].predecessors, [&](uint32_t pred) {
-                const auto *tail = m_currentFunction->basicBlocks[pred].lpTail;
-                return tail && tail->operation == LiftedOperation::JUMP;
-            })))
+            (!isReturnOnly(currentBlockId) || !m_currentFunction->basicBlocks[currentBlockId].phiNodes.empty() ||
+             std::ranges::any_of(m_currentFunction->basicBlocks[currentBlockId].predecessors, [&](uint32_t pred) {
+                 const auto *tail = m_currentFunction->basicBlocks[pred].lpTail;
+                 return tail && tail->operation == LiftedOperation::JUMP;
+             })))
             break;
         // return blocks are allowed to be duplicated, as they have no successors.
         // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
@@ -1273,11 +1361,43 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 }
 
                 uint32_t mergeIdx = FindMergeBlock(trueIdx, falseIdx);
+                // Code both arms reach before the latch joins them; an arm's lifted `continue` only skips that code.
+                // Likewise an unrolled loop's `break` jumps straight to the shared `return`, skipping the next iteration.
+                bool joinSkipsLoopJumps = false;
+                const auto jumpedReturn = [&](uint32_t id) {
+                    const auto &candidate = m_currentFunction->basicBlocks[id];
+                    return isReturnOnly(id) && std::ranges::any_of(candidate.predecessors, [&](uint32_t pred) {
+                               const auto *tail = m_currentFunction->basicBlocks[pred].lpTail;
+                               return tail && tail->operation == LiftedOperation::JUMP;
+                           });
+                };
+                const bool loopJumpMerge = mergeIdx == InvalidBlockId || isInnermostLatch(mergeIdx);
+                if (loopJumpMerge || jumpedReturn(mergeIdx))
+                    if (const int32_t join = FindMergeBlock(trueIdx, falseIdx, true);
+                        join >= 0 && !isInnermostLatch(static_cast<uint32_t>(join)) &&
+                        (stopBlockId == InvalidBlockId || static_cast<uint32_t>(join) == stopBlockId ||
+                         CanReach(static_cast<uint32_t>(join), stopBlockId, currentBlockId, {currentBlockId})) &&
+                        // an `elseif` chain's arms jump to their shared return too; its only other join sits inside one arm
+                        (loopJumpMerge || (CanReach(trueIdx, static_cast<uint32_t>(join), currentBlockId, {currentBlockId}) &&
+                                           CanReach(falseIdx, static_cast<uint32_t>(join), currentBlockId, {currentBlockId})))) {
+                        mergeIdx = static_cast<uint32_t>(join);
+                        joinSkipsLoopJumps = true;
+                    }
+                // A merge past this region's end means one arm leaves early; the other arm joins at the region end.
+                if (stopBlockId != InvalidBlockId && mergeIdx != stopBlockId && trueIdx != stopBlockId && falseIdx != stopBlockId &&
+                    (mergeIdx == InvalidBlockId || CanReach(stopBlockId, mergeIdx, currentBlockId, {currentBlockId})) &&
+                    CanReach(trueIdx, stopBlockId, currentBlockId, {currentBlockId}) != CanReach(falseIdx, stopBlockId, currentBlockId, {currentBlockId}))
+                    mergeIdx = stopBlockId;
                 const bool mergeFromGraph = mergeIdx != InvalidBlockId;
 
                 // An arm that is the enclosing region's end is empty; the join is that end. Return arms have no
                 // merge of their own, and a merge found past the stop would pull the enclosing join into this if.
                 if (stopBlockId != InvalidBlockId && !isReturnOnly(stopBlockId) && (trueIdx == stopBlockId || falseIdx == stopBlockId))
+                    mergeIdx = stopBlockId;
+                // A returned value merge is still this test's join when the other arm computes into its phi.
+                if (stopBlockId != InvalidBlockId && isReturnOnly(stopBlockId) && !m_currentFunction->basicBlocks[stopBlockId].phiNodes.empty() &&
+                    (trueIdx == stopBlockId || falseIdx == stopBlockId) &&
+                    CanReach(trueIdx == stopBlockId ? falseIdx : trueIdx, stopBlockId, currentBlockId, {currentBlockId}))
                     mergeIdx = stopBlockId;
 
                 if (mergeIdx == InvalidBlockId) {
@@ -1320,8 +1440,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 const bool mergeIsDirectArm = mergeIdx == trueIdx || mergeIdx == falseIdx;
                 const uint32_t otherArm = mergeIdx == trueIdx ? falseIdx : trueIdx;
                 const bool otherArmBreaks = !m_loopExitStack.empty() && otherArm == m_loopExitStack.back();
-                const bool mergeIsNextIterationArm = !mergeTargetsLoopExit && mergeFromGraph && mergeIsDirectArm && mergeIdx != stopBlockId &&
-                                                     !otherArmBreaks && !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
+                const bool mergeIsNextIterationArm = !joinSkipsLoopJumps && !mergeTargetsLoopExit && mergeFromGraph && mergeIsDirectArm &&
+                                                     mergeIdx != stopBlockId && !otherArmBreaks && !CanReach(otherArm, mergeIdx, currentBlockId, {currentBlockId});
                 if ((mergeTargetsLoopExit && !mergeTargetsActiveLoopExit) || mergeIsNextIterationArm)
                     mergeIdx = InvalidBlockId;
                 // one arm flows to this region's end while the other jumps into the latch: join at the region end and
@@ -1482,10 +1602,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         if (!tail.empty())
                             parent->elseBranch = CreateBlock(tail);
                     } else {
+                        // arms without a join still end at the enclosing region, so reaching the latch lifts as `continue`
+                        const uint32_t armStop = mergeIdx == InvalidBlockId && !m_loopExitStack.empty() ? stopBlockId : mergeIdx;
                         ifStmt->condition = (trueCond);
-                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
+                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, armStop, visitedCopy));
                         m_definedRegisters = definedBeforeBranches;
-                        elseStmts = co_await LiftControlFlow(falseIdx, mergeIdx, visitedCopy);
+                        elseStmts = co_await LiftControlFlow(falseIdx, armStop, visitedCopy);
                         // the arm the test falls into is the source's `then`
                         ifStmt->bFallthroughInElse = true;
                     }
@@ -2041,7 +2163,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     const std::string startValueName = m_currentFunction->GetVarName(loopVariableReg, startVer);
                     // name the loop var once up-front so body/header/SSA map agree. LiftExpression would
                     // resolve it to the inlined LOADN constant -> broken `for 1 = 1, ..., 1 do` (InfiniteYield).
-                    const std::string loopVarName = std::format("i_{}", baseReg + 2);
+                    const std::string loopVarName = LoopDebugName(loopVariableReg, forPrepInst->instructionIndex).value_or(std::format("i_{}", baseReg + 2));
                     {
                         LiftedOperand op;
                         {
@@ -2563,8 +2685,22 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             m_earlyForExits.emplace_back(exitIdx, earlyForExit->second);
                         const auto definedBeforeLoopBody = m_definedRegisters;
                         // the loop variables are bound by the `for`; a write in the body assigns them
-                        for (int i = 0; i < numVars; ++i)
+                        for (int i = 0; i < numVars; ++i) {
                             m_definedRegisters.insert(baseReg + 3 + i);
+                            if (const auto name = LoopDebugName(baseReg + 3 + i, block.lpTail->instructionIndex))
+                                if (const auto defs = m_defsByInstruction.find(latchTail); defs != m_defsByInstruction.end())
+                                    for (const auto &ref : defs->second)
+                                        if (ref.regIndex == baseReg + 3 + i) {
+                                            m_currentFunction->SetVariableName(ref.regIndex, ref.version, *name);
+                                            // the body reads the loop header's merge of this value
+                                            for (const auto &candidate : m_currentFunction->basicBlocks)
+                                                for (const auto &phi : candidate.phiNodes)
+                                                    if (std::any_of(phi.operands.begin() + 1, phi.operands.end(), [&](const LiftedOperand &input) {
+                                                            return input.value.reg == ref.regIndex && input.ssaVersion == ref.version;
+                                                        }))
+                                                        m_currentFunction->SetVariableName(phi.operands[0].value.reg, phi.operands[0].ssaVersion, *name);
+                                        }
+                        }
                         forNode->body = CreateBlock(co_await LiftControlFlow(bodyIdx, *block.loopLatch, visited));
                         m_definedRegisters = definedBeforeLoopBody;
                         if (hasBreakTarget)
@@ -2940,6 +3076,16 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             continue;
 
         const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
+
+        if (inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 && inst.operands[1].type == LiftedOperandType::ImmediateNil) {
+            const SSARef ref{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
+            if (const auto className = HoistedClassName(*m_currentFunction, ref)) {
+                // the later `class` statement binds the name for the whole block
+                m_currentFunction->SetVariableName(ref.regIndex, ref.version, *className);
+                m_processedInstructions.insert(i);
+                continue;
+            }
+        }
 
         if (inst.operation == LiftedOperation::NEWCLASS && inst.operands.size() >= 4) {
             const auto &shapeConst = ConstantAt(inst.operands[3].value.imm.k);

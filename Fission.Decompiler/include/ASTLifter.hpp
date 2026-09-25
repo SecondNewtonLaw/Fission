@@ -155,8 +155,8 @@ class ASTLifter {
     uint64_t m_blockLiftsPerformed = 0;
 
     // FindMergeBlock is pure over a fixed CFG.
-    // (branchA, branchB, innermost loop exit) -> merge
-    std::map<std::tuple<uint32_t, uint32_t, uint32_t>, int32_t> m_mergeCache;
+    // (branchA, branchB, innermost loop exit, loop jumps exit) -> merge
+    std::map<std::tuple<uint32_t, uint32_t, uint32_t, bool>, int32_t> m_mergeCache;
 
     // Reverse definition map keeps ShouldInline lookup constant-time.
     std::unordered_map<const LiftedInstruction *, std::vector<SSARef>> m_defsByInstruction;
@@ -267,7 +267,7 @@ class ASTLifter {
     }
     std::string ResolveVariableName(const LiftedOperand &op, bool markDefined = true);
     void SeedEnclosingNames(AnalyzedFunction &target) const;
-    int32_t FindMergeBlock(uint32_t branchA, uint32_t branchB);
+    int32_t FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJumpsExit = false);
 
     // Pure shared value arms may be re-lifted without duplicating effects.
     bool IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) const;
@@ -305,4 +305,5 @@ class ASTLifter {
 
     // Recover an outer infinite loop when it shares an inner loop's header.
     std::optional<uint32_t> DetectInfiniteWhileLatch(uint32_t headerId, uint32_t innerLatchId);
+    std::optional<std::string> LoopDebugName(int32_t reg, int32_t prepIndex) const;
 };

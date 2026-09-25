@@ -161,15 +161,65 @@ class IfExpressionFolder {
         return std::make_shared<IfExpressionNode>(ifStmt->condition, tv, elseExpr);
     }
 
+    static bool SameOperand(const std::shared_ptr<Expression> &a, const std::shared_ptr<Expression> &b) {
+        const auto ia = std::dynamic_pointer_cast<IdentifierExpressionNode>(a);
+        const auto ib = std::dynamic_pointer_cast<IdentifierExpressionNode>(b);
+        return ia && ib && ia->identifier && ib->identifier && ia->identifier->name == ib->identifier->name;
+    }
+
+    static std::shared_ptr<BinaryExpressionNode> AsLogical(const std::shared_ptr<Expression> &expr, const char *op) {
+        const auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(expr);
+        return binary && binary->op == op ? binary : nullptr;
+    }
+
+    // Exact rewrites; each operand is still read at most once per path:
+    // `if c then x or y else y` == `c and x or y`, `if c then y else x and y` == `(c or x) and y`.
+    static std::shared_ptr<Expression> Simplify(const std::shared_ptr<Expression> &expr) {
+        const auto iff = std::dynamic_pointer_cast<IfExpressionNode>(expr);
+        if (!iff)
+            return expr;
+        const auto thenExpr = Simplify(iff->thenExpr);
+        const auto elseExpr = Simplify(iff->elseExpr);
+        if (const auto either = AsLogical(thenExpr, "or"); either && SameOperand(either->right, elseExpr))
+            return std::make_shared<BinaryExpressionNode>("or", std::make_shared<BinaryExpressionNode>("and", iff->condition, either->left), elseExpr);
+        if (const auto both = AsLogical(elseExpr, "and"); both && SameOperand(both->right, thenExpr))
+            return std::make_shared<BinaryExpressionNode>("and", std::make_shared<BinaryExpressionNode>("or", iff->condition, both->left), thenExpr);
+        return std::make_shared<IfExpressionNode>(iff->condition, thenExpr, elseExpr);
+    }
+
+    // `local v = <value expression>; return v` closing a block returns the expression directly.
+    static void InlineReturnedValue(std::vector<std::shared_ptr<Statement>> &stmts) {
+        if (stmts.size() < 2)
+            return;
+        const auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmts.back());
+        const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[stmts.size() - 2]);
+        if (!ret || ret->returnValues.size() != 1 || !decl || !decl->value || !SameOperand(decl->identifier, ret->returnValues.front()))
+            return;
+        if (!std::dynamic_pointer_cast<IfExpressionNode>(decl->value) && !AsLogical(decl->value, "and") && !AsLogical(decl->value, "or"))
+            return;
+        ret->returnValues.front() = decl->value;
+        stmts.erase(stmts.end() - 2);
+    }
+
     void Fold(std::vector<std::shared_ptr<Statement>> &stmts) {
         // Fold at THIS level first (top-down): AsIfExpr must see the raw nested `if` in an else arm to
         // build the `elseif` chain; recursing first would rewrite it out from under the detection.
+        FoldLevel(stmts);
+        // Folded nodes have no remaining block children.
+        for (auto &s : stmts)
+            FoldChildren(s);
+        // Arms that just folded can complete an enclosing diamond.
+        FoldLevel(stmts);
+        InlineReturnedValue(stmts);
+    }
+
+    void FoldLevel(std::vector<std::shared_ptr<Statement>> &stmts) {
         for (size_t i = 0; i < stmts.size(); ++i) {
             auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmts[i]);
             if (!ifStmt)
                 continue;
             std::string name;
-            auto ifExpr = AsIfExpr(ifStmt, name);
+            auto ifExpr = Simplify(AsIfExpr(ifStmt, name));
             if (!ifExpr)
                 continue;
 
@@ -202,10 +252,6 @@ class IfExpressionFolder {
             auto lhs = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
             stmts[i] = std::make_shared<AssignmentStatementNode>(lhs, ifExpr);
         }
-
-        // Folded nodes have no remaining block children.
-        for (auto &s : stmts)
-            FoldChildren(s);
     }
 
     void FoldChildren(const std::shared_ptr<Statement> &s) {

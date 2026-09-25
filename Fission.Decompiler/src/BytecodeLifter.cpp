@@ -474,7 +474,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
 
             instr.instructionRemarks =
-                std::format("INFO: Loading upvalue at index {} of the function into R{}.", instr.operands[1].value.imm.u, instr.operands[0].value.reg);
+                std::format("INFO: Loading upvalue at index {} of the function into R{}.", instr.operands[1].value.imm.n, instr.operands[0].value.reg);
             break;
         }
         case LOP_SETUPVAL: {
@@ -1179,8 +1179,8 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands.resize(3);
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
-            instr.operands[1].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
+            instr.operands[1].type = LiftedOperandType::ImmediateConstant;
+            instr.operands[1].value.imm.k = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::Register;
             instr.operands[2].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             break;

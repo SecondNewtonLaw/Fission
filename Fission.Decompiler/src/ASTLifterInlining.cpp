@@ -135,8 +135,14 @@ bool ASTLifter::BeginsDebugLocal(const LiftedInstruction &inst, int32_t reg) con
     auto next = static_cast<size_t>(inst.instructionIndex) + 1;
     while (next < instructions.size() && instructions[next].operation == LiftedOperation::NOP)
         ++next;
-    return std::ranges::any_of(m_currentFunction->lpLiftedFunction->lpDeserialized->locvars, [&](const auto &local) {
-        return local.reg == reg && local.startpc > inst.instructionIndex && static_cast<size_t>(local.startpc) <= next && !local.varname.empty();
+    const auto &locals = m_currentFunction->lpLiftedFunction->lpDeserialized->locvars;
+    return std::ranges::any_of(locals, [&](const auto &local) {
+        if (local.reg != reg || local.startpc <= inst.instructionIndex || static_cast<size_t>(local.startpc) > next || local.varname.empty())
+            return false;
+        // a move-elided inline parameter aliases a local that stays live across it; the write assigns that local
+        return std::ranges::none_of(locals, [&](const auto &owner) {
+            return &owner != &local && owner.reg == reg && owner.startpc <= inst.instructionIndex && owner.endpc > local.startpc && !owner.varname.empty();
+        });
     });
 }
 

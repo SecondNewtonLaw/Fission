@@ -242,6 +242,18 @@ struct AnalyzedFunction {
         return true;
     }
 
+    static bool IsIdentifier(const std::string &s) {
+        return !s.empty() && !std::isdigit(static_cast<unsigned char>(s[0])) &&
+               std::all_of(s.begin(), s.end(), [](char c) { return std::isalnum(static_cast<unsigned char>(c)) || c == '_'; });
+    }
+
+    // `arg0`, `_arg1`: the generated parameter names.
+    static bool IsParameterNameShaped(const std::string &s) {
+        const size_t start = s.find_first_not_of('_');
+        return start != std::string::npos && s.compare(start, 3, "arg") == 0 && start + 3 < s.size() &&
+               std::all_of(s.begin() + static_cast<std::ptrdiff_t>(start + 3), s.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
+    }
+
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
 
     // Explicit names outrank automatic and parameter names for every register version.
@@ -342,7 +354,7 @@ struct AnalyzedFunction {
                     if (k.kType != LUA_TSTRING)
                         return;
                     const auto &s = std::get<std::string>(k.constantData);
-                    if (IsAutoNameShaped(s))
+                    if (IsAutoNameShaped(s) || IsParameterNameShaped(s))
                         this->globalAutoNameCollisions.insert(s);
                 };
                 for (const auto &inst : function.instructions) {
@@ -368,7 +380,14 @@ struct AnalyzedFunction {
         }
 
         for (size_t i = 0; i < lpDeserialized->numparams; i++) {
-            this->SetGlobalName(i, std::format("arg{}", i));
+            // a parameter's debug local opens at the function entry and spans the whole body
+            const auto debugLocal = std::ranges::find_if(lpDeserialized->locvars, [&](const auto &local) {
+                return local.reg == static_cast<int32_t>(i) && local.startpc <= 1 && IsIdentifier(local.varname);
+            });
+            std::string name = debugLocal != lpDeserialized->locvars.end() ? debugLocal->varname : std::format("arg{}", i);
+            while (debugLocal == lpDeserialized->locvars.end() && this->globalAutoNameCollisions.contains(name))
+                name = "_" + name;
+            this->SetGlobalName(i, name);
         }
     }
 

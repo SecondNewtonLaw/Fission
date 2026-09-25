@@ -702,11 +702,8 @@ namespace Fission::ConstantPropagationDetail {
         case LiftedOperation::POWK:
             return EvaluateArithmetic(instruction.operation, operand(1), operand(2));
         case LiftedOperation::SUBRK:
-        case LiftedOperation::DIVRK: {
-            LiftedOperand constant = instruction.operands[1];
-            constant.type = LiftedOperandType::ImmediateConstant;
-            return EvaluateArithmetic(instruction.operation, ReadOperand(function, constant, values, context), operand(2));
-        }
+        case LiftedOperation::DIVRK:
+            return EvaluateArithmetic(instruction.operation, operand(1), operand(2));
         case LiftedOperation::AND:
         case LiftedOperation::ANDK: {
             const Value left = operand(1);
@@ -1043,6 +1040,15 @@ namespace Fission::ConstantPropagationDetail {
             definitions[instruction].push_back(reference);
             values.try_emplace(reference);
         }
+        // a closure holding a register by reference may rewrite it during any call, which SSA does not see
+        std::unordered_set<int32_t> referenceCaptured;
+        if (function.lpLiftedFunction)
+            for (const auto &instruction : function.lpLiftedFunction->instructions)
+                if (instruction.operation == LiftedOperation::CAPTURE && instruction.operands.size() > 1 && instruction.operands[0].value.imm.n == 1)
+                    referenceCaptured.insert(instruction.operands[1].value.reg);
+        const auto defined = [&](const SSARef &reference, Value value) {
+            return referenceCaptured.contains(reference.regIndex) ? Value::Overdefined() : std::move(value);
+        };
 
         std::unordered_set<uint32_t> executableBlocks{0};
         std::unordered_set<uint64_t> executableEdges;
@@ -1063,7 +1069,7 @@ namespace Fission::ConstantPropagationDetail {
                     const auto defs = definitions.find(&phi);
                     if (defs != definitions.end())
                         for (const auto &reference : defs->second)
-                            changed |= MergeInto(values[reference], incoming);
+                            changed |= MergeInto(values[reference], defined(reference, incoming));
                 }
                 if (block.lpHead)
                     for (LiftedInstruction *instruction = block.lpHead; instruction <= block.lpTail; ++instruction) {
@@ -1071,7 +1077,8 @@ namespace Fission::ConstantPropagationDetail {
                         if (defs != definitions.end())
                             for (const auto &reference : defs->second)
                                 changed |= MergeInto(
-                                    values[reference], EvaluateDefinition(function, *instruction, reference, values, context, defs->second.size() == 1)
+                                    values[reference],
+                                    defined(reference, EvaluateDefinition(function, *instruction, reference, values, context, defs->second.size() == 1))
                                 );
                         else if (context && (instruction->operation == LiftedOperation::CALL || instruction->operation == LiftedOperation::CALLFB))
                             EvaluateDefinition(
