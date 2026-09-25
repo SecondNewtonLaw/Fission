@@ -26,6 +26,8 @@ The same saved corpus at O1 checked 325,420 reads in 12,041 functions with no sk
 
 After C30, CTest passed 640/640, stress samples passed 22/22, and saved replay again reported 560 semantic passes and 2,408 unchecked sources among 2,968 unique inputs, with no reported divergence. Both direct and computed `_G` writes have Roblox-profile compiler-produced trace regressions. These checks do not establish parity for unchecked cases.
 
+After C31, CTest passed 641/641, stress samples passed 22/22, and saved replay again reported 560 semantic passes and 2,408 unchecked sources among 2,968 unique inputs, with no reported divergence. The Roblox-profile nonfinite-vector regression failed before its renderer fix and passed afterward.
+
 ## Investigation completion gate
 
 Family-level opcode inventory alone is insufficient to prove lifting correctness. Each inverse boundary was inspected and recorded; directed compiler-produced checks continue for unresolved candidates:
@@ -273,6 +275,12 @@ Luau O2 can compile `print(flag, if flag then 1 else 2, function() end); for val
 Luau O2 under `vectorLib="Vector3"`, `vectorCtor="new"`, and `vectorType="Vector3"` still folds `vector.create(1,2,3)` to `LUA_TVECTOR` when `_G.Vector3 = 5` precedes it. That write emits a table store, not `SETGLOBAL Vector3`, so C28's opcode scan missed it. The original VM printed `vec(1,2,3)`; Fission emitted `_G.Vector3 = 5; print(Vector3.new(1,2,3))`, which raised `attempt to index number with 'new'`. A recursive key function keeps `_G[key(...)]` dynamic through compiler lowering, so exact string-key scans cannot soundly identify every overwrite.
 
 **Red/green:** The Roblox-profile regression asserted a compiler vector constant and failed because no constructor capture preceded the `_G` write. Source generation now captures `Vector3.new` at chunk entry whenever a vector node survives first rendering, then constructs at the original expression site through that saved value. This uses the user-approved assumption that Roblox's `Vector3` constructor exists at chunk start. A direct-key and a dynamic-key case both preserve original VM status and trace. Three older source-spelling checks now assert the capture and components; CTest 640/640, stress 22/22, saved replay 560 passes/2,408 unchecked.
+
+### C31 — nonfinite vector components rendered as undefined names (`fixed`)
+
+Under Roblox compiler options, Luau O2 folds `vector.create(math.huge, -math.huge, math.sqrt(-1))` into a `LUA_TVECTOR` constant. Scalar `NumberLiteralNode` already renders nonfinite values as arithmetic expressions, but `SourceGenerator::Visit(VectorNode)` printed components directly with `std::format`. It emitted `inf`, `-inf`, and `-nan`, which Luau treats as global names. The original VM printed `vec(inf,-inf,nan)`; recompiled output raised `attempt to perform arithmetic (unm) on nil`.
+
+**Red/green:** A compiler-produced vector-constant regression failed VM status and trace checks before the change, then passed all 8 assertions. Vector rendering now sends only nonfinite components through the existing `NumberLiteralNode` path and keeps float/double finite formatting unchanged. Full CTest 641/641, stress 22/22, saved replay 560 semantic passes/2,408 unchecked.
 
 ## Source audit log
 

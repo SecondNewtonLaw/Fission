@@ -1037,13 +1037,32 @@ class SourceGenerator : public Visitor {
 
     void Visit(VectorNode *lpNode) override {
         m_sawVectorConstant = true;
+        const auto emitComponent = [&](auto component) {
+            const double value = static_cast<double>(component);
+            const uint64_t magnitude = std::bit_cast<uint64_t>(value) & 0x7fffffffffffffffULL;
+            if (magnitude >= 0x7ff0000000000000ULL) {
+                NumberLiteralNode literal{value};
+                literal.Accept(this);
+            } else {
+                buffer << std::format("{}", component);
+            }
+        };
         std::visit(
             [&](const auto &components) {
                 const auto [x, y, z, w] = components;
                 (void)w;
+                const auto emitConstructor = [&] {
+                    buffer << (m_vectorConstructorAlias.empty() ? "Vector3.new" : m_vectorConstructorAlias) << "(";
+                    emitComponent(x);
+                    buffer << ", ";
+                    emitComponent(y);
+                    buffer << ", ";
+                    emitComponent(z);
+                    buffer << ")";
+                };
 
                 if (!m_vectorConstructorAlias.empty()) {
-                    buffer << m_vectorConstructorAlias << "(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
+                    emitConstructor();
                     return;
                 }
 
@@ -1062,7 +1081,7 @@ class SourceGenerator : public Visitor {
                 else if (x == 0 && y == 0 && z == -1)
                     buffer << "-Vector3.zAxis";
                 else
-                    buffer << "Vector3.new(" << std::format("{}", x) << ", " << std::format("{}", y) << ", " << std::format("{}", z) << ")";
+                    emitConstructor();
             },
             lpNode->components
         );

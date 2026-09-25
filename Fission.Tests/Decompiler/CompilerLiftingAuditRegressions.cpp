@@ -462,6 +462,34 @@ print(vector.create(1, 2, 3)))LUA"},
     }
 }
 
+TEST_CASE("Compiler nonfinite vector components survive source generation", "[Decompiler][CompilerAudit][Semantics]") {
+    lifting_semantics_test::EnableLuauFFlagsOnce();
+    Luau::CompileOptions options{};
+    options.optimizationLevel = 2;
+    options.debugLevel = 2;
+    options.vectorLib = "Vector3";
+    options.vectorCtor = "new";
+    options.vectorType = "Vector3";
+    const auto bytecode = Luau::compile("print(vector.create(math.huge, -math.huge, math.sqrt(-1)))", options);
+    REQUIRE_FALSE(bytecode.empty());
+    REQUIRE(bytecode[0] != '\0');
+    Deserializer deserializer{};
+    const auto decoded = deserializer.Deserialize(bytecode);
+    REQUIRE(decoded.has_value());
+    bool foundVector = false;
+    for (const auto &constant : decoded->lpMainFunction->constants)
+        foundVector |= constant.kType == LUA_TVECTOR;
+    REQUIRE(foundVector);
+    const auto output = lifting_semantics_test::DecompileVanillaOrFail(bytecode);
+    INFO("decompiled:\n" << output);
+    const auto prelude = Luau::compile("", options);
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(output, options), prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
 TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     std::string source = "local u = 1\nlocal function f()\nlocal a0 = u\n";
