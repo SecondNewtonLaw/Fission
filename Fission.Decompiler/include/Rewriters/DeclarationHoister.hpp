@@ -1095,7 +1095,7 @@ class DeclarationHoister {
                 stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
                 continue;
             }
-            if (decl && !decl->value && IsRegisterName(name) && lhs && lhs->identifier && lhs->identifier->name == name && !ExprMentions(asn->right, name)) {
+            if (decl && !decl->value && !name.empty() && lhs && lhs->identifier && lhs->identifier->name == name && !ExprMentions(asn->right, name)) {
                 decl->value = asn->right;
                 stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
                 --i;

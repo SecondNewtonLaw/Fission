@@ -20,6 +20,7 @@ const LuauConstant &ASTLifter::ConstantAt(long idx) const {
 #include <coroutine>
 #include <exception>
 #include <functional>
+#include <numeric>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -696,6 +697,88 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 }
             }
         }
+
+        // Debug locals name every value written inside their range. Lifted scopes are flatter than the source's, so a
+        // local that overlaps a same-named local in another register (a shadow) keeps a distinct name.
+        const auto &locals = analyzedFunction.lpLiftedFunction->lpDeserialized->locvars;
+        std::vector<std::string> debugNames(locals.size());
+        // locvars close innermost-first; the outer local of a shadow pair keeps the plain name
+        std::vector<size_t> openOrder(locals.size());
+        std::iota(openOrder.begin(), openOrder.end(), size_t{0});
+        std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
+        for (const size_t i : openOrder) {
+            const auto &local = locals[i];
+            if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
+                continue;
+            // a move-elided inline parameter opens on a register another local still owns; it names nothing
+            if (std::ranges::any_of(locals, [&](const auto &owner) {
+                    return &owner != &local && owner.reg == local.reg && owner.startpc < local.startpc && local.startpc < owner.endpc;
+                }))
+                continue;
+            std::string name = localName(local.varname, static_cast<uint8_t>(local.reg));
+            const auto shadows = [&](const std::string &candidate) {
+                for (size_t j = 0; j < locals.size(); ++j)
+                    if (debugNames[j] == candidate && locals[j].reg != local.reg && locals[j].startpc < local.endpc && local.startpc < locals[j].endpc)
+                        return true;
+                return false;
+            };
+            for (int suffix = 2; shadows(name); ++suffix)
+                name = std::format("{}_{}", local.varname, suffix);
+            debugNames[i] = name;
+        }
+        std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
+        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+            if (definition && definition->operation != LiftedOperation::PHI)
+                writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
+        // `local a, b = f(), g()` opens both locals after the last initializer, so a write counts when it is the register's last before the open
+        const auto initializes = [&](const LuauLocalVar &local, int32_t index) {
+            if (index >= local.startpc - 1)
+                return true;
+            return std::ranges::none_of(writesByRegister[static_cast<uint8_t>(local.reg)], [&](int32_t write) { return index < write && write < local.startpc; });
+        };
+        const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
+            std::optional<size_t> found;
+            for (size_t i = 0; i < locals.size(); ++i)
+                if (!debugNames[i].empty() && locals[i].reg == reg && index < locals[i].endpc && initializes(locals[i], index) &&
+                    (!found || locals[i].startpc > locals[*found].startpc))
+                    found = i;
+            return found;
+        };
+        // one variable is every version its merges join (a value diamond's arms, a loop's carried value)
+        std::unordered_map<SSARef, SSARef> parent;
+        const std::function<SSARef(const SSARef &)> root = [&](const SSARef &ref) -> SSARef {
+            const auto found = parent.find(ref);
+            if (found == parent.end() || found->second == ref)
+                return ref;
+            return found->second = root(found->second);
+        };
+        for (const auto &block : analyzedFunction.basicBlocks)
+            for (const auto &phi : block.phiNodes)
+                for (size_t i = 1; i < phi.operands.size(); ++i)
+                    if (phi.operands[i].type == LiftedOperandType::Register && phi.operands[i].value.reg == phi.operands[0].value.reg && phi.operands[i].ssaVersion >= 0)
+                        parent[root({static_cast<uint8_t>(phi.operands[i].value.reg), phi.operands[i].ssaVersion})] =
+                            root({static_cast<uint8_t>(phi.operands[0].value.reg), phi.operands[0].ssaVersion});
+        std::unordered_map<SSARef, std::optional<size_t>> componentLocals; // nullopt: two different locals share it
+        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+            if (definition && definition->operation != LiftedOperation::PHI && ref.regIndex >= analyzedFunction.lpLiftedFunction->numparams)
+                if (const auto local = debugLocalAt(ref.regIndex, definition->instructionIndex)) {
+                    const auto [entry, inserted] = componentLocals.try_emplace(root(ref), local);
+                    if (!inserted && entry->second && debugNames[*entry->second] != debugNames[*local])
+                        entry->second.reset();
+                }
+        // a value read after its local's scope closes (an inlined call's result) is not that local once scopes flatten
+        for (const auto &[ref, users] : analyzedFunction.users)
+            if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
+                for (const auto *user : users)
+                    if (user->operation != LiftedOperation::PHI &&
+                        (user->instructionIndex < locals[*owner->second].startpc - 1 || user->instructionIndex >= locals[*owner->second].endpc)) {
+                        owner->second.reset();
+                        break;
+                    }
+        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+            if (!analyzedFunction.ssaOverrides.contains(ref) && !analyzedFunction.variableNames.contains(ref))
+                if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
+                    analyzedFunction.SetVariableName(ref.regIndex, ref.version, debugNames[*owner->second]);
     }
 
     // Captured phi inputs must use the same local name as the merged upvalue.
@@ -4061,9 +4144,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
                 const bool isParameterWrite = inst.operands[0].value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
                 if ((inst.operands[0].ssaVersion <= 1 && !isParameterWrite && !m_hoistedRegisters.contains(inst.operands[0].value.reg)) || !isDefined ||
-                    DeclaresLocal(inst, inst.operands[0]))
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, val));
-                else {
+                    DeclaresLocal(inst, inst.operands[0])) {
+                    const auto users = m_currentFunction->users.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
+                    const bool unreadNil = inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 &&
+                                           inst.operands[1].type == LiftedOperandType::ImmediateNil &&
+                                           (users == m_currentFunction->users.end() || users->second.empty());
+                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, unreadNil ? nullptr : val));
+                } else {
                     if (val->nodeKind == ASTNodeKind::BinaryExpression) {
                         // binary expressions may be compounded under specific conditions.
                         if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(val); lpBinExpr != nullptr)
