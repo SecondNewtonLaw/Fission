@@ -1091,7 +1091,14 @@ class SourceGenerator : public Visitor {
         // Computed table keys require brackets; values do not.
         (void)lpNode;
         buffer << "[";
+        std::stringstream keyBuf;
+        keyBuf.swap(buffer);
         lpNode->left->Accept(this);
+        keyBuf.swap(buffer);
+        const std::string key = keyBuf.str();
+        if (!key.empty() && key.front() == '[')
+            buffer << ' ';
+        buffer << key;
         buffer << "] " << lpNode->op << " ";
         lpNode->right->Accept(this);
     }

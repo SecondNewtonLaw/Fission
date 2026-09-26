@@ -36,6 +36,40 @@ static bool Recompiles(const std::string &source, std::string *errorOut) {
     return ok;
 }
 
+TEST_CASE("Regress fuzz: multiline string at start of computed table key recompiles", "[Decompiler][FuzzRegress][Source]") {
+    EnableLuauFFlagsOnce();
+    const std::string sources[] = {
+        "local t = { [ [[a\nb]] / 136i] = 1 }\nreturn t\n",
+        R"LUA(local v0 = table()
+local v1 = (not 70i).y.x
+local v2 = function()
+    return false
+end
+local v3 = v2()
+next(v1())
+local v4 = not function()
+    return ({ ["y"] = 183 } or "value")
+end
+tostring({  }, (39i)[false])
+local v5 = "hello"
+local v6 = {  }
+v6[ [[a
+b]] / 136i] = nil // "\n"
+return nil, nil
+)LUA"
+    };
+    for (const std::string &source : sources) {
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{0, 2});
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO(result.decompilationOutput);
+        std::string error;
+        const bool recompiles = Recompiles(result.decompilationOutput, &error);
+        INFO(error);
+        CHECK(recompiles);
+    }
+}
+
 // True if the output contains an `anon_<n>_<n> = ...` bare assignment -- the closure-leak shape where a
 // phi-consumed branch closure is written to an undeclared global instead of the merge-target local.
 static size_t CountOccurrences(const std::string &haystack, const std::string &needle) {
