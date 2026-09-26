@@ -220,12 +220,14 @@ static bool IsGenericForVariable(const AnalyzedFunction &func, const BasicBlock 
 // The CFG routes the loop latch back into the FOR*PREP block, but the VM runs the prep once: its reads
 // happen on entry edges only. `liveInNormal` omits those reads and is what the latch edge observes.
 static void ComputeLiveness(
-    AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn, std::vector<std::vector<bool>> &liveInNormal
+    AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn, std::vector<std::vector<bool>> &liveInNormal,
+    std::vector<std::vector<bool>> &blockUses
 ) {
     size_t numBlocks = func->basicBlocks.size();
     liveIn.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
     liveInNormal.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
-    std::vector<std::vector<bool>> use(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    blockUses.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    auto &use = blockUses;
     std::vector<std::vector<bool>> entryUse(numBlocks, std::vector<bool>(maxRegs + 1, false));
     std::vector<std::vector<bool>> def(numBlocks, std::vector<bool>(maxRegs + 1, false));
 
@@ -394,7 +396,7 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
     }
 
     std::vector<std::vector<bool>> liveIn, liveInNormal;
-    ComputeLiveness(lpOriginalFunction, maxRegs, liveIn, liveInNormal);
+    ComputeLiveness(lpOriginalFunction, maxRegs, liveIn, liveInNormal, blockUses);
     entryOnlyPhis.assign(lpOriginalFunction->basicBlocks.size(), std::vector<bool>(maxRegs + 1, false));
 
     std::vector<std::vector<int>> defBlocks(maxRegs + 1);
@@ -816,7 +818,7 @@ std::vector<int> SSABuilder::RenameBlock(int blockId, AnalyzedFunction &func) {
                 return false;
             const int base = latch.lpTail->operands[0].value.reg;
             const int numVars = latch.lpTail->operands[2].value.imm.n & 0xFF;
-            return reg >= base + 3 && reg < base + 3 + numVars;
+            return reg >= base + 3 && reg < base + 3 + numVars && !blockUses[header.dwBlockId][reg];
         };
 
         if (predIndex != -1) {

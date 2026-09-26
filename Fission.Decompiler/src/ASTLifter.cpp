@@ -588,6 +588,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         };
         for (size_t i = 0; i < instrs.size(); ++i) {
             const auto &inst = instrs[i];
+            const int32_t blockId = analyzedFunction.GetBlockId(&inst);
+            if (blockId < 0 || analyzedFunction.basicBlocks[static_cast<size_t>(blockId)].bType == BlockType::Dead)
+                continue;
             LuauProto proto = nullptr;
             if (inst.operation == LiftedOperation::DUPCLOSURE) {
                 const int32_t kIdx = inst.operands[1].value.imm.k;
@@ -738,10 +741,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         };
         const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
             std::optional<size_t> found;
-            for (size_t i = 0; i < locals.size(); ++i)
+            for (size_t i = 0; i < locals.size(); ++i) {
+                if (index < locals[i].startpc && locals[i].startpc > 0 && static_cast<size_t>(locals[i].startpc - 1) < instrs.size()) {
+                    const auto &prep = instrs[locals[i].startpc - 1];
+                    const bool numeric = prep.operation == LiftedOperation::FORNPREP;
+                    const bool generic = prep.operation == LiftedOperation::FORGPREP || prep.operation == LiftedOperation::FORGPREP_NEXT ||
+                                         prep.operation == LiftedOperation::FORGPREP_INEXT;
+                    if ((numeric || generic) && !prep.operands.empty() && reg >= prep.operands[0].value.reg + (numeric ? 2 : 3))
+                        continue;
+                }
                 if (!debugNames[i].empty() && locals[i].reg == reg && index < locals[i].endpc && initializes(locals[i], index) &&
                     (!found || locals[i].startpc > locals[*found].startpc))
                     found = i;
+            }
             return found;
         };
         // one variable is every version its merges join (a value diamond's arms, a loop's carried value)
@@ -1084,7 +1096,9 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
         auto left = LiftExpression(a);
         auto right = LiftExpression(b);
         // `x > 3` lowers to LT(3, x); a literal has no evaluation order, so read it back variable-first
-        if (std::string_view(op) != mirrored && std::dynamic_pointer_cast<LiteralNode>(left) && !std::dynamic_pointer_cast<LiteralNode>(right))
+        const bool pureLiteral = std::dynamic_pointer_cast<LiteralNode>(left) && !std::dynamic_pointer_cast<TableLiteralNode>(left) &&
+                                 !std::dynamic_pointer_cast<VectorNode>(left);
+        if (std::string_view(op) != mirrored && pureLiteral && !std::dynamic_pointer_cast<LiteralNode>(right))
             return std::make_shared<BinaryExpressionNode>(mirrored, right, left);
         return std::make_shared<BinaryExpressionNode>(op, left, right);
     };
@@ -1291,6 +1305,45 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     while (true) {
         if (currentBlockId == InvalidBlockId || currentBlockId >= m_currentFunction->basicBlocks.size())
             break;
+
+        if (m_loopExitStack.empty() && currentBlockId != stopBlockId && !visited.contains(currentBlockId)) {
+            const auto &entry = m_currentFunction->basicBlocks[currentBlockId];
+            if (entry.bType == BlockType::IfHeader && entry.ifStatementTrue && entry.ifStatementFalse) {
+                const int32_t exitId = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse);
+                if (exitId > static_cast<int32_t>(currentBlockId) && exitId < static_cast<int32_t>(m_currentFunction->basicBlocks.size()) &&
+                    (stopBlockId == InvalidBlockId || exitId <= static_cast<int32_t>(stopBlockId))) {
+                    const auto &exit = m_currentFunction->basicBlocks[exitId];
+                    if ((exit.bType == BlockType::Standard || exit.bType == BlockType::Return) && exit.predecessors.size() > 1 &&
+                        exit.phiNodes.empty()) {
+                        m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
+                        const int32_t bodyId = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse, true);
+                        m_loopExitStack.pop_back();
+                        if (bodyId > static_cast<int32_t>(currentBlockId) && bodyId < exitId &&
+                            std::ranges::any_of(exit.predecessors, [&](uint32_t pred) {
+                                return pred < static_cast<uint32_t>(bodyId) &&
+                                       m_currentFunction->basicBlocks[pred].ifStatementTrue == static_cast<uint32_t>(exitId);
+                            }) &&
+                            std::ranges::any_of(exit.predecessors, [&](uint32_t pred) {
+                                const auto &normal = m_currentFunction->basicBlocks[pred];
+                                return pred >= static_cast<uint32_t>(bodyId) && normal.bType == BlockType::LoopLatch &&
+                                       normal.loopExit == static_cast<uint32_t>(exitId);
+                            })) {
+                            m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
+                            auto body = co_await LiftControlFlow(currentBlockId, static_cast<uint32_t>(exitId), visited);
+                            m_loopExitStack.pop_back();
+                            if (!body.empty() && body.back()->nodeKind == ASTNodeKind::BreakStatement)
+                                body.pop_back();
+                            auto repeat = std::make_shared<RepeatStatementNode>();
+                            repeat->body = CreateBlock(body);
+                            repeat->condition = std::make_shared<BooleanLiteralNode>(true);
+                            nodes.push_back(repeat);
+                            currentBlockId = static_cast<uint32_t>(exitId);
+                            continue;
+                        }
+                    }
+                }
+            }
+        }
 
         // body code reaching the innermost loop exit directly == `break` (normal exit goes via latch).
         // don't mark visited; exit is still lifted once after the loop.
@@ -2934,6 +2987,21 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 // a tail branch that can no longer reach the back-edge leaves the wrap (a `repeat` test lifted as this shape)
                 uint32_t wrapExit = InvalidBlockId;
                 if (nextBlockId != InvalidBlockId && nextBlockId < m_currentFunction->basicBlocks.size() && nextBlockId != *infiniteWhileLatch) {
+                    const auto reachesOuterLatch = [&](uint32_t start) {
+                        boost::unordered_flat_set<uint32_t> pathSeen;
+                        std::vector<uint32_t> path{start};
+                        while (!path.empty()) {
+                            const uint32_t id = path.back();
+                            path.pop_back();
+                            if (id == *infiniteWhileLatch)
+                                return true;
+                            if (id == currentBlockId || id >= m_currentFunction->basicBlocks.size() || !pathSeen.insert(id).second)
+                                continue;
+                            const auto &successors = m_currentFunction->basicBlocks[id].successors;
+                            path.insert(path.end(), successors.begin(), successors.end());
+                        }
+                        return false;
+                    };
                     boost::unordered_flat_set<uint32_t> seen{nextBlockId};
                     std::vector<uint32_t> pending{nextBlockId};
                     while (!pending.empty() && wrapExit == InvalidBlockId && seen.size() < 256) {
@@ -2943,10 +3011,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (succ == *infiniteWhileLatch || succ == currentBlockId || succ >= m_currentFunction->basicBlocks.size() ||
                                 !seen.insert(succ).second)
                                 continue;
-                            // an inner loop's latch returns to its header; CanReach does not follow latch back-edges
+                            // An inner loop's latch may be the only path from its body to the outer latch.
                             const auto &candidate = m_currentFunction->basicBlocks[succ];
                             const bool innerLatch = candidate.bType == BlockType::LoopLatch && candidate.loopHeader && seen.contains(*candidate.loopHeader);
-                            if (candidate.bType != BlockType::Return && !innerLatch && !CanReach(succ, *infiniteWhileLatch, currentBlockId, {currentBlockId})) {
+                            if (candidate.bType != BlockType::Return && !innerLatch && !reachesOuterLatch(succ)) {
                                 wrapExit = succ;
                                 break;
                             }

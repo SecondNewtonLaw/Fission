@@ -747,6 +747,7 @@ void ASTLifter::DeferIntoCondition(
     if ((def.operation != LiftedOperation::CALL && def.operation != LiftedOperation::CALLFB) || def.operands.empty() ||
         !m_currentFunction->implicitUses.contains(&def))
         return;
+    pending.emplace_back(def.operands[0], &def);
     for (const auto &argument : CallArguments(def))
         pending.emplace_back(argument, &def);
     const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
@@ -1211,7 +1212,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
                 return false;
             if (IsTableStore(*reader) && reader->operands.size() > 1 && StoreTargetsFreshTable(reader)) {
                 const auto *table = m_currentFunction->GetDefinition(StoredTable(*reader));
-                return table && table->instructionIndex < defIdx;
+                return table && table->instructionIndex < defIdx && ShouldInline(table);
             }
             current = reader;
         }

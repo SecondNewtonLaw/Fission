@@ -980,6 +980,12 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         if (back == pred.successors.end())
                             continue;
                         const uint32_t other = pred.successors[0] == block.dwBlockId ? pred.successors[1] : pred.successors[0];
+                        const bool bodyCallBeforeTest = std::any_of(successor.lpHead, successor.lpTail, [](const LiftedInstruction &inst) {
+                            return (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) &&
+                                   inst.operands.size() > 2 && inst.operands[2].value.imm.n == 1;
+                        });
+                        if (!bodyCallBeforeTest && std::find(successor.successors.begin(), successor.successors.end(), other) != successor.successors.end())
+                            continue;
                         if (reachesBefore(other, block.dwBlockId, successor.dwBlockId))
                             continue;
                         conditionalLatch = &pred;
@@ -1057,14 +1063,14 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         continue;
                     }
 
-                    // A conditional header that jumps straight to the latch is a repeat-until body, unless its other arm
-                    // stays in the loop (a multi-block `a or b` condition whose exit test comes later).
+                    // A repeat condition falls through to its latch; a while condition jumps there.
                     bool isRepeatUntil = false;
                     if (successor.bTerminator == BlockTerminator::Conditional && successor.successors.size() == 2) {
                         const auto direct = std::find(successor.successors.begin(), successor.successors.end(), block.dwBlockId);
                         if (direct != successor.successors.end()) {
                             const uint32_t other = successor.successors[0] == block.dwBlockId ? successor.successors[1] : successor.successors[0];
-                            isRepeatUntil = other != block.dwBlockId && !reachesBefore(other, block.dwBlockId, successor.dwBlockId);
+                            isRepeatUntil = successor.ifStatementFalse == block.dwBlockId && other != block.dwBlockId &&
+                                            !reachesBefore(other, block.dwBlockId, successor.dwBlockId);
                         }
                     }
 
