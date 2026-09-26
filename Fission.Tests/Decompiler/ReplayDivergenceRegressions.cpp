@@ -38,6 +38,34 @@ namespace replay_divergence {
 
 using replay_divergence::CheckSemanticParity;
 
+TEST_CASE("Replay: SETLIST constructor stops before observed table mutation", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local seen
+local function observe(x)
+    seen = x[3]
+    return 4
+end
+local t = {1, 2}
+local key = observe(t)
+t[3] = 7
+t[key] = 8
+return seen)LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Replay: shared closures in SETLIST keep identity", "[Decompiler][ReplayRegress][Semantics]") {
+    CheckSemanticParity(
+        R"LUA(local function make()
+    return function() return false end
+end
+local t = {make(), make()}
+return t[1] == t[2], t[1]())LUA",
+        2, 1
+    );
+}
+
 TEST_CASE("Replay: repeat condition preserves failing lookup order", "[Decompiler][ReplayRegress][Semantics]") {
     const std::string source = "repeat until print[\"\"].field.field[tostring.field(nil, ...)]";
     for (int optimization = 0; optimization <= 2; ++optimization) {

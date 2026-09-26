@@ -14,6 +14,89 @@ namespace ForwardDeclarationRegressions {
         INFO(result.output);
         return result.output;
     }
+} // namespace ForwardDeclarationRegressions
+
+TEST_CASE("Nested constructor key keeps later closure declaration in scope", "[Decompiler][ForwardDeclaration][Table]") {
+    const std::string source = R"LUA(local outer = {"x"}
+local value = function() return 1 end
+outer[{y = true, field = "key", value}] = 7
+print(outer)
+return outer)LUA";
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{2, 1});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+}
+
+TEST_CASE("Numeric loop assignment does not read its own declaration", "[Decompiler][ForwardDeclaration][Loop]") {
+    const std::string source = R"LUA(for i = 1, 2 do
+    if i then
+        i = i.field
+    end
+    print(i)
+end)LUA";
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{2, 1});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+}
+
+TEST_CASE("Shared repeat exit test stays outside inner break guard", "[Decompiler][ForwardDeclaration][Loop]") {
+    const std::string source = R"LUA(repeat
+    repeat
+        if nil then break end
+    until f0[150].field
+    if f0[table].field then
+        ipairs(tonumber, ipairs)
+    end
+    if f0:set(191, true) then
+        break
+    end
+until (if ... then f0[tonumber] else f0[pairs]) + ...)LUA";
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{2, 1});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+}
+
+TEST_CASE("Nested repeat keeps numeric loop variable name through phi", "[Decompiler][ForwardDeclaration][Loop]") {
+    const std::string source = R"LUA(for g in generator() do
+    for i = false, function() return g end do
+        repeat
+            if "x" then continue end
+        until function() return g end
+        for k, v in g(false, i) do
+            k(g)
+        end
+        i()
+    end
+end)LUA";
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{2, 1});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+}
+
+TEST_CASE("Repeated merge call keeps closure argument bound", "[Decompiler][ForwardDeclaration][Loop]") {
+    const std::string source = R"LUA(local x
+repeat
+    x = select
+    f(function() return x end, if { t, k = 660 } then {} else {})
+until x)LUA";
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{2, 1});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    INFO(result.decompilationOutput);
+    CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
 }
 
 TEST_CASE("Batch 4 repeat branch keeps a declaration visible after the branch", "[Decompiler][ForwardDeclaration][Batch4]") {

@@ -626,11 +626,10 @@ bool ASTLifter::RenderClosureInPlace(const LiftedInstruction &closure, const std
         return true;
     }
     // `t[k] = function() ... end`: a nameless closure stored right after its captures
-    if (const auto *store = SoleUser(ref); store &&
-                                           (store->operation == LiftedOperation::SETTABLE || store->operation == LiftedOperation::SETTABLEKS ||
-                                            store->operation == LiftedOperation::SETTABLEN) &&
-                                           store->operands[0].value.reg == ref.regIndex && store->operands[0].ssaVersion == ref.version &&
-                                           !BeginsDebugLocal(closure, ref.regIndex)) {
+    if (const auto *store = SoleUser(ref);
+        store &&
+        (store->operation == LiftedOperation::SETTABLE || store->operation == LiftedOperation::SETTABLEKS || store->operation == LiftedOperation::SETTABLEN) &&
+        store->operands[0].value.reg == ref.regIndex && store->operands[0].ssaVersion == ref.version && !BeginsDebugLocal(closure, ref.regIndex)) {
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
         bool adjacent = BlockOf(store) == BlockOf(&closure);
         for (auto k = static_cast<size_t>(closure.instructionIndex) + 1; adjacent && k < static_cast<size_t>(store->instructionIndex); ++k)
@@ -828,10 +827,11 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                     if (user->operation == LiftedOperation::SETLIST && user->operands.size() > 1 && user->operands[0].value.reg == key.regIndex &&
                         user->operands[0].ssaVersion == key.version) {
                         result = std::ranges::any_of(SetListElements(*user), [&](const LiftedOperand &element) { return readsTableReg(element); });
-                    } else if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
-                                user->operation == LiftedOperation::SETTABLEN) &&
-                               user->operands.size() > 1 && user->operands[1].value.reg == key.regIndex &&
-                               user->operands[1].ssaVersion == key.version) {
+                    } else if (
+                        (user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
+                         user->operation == LiftedOperation::SETTABLEN) &&
+                        user->operands.size() > 1 && user->operands[1].value.reg == key.regIndex && user->operands[1].ssaVersion == key.version
+                    ) {
                         result = readsTableReg(user->operands[0]) || (user->operands.size() > 2 && readsTableReg(user->operands[2]));
                     }
                     if (result)
@@ -860,14 +860,12 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     // a plan is asked while deciding whether the table inlines, so it assumes it does
     const bool tableIsLocal = !dryRun && !ShouldInline(&inst);
 
-    auto isLaterName = [&](const LiftedInstruction *def) -> bool {
-        return BlockOf(def) == tableBlock && def->instructionIndex > tableIndex;
-    };
+    auto isLaterName = [&](const LiftedInstruction *def) -> bool { return BlockOf(def) == tableBlock && def->instructionIndex > tableIndex; };
 
     std::unordered_set<std::string> templateKeys;
-    if (const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants; inst.operation == LiftedOperation::DUPTABLE &&
-                                                                                                 inst.operands[1].value.imm.k >= 0 &&
-                                                                                                 static_cast<size_t>(inst.operands[1].value.imm.k) < constants.size())
+    if (const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
+        inst.operation == LiftedOperation::DUPTABLE && inst.operands[1].value.imm.k >= 0 &&
+        static_cast<size_t>(inst.operands[1].value.imm.k) < constants.size())
         if (const auto &constant = constants[inst.operands[1].value.imm.k]; constant.kType == LUA_TTABLE) {
             const auto shape = constant.GetValue<LuauTable>();
             templateKeys.insert(shape.keys.begin(), shape.keys.end());
@@ -890,9 +888,15 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         const auto *store = SoleUser({static_cast<uint8_t>(value.value.reg), value.ssaVersion});
         if (!def || (def->operation != LiftedOperation::NEWCLOSURE && def->operation != LiftedOperation::DUPCLOSURE) || !isLaterName(def) || !store)
             return false;
+        if (def->operation == LiftedOperation::DUPCLOSURE && def->operands.size() > 1) {
+            const auto shared = m_sharedClosures.find(def->operands[1].value.imm.k);
+            if (shared != m_sharedClosures.end() && shared->second.count > 1)
+                return false;
+        }
         if (store->operation == LiftedOperation::SETTABLEKS) {
-            if (inst.operation == LiftedOperation::DUPTABLE ? !templateKeys.contains(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData))
-                                                            : !bFoundSetList || keyedFields >= hashCapacity)
+            if (inst.operation == LiftedOperation::DUPTABLE
+                    ? !templateKeys.contains(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData))
+                    : !bFoundSetList || keyedFields >= hashCapacity)
                 return false;
         } else if (store->operation != LiftedOperation::SETLIST && (!bFoundSetList || keyedFields >= hashCapacity)) {
             return false;
@@ -945,7 +949,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     auto closureSlot = [&](const LiftedOperand &value) -> std::shared_ptr<Expression> {
         if (!tableIsLocal)
             return LiftExpression(value);
-        auto slot =std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, nullptr, false);
+        auto slot =
+            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, nullptr, false);
         m_closureSlots[SSARef{static_cast<uint8_t>(value.value.reg), value.ssaVersion}].push_back(slot);
         return slot;
     };
@@ -973,6 +978,22 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             if (!res && (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB))
                 res = readsLaterName(def->operands[0]) ||
                       std::ranges::any_of(CallArguments(*def), [&](const LiftedOperand &argument) { return readsLaterName(argument); });
+            if (!res && (def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE))
+                if (const auto users = m_currentFunction->users.find(key); users != m_currentFunction->users.end())
+                    for (const auto *store : users->second) {
+                        const bool list = store->operation == LiftedOperation::SETLIST;
+                        const bool field = store->operation == LiftedOperation::SETTABLE || store->operation == LiftedOperation::SETTABLEKS ||
+                                           store->operation == LiftedOperation::SETTABLEN;
+                        const size_t table = list ? 0 : 1;
+                        if ((!list && !field) || store->operands.size() <= table || store->operands[table].type != LiftedOperandType::Register ||
+                            store->operands[table].value.reg != key.regIndex || store->operands[table].ssaVersion != key.version)
+                            continue;
+                        res = list ? std::ranges::any_of(SetListElements(*store), readsLaterName)
+                                   : readsLaterName(store->operands[0]) ||
+                                         (store->operation == LiftedOperation::SETTABLE && store->operands.size() > 2 && readsLaterName(store->operands[2]));
+                        if (res)
+                            break;
+                    }
         } else {
             res = isLaterName(def);
         }
@@ -1079,6 +1100,28 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 
     for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
         const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+        const bool store = candidate.operation == LiftedOperation::SETLIST || candidate.operation == LiftedOperation::SETTABLE ||
+                           candidate.operation == LiftedOperation::SETTABLEKS || candidate.operation == LiftedOperation::SETTABLEN;
+        const size_t tableOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
+        const bool ownStore = store && candidate.operands.size() > tableOperand && candidate.operands[tableOperand].type == LiftedOperandType::Register &&
+                              candidate.operands[tableOperand].value.reg == tableReg && candidate.operands[tableOperand].ssaVersion == tableVersion;
+        if (!ownStore) {
+            const auto readsOwnTable = [&](const LiftedOperand &op) {
+                return op.type == LiftedOperandType::Register && op.value.reg == tableReg && op.ssaVersion == tableVersion;
+            };
+            bool readsTable = false;
+            for (size_t oi = 0; oi < candidate.operands.size(); ++oi) {
+                const auto access = SSABuilder::GetRegisterAccess(candidate, oi);
+                if ((access == AccessType::Read || access == AccessType::ReadWrite) && readsOwnTable(candidate.operands[oi])) {
+                    readsTable = true;
+                    break;
+                }
+            }
+            if (!readsTable && (candidate.operation == LiftedOperation::CALL || candidate.operation == LiftedOperation::CALLFB))
+                readsTable = std::ranges::any_of(CallArguments(candidate), readsOwnTable);
+            if (readsTable)
+                break;
+        }
         if ((candidate.operation == LiftedOperation::SETLIST && storesIntoForeignTable(candidate, 0)) ||
             ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
               candidate.operation == LiftedOperation::SETTABLEN) &&
@@ -1167,10 +1210,12 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 if (dryRun)
                     continue;
                 const auto &k = ConstantAt(candidate.operands[2].value.imm.k);
-                elements.push_back(std::make_shared<BinaryExpressionNode>(
-                    "=", MakeTableKey(std::get<std::string>(k.constantData)),
-                    closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
-                ));
+                elements.push_back(
+                    std::make_shared<BinaryExpressionNode>(
+                        "=", MakeTableKey(std::get<std::string>(k.constantData)),
+                        closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
+                    )
+                );
                 ConsumeInlinedDefs(candidate.operands[0]);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEN) {
@@ -1187,10 +1232,12 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                     continue;
                 // the immediate is index - 1
                 const int idx = candidate.operands[2].value.imm.n + 1;
-                elements.push_back(std::make_shared<BinaryExpressionNode>(
-                    "=", std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx)),
-                    closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
-                ));
+                elements.push_back(
+                    std::make_shared<BinaryExpressionNode>(
+                        "=", std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx)),
+                        closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
+                    )
+                );
                 ConsumeInlinedDefs(candidate.operands[0]);
             }
         } else if (candidate.operation == LiftedOperation::SETTABLE) {

@@ -437,7 +437,8 @@ TEST_CASE("Regress: invalid UTF-8 bytes are escaped, valid stays raw", "[Decompi
 
 // A computed local stored into a field is named after that field.
 TEST_CASE("Regress: reverse-field naming names a local after its field", "[Decompiler][Cleanup][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function make(x)
             local self = {}
             local v = x * 2 + 1
@@ -446,7 +447,9 @@ TEST_CASE("Regress: reverse-field naming names a local after its field", "[Decom
             return self
         end
         return make
-    )", 1, 1);
+    )",
+        1, 1
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(local\s+health\s*=)")));
@@ -524,6 +527,13 @@ TEST_CASE("Regress: SETLIST safe elements still fold into a constructor", "[Deco
         CHECK(NoForwardReference(out));
         CHECK(Recompiles(out));
     }
+}
+
+TEST_CASE("Regress: computed key after SETLIST stays in constructor", "[Decompiler][Table][SetList][Regression]") {
+    const auto out = DecompileOrFail("local function f(g) local t = { 1, 2, [g()] = 3 } print(t) return t end return f");
+    INFO("decompile:\n" << out);
+    CHECK(ContainsRegex(out, std::regex(R"(\{\s*1,\s*2,\s*\[\w+\(\)\]\s*=\s*3\s*\})")));
+    CHECK(Recompiles(out));
 }
 
 // A SETLIST with count == 0 is variadic: the array gathers every source register up to the stack top,

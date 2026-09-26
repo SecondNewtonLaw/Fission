@@ -8,10 +8,12 @@
 #pragma once
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "Rewriters/ASTRewriter.hpp"
+#include "Rewriters/ScopeAwareRenamer.hpp"
 
 #include <memory>
 #include <optional>
 #include <string>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -38,6 +40,10 @@ class ShortCircuitChainFolder : public ASTRewriter {
 
                 auto secondForm = AsShortCircuitAssign(stmts[i + 1]);
                 if (!secondForm || secondForm->lhsName != first->lhsName)
+                    continue;
+                std::unordered_set<std::string> rhsNames;
+                ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(secondForm->rhs), rhsNames);
+                if (rhsNames.contains(first->lhsName))
                     continue;
 
                 auto folded = std::make_shared<BinaryExpressionNode>(secondForm->op, first->rhs, secondForm->rhs);
