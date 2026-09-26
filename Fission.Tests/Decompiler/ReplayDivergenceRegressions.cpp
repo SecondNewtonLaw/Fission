@@ -38,6 +38,304 @@ namespace replay_divergence {
 
 using replay_divergence::CheckSemanticParity;
 
+TEST_CASE("Replay: repeat condition preserves failing lookup order", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "repeat until print[\"\"].field.field[tostring.field(nil, ...)]";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        const Luau::CompileOptions options{optimization, 2};
+        fuzz::EnableLuauFlags();
+        const auto decompiled = fuzz::FullDecompile(source);
+        REQUIRE(decompiled.code == DecompileResult::Success);
+        INFO(decompiled.output);
+        const auto prelude = Luau::compile(fuzz::kSemPreludes[0], options);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
+        const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(decompiled.output, options), prelude);
+        REQUIRE(original.status == fuzz::SemTrace::Status::Error);
+        CHECK(reconstructed.status == original.status);
+        CHECK(reconstructed.trace == original.trace);
+    }
+}
+
+TEST_CASE("Replay: repeat condition preserves observable lookup order", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local emit = print
+local events = {}
+local receiver = setmetatable({}, {
+    __index = function()
+        events[#events + 1] = "receiver"
+        return { field = { field = { hit = true } } }
+    end,
+})
+local target = setmetatable({}, {
+    __index = function()
+        events[#events + 1] = "callee"
+        return function()
+            events[#events + 1] = "call"
+            return "hit"
+        end
+    end,
+})
+repeat
+until receiver[""].field.field[target.field(nil, ...)]
+emit(table.concat(events, ",")))LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: dead closure capture does not rename live local", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function f0(...)
+    if (if pairs("hello", obj) then f0 else (-"")) then
+    end
+end
+while ... do
+    f0 ..= ((f0))
+end
+repeat
+    f0(0)
+until not 0
+repeat
+    local function f1()
+        f0 = "key"
+    end
+until function(p1, p2, p3)
+end
+)LUA";
+    fuzz::EnableLuauFlags();
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        const Luau::CompileOptions options{optimization, 2};
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), options);
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO(result.decompilationOutput);
+        const auto originalBytecode = Luau::compile(source, options);
+        const auto reconstructedBytecode = Luau::compile(result.decompilationOutput, options);
+        for (size_t fixture = 0; fixture < fuzz::kSemPreludeCount; ++fixture) {
+            INFO("fixture " << fixture);
+            const auto prelude = Luau::compile(fuzz::kSemPreludes[fixture], options);
+            const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
+            const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
+            REQUIRE(original.status != fuzz::SemTrace::Status::Timeout);
+            REQUIRE(original.status != fuzz::SemTrace::Status::LoadFailed);
+            CHECK(reconstructed.status == original.status);
+            CHECK(reconstructed.trace == original.trace);
+        }
+    }
+}
+
+TEST_CASE("Replay: raising expressions keep order across comparison and table assignment", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string sources[] = {
+        R"LUA(local v0 = "key"
+local function f1(p2, p3, p4, ...)
+    return print
+end
+local v2 = ({ f1, [nil] = 228.25 } < (not f1:run(v0)))
+return { nil, 23.75 }, string:method("key"))LUA",
+        R"LUA(local v0 = {}
+local v1 = v0[true][(true)[20i]]
+v0[-{}] = (if false then true else v1).x
+return -obj)LUA",
+    };
+    fuzz::EnableLuauFlags();
+    for (const auto &source : sources) {
+        INFO("source " << source);
+        for (int optimization = 0; optimization <= 2; ++optimization) {
+            INFO("optimization " << optimization);
+            const Luau::CompileOptions options{optimization, 2};
+            Decompiler decompiler{};
+            const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), options);
+            REQUIRE(result.resultCode == DecompileResult::Success);
+            INFO(result.decompilationOutput);
+            const auto originalBytecode = Luau::compile(source, options);
+            const auto reconstructedBytecode = Luau::compile(result.decompilationOutput, options);
+            for (size_t fixture = 0; fixture < fuzz::kSemPreludeCount; ++fixture) {
+                INFO("fixture " << fixture);
+                const auto prelude = Luau::compile(fuzz::kSemPreludes[fixture], options);
+                const auto original = fuzz::RunLuauTrace(originalBytecode, prelude);
+                const auto reconstructed = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
+                REQUIRE(original.status == fuzz::SemTrace::Status::Error);
+                CHECK(reconstructed.status == original.status);
+                CHECK(reconstructed.trace == original.trace);
+            }
+        }
+    }
+}
+
+TEST_CASE("Replay: empty while keeps its entry test", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function c()
+    return false
+end
+while (c() or nil) do
+end
+print("done"))LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Loop: shared outer header does not duplicate an inner loop tail", "[Decompiler][ReplayRegress][ControlFlow]") {
+    const std::string source = R"LUA(while true do
+    while a do
+        print("first")
+        if x then
+            continue
+        end
+    end
+    while b do
+        local function f0(...)
+            return next, f0
+        end
+        for i = tonumber, f0:get() do
+            local function f2()
+                i()
+            end
+            for j = 1, 3 do
+                i(true)
+                if x then
+                    continue
+                end
+            end
+        end
+    end
+    while c do
+        print("third")
+    end
+end
+print("after"))LUA";
+    fuzz::EnableLuauFlags();
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{optimization, 2});
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO(result.decompilationOutput);
+        CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+        const auto first = result.decompilationOutput.find("local function f0");
+        REQUIRE(first != std::string::npos);
+        CHECK(result.decompilationOutput.find("local function f0", first + 1) == std::string::npos);
+    }
+}
+
+TEST_CASE("Loop: while break before repeat condition stays an entry test", "[Decompiler][ReplayRegress][ControlFlow]") {
+    const std::string source = R"LUA(repeat
+    while t:set() do
+        next()
+        if pairs then
+            break
+        end
+    end
+    if select[ipairs] then
+        break
+    end
+until #"hello" ~= (if ipairs then nil else t))LUA";
+    fuzz::EnableLuauFlags();
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{optimization, 2});
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO(result.decompilationOutput);
+        CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+    }
+}
+
+TEST_CASE("Loop: for variable name does not claim preceding if value", "[Decompiler][ReplayRegress][ControlFlow]") {
+    const std::string source = R"LUA(obj += (nil)[(if table("a-b", math) then true else ipairs[false])]
+for g0_0 in ipairs("x") do
+    if "value" then
+        continue
+    end
+end)LUA";
+    fuzz::EnableLuauFlags();
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{optimization, 2});
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        INFO(result.decompilationOutput);
+        CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(result.decompilationOutput, &source));
+    }
+}
+
+TEST_CASE("Loop: if value before generic for retains both phi inputs", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(obj = 0
+function choose()
+    return true
+end
+proxy = setmetatable({}, { __index = function(_, key)
+    return key and 2 or 3
+end })
+obj += proxy[(if choose() then true else false)]
+for g0_0 in ipairs({}) do
+    if "value" then
+        continue
+    end
+end
+return obj)LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: shared join after continue branch stays outside the branch", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function f0()
+    print("called")
+end
+repeat
+    if tonumber then
+    else
+        string(true, 957)
+        local v1 = true <= true
+        v1("value", "a-b")
+        if ... then
+            continue
+        end
+    end
+    local v1, v2 = (if tonumber then 40.5 else 56.5), f0(344)
+    for g3_0 in pairs({}) do
+        v1 = { y = nil, "key" }
+    end
+until "x"
+print("done"))LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: continue skips shared body before later loop", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function f0()
+    print("called")
+end
+repeat
+    if tonumber then
+    else
+        string(true, 957)
+        local v1 = true <= true
+        v1("value", "a-b")
+        if ... then
+            continue
+        end
+    end
+    local v1, v2 = (if tonumber then 40.5 else 56.5), f0(344)
+    for g3_0 in pairs({}) do
+        v1 = { y = nil, "key" }
+    end
+until "x"
+local counter = 0
+while counter < 0 do
+    counter += 1
+end
+print("done"))LUA";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
 TEST_CASE("Replay: a value read twice by one instruction is not inlined twice", "[Decompiler][ReplayRegress][Semantics]") {
 
     CheckSemanticParity(R"LUA(local t = {}
