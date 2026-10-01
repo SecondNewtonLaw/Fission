@@ -486,6 +486,17 @@ print(pcall(f, nil)))LUA";
         CheckTraceWith(source, optimization, 0);
 }
 
+TEST_CASE("Fuzz: a value-term arm copying a local reads it instead of re-evaluating its initializer", "[Decompiler][CheckPending][EvaluationOrder]") {
+    const std::string source = R"LUA(local m = setmetatable({}, { __unm = function() print("unm") return 1 end })
+local v0 = -m
+local v2 = tostring(v0)
+local t = {}
+local v3 = if t[v2] or (if select then v0 else "") then nil else 1
+print(v3))LUA";
+    for (int optimization = 0; optimization <= 2; optimization++)
+        CheckTraceWith(source, optimization, 0);
+}
+
 TEST_CASE("Fuzz: an inlined constructor value is not delayed past a nil-key store","[Decompiler][CheckPending][EvaluationOrder]") {
     CheckTraceWith(R"LUA(local mt = setmetatable({}, { __add = function() print("add") return 1 end })
 print(pcall(function()

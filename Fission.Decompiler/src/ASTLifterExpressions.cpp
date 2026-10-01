@@ -79,6 +79,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         if (!forceExpression && !ShouldInline(moveDef) && !m_deferToConditionInline.contains(moveDef))
             break;
         operand = moveDef->operands[1];
+        // forcing materializes the copy, not the copied variable: its own def inlines only on its own terms
+        forceExpression = false;
     }
 
     if (operand.type == LiftedOperandType::Register && m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion})) {
