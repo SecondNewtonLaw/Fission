@@ -26,6 +26,7 @@ Compared with `0.2.0-alpha`.
 - Fixed deep compiler expression chains, mixed call and table chains, and bounded arithmetic-chain lifting.
 - Vector constants survive indirect writes; non-finite vector components render as Luau numbers.
 - Negative constant bases of `^` keep their parentheses (`(-2) ^ x`).
+- Numeric-for operands merged from a short-circuit (`for i = 1, 2, (true and t[k])`) keep both operands instead of collapsing to the first.
 - Integer and normalized legacy parameter type tags are recovered; NaN table-key errors are preserved.
 
 ## Control flow
@@ -38,6 +39,7 @@ Compared with `0.2.0-alpha`.
 - Compound guards that end in bare returns lift as guards, not `if`/`else`.
 - Or-chains and arbitrary trees of pure tests lift as one condition; value-computed terms fold into compound conditions.
 - Unreachable blocks are pruned before structure identification.
+- A repeat whose body starts by updating a local before a `break` is lifted as `repeat`, not `while true`.
 - Control-flow coroutines use an explicit trampoline, preventing native stack overflow on very large graphs.
 
 ## SSA
@@ -57,6 +59,7 @@ Compared with `0.2.0-alpha`.
 - O0 record keys stored through a loaded string key recover record syntax.
 - `export` declarations are recovered from `table.freeze` module returns.
 - Computed keys keep their brackets; concatenation grouping is preserved.
+- Empty constructors print as `{}`; `until` conditions drop redundant parentheses.
 - A loop arm's own temporaries are declared inside the arm instead of being hoisted out of the loop, keeping large modules below the 200-local limit.
 
 ## Fuzzing and oracles
@@ -69,6 +72,10 @@ Compared with `0.2.0-alpha`.
 - Roblox Vector3 is modelled in the semantic oracle.
 - Roblox corpus roundtrip audit, scoped forward-reference detection, and a 49-sample local-register replay corpus.
 
+## CLI
+
+- `--vanilla-file <path>` decompiles raw, unencoded Luau bytecode.
+
 ## Server
 
 - `Fission.Server` builds on Linux; the release workflow's Linux artifact and `/health` smoke test are unblocked.
@@ -76,7 +83,7 @@ Compared with `0.2.0-alpha`.
 
 ## Tests
 
-- Suite grew from 428 to 705 tests.
+- Suite grew from 428 to 707 tests.
 - Added compiler-lowering audits, semantic replay regressions, loop-shape, capture and merge matrices, SSA invariant coverage, and fuzz-derived regressions.
 - Removed vacuous cases and split oversized test translation units.
 
@@ -90,7 +97,7 @@ Compared with `0.2.0-alpha`.
 
 ## Validation
 
-- Windows test suite: 705 tests passed, 0 failed.
+- Windows test suite: 707 tests passed, 0 failed.
 - 200,000-sample AST fuzz campaign: 0 semantic divergences, 0 forward-reference IR divergences, 0 crashes.
 - Protected Roblox samples decompile and recompile, including `ANTI_DECOMPILE_GAMECORE`.
 
