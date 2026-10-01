@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <memory>
 #include <string>
+#include <unordered_set>
 #include <vector>
 
 class IfExpressionFolder {
@@ -201,6 +202,44 @@ class IfExpressionFolder {
         stmts.erase(stmts.end() - 2);
     }
 
+    static void FoldBooleanOrValue(std::vector<std::shared_ptr<Statement>> &stmts) {
+        for (size_t i = 0; i + 2 < stmts.size(); ++i) {
+            const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[i]);
+            const auto temp = decl ? std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier) : nullptr;
+            const auto initial = decl ? std::dynamic_pointer_cast<BooleanLiteralNode>(decl->value) : nullptr;
+            const auto guard = std::dynamic_pointer_cast<IfStatementNode>(stmts[i + 1]);
+            const auto negated = guard ? std::dynamic_pointer_cast<UnaryExpressionNode>(guard->condition) : nullptr;
+            const auto first = negated ? std::dynamic_pointer_cast<BinaryExpressionNode>(negated->operand) : nullptr;
+            if (!temp || !temp->identifier || temp->identifier->bIsGlobal || !initial || !initial->value || decl->type || !guard || guard->elseBranch ||
+                !guard->thenBranch || guard->thenBranch->body.size() != 1 || !negated || negated->op != "not " || !first ||
+                (first->op != "==" && first->op != "~=" && first->op != "<" && first->op != "<=" && first->op != ">" && first->op != ">="))
+                continue;
+
+            std::string branchName, destinationName;
+            std::shared_ptr<Expression> branchValue, destinationValue;
+            if (!AsSimpleAssign(guard->thenBranch->body.front(), branchName, branchValue) || branchName != temp->identifier->name ||
+                !AsSimpleAssign(stmts[i + 2], destinationName, destinationValue) || destinationName == branchName ||
+                !SameOperand(decl->identifier, destinationValue))
+                continue;
+            const auto choice = std::dynamic_pointer_cast<IfExpressionNode>(branchValue);
+            const auto yes = choice ? std::dynamic_pointer_cast<BooleanLiteralNode>(choice->thenExpr) : nullptr;
+            const auto no = choice ? std::dynamic_pointer_cast<BooleanLiteralNode>(choice->elseExpr) : nullptr;
+            const auto second = choice ? std::dynamic_pointer_cast<BinaryExpressionNode>(choice->condition) : nullptr;
+            if (!yes || !no || yes->value == no->value || !second || (second->op != "==" && second->op != "~="))
+                continue;
+            std::unordered_set<std::string> names;
+            ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(first), names);
+            ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(second), names);
+            for (size_t j = i + 3; j < stmts.size(); ++j)
+                ScopeAwareRenamer::CollectIdentifierNames(stmts[j], names);
+            if (names.contains(branchName))
+                continue;
+            auto destination = std::static_pointer_cast<AssignmentStatementNode>(stmts[i + 2]);
+            destination->right = std::make_shared<BinaryExpressionNode>("or", first, yes->value ? second : Negate(second));
+            stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i), stmts.begin() + static_cast<std::ptrdiff_t>(i + 2));
+        }
+    }
+
     void Fold(std::vector<std::shared_ptr<Statement>> &stmts) {
         // Fold at THIS level first (top-down): AsIfExpr must see the raw nested `if` in an else arm to
         // build the `elseif` chain; recursing first would rewrite it out from under the detection.
@@ -211,6 +250,7 @@ class IfExpressionFolder {
         // Arms that just folded can complete an enclosing diamond.
         FoldLevel(stmts);
         InlineReturnedValue(stmts);
+        FoldBooleanOrValue(stmts);
     }
 
     void FoldLevel(std::vector<std::shared_ptr<Statement>> &stmts) {

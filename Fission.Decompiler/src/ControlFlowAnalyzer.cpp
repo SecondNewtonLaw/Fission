@@ -597,21 +597,27 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                     return after.dwBlockId;
             return std::nullopt;
         };
+        // a bare jump the loop falls into is the exit only if no break was threaded past it to its target
+        std::optional<uint32_t> bareJumpExit;
         for (int hops = 0; hops < 8 && afterIndex < instructions.size(); ++hops) {
-            if (const auto exit = exitAt(afterIndex))
-                return exit;
             // a zero-length jump is lifted as NOP; the exit starts after it
             size_t next = afterIndex;
             while (next < instructions.size() && instructions[next].operation == LiftedOperation::NOP)
                 ++next;
-            if (next != afterIndex)
-                if (const auto exit = exitAt(next))
+            auto exit = exitAt(afterIndex);
+            if (!exit && next != afterIndex)
+                exit = exitAt(next);
+            const bool jumps = next < instructions.size() && instructions[next].operation == LiftedOperation::JUMP && GetJumpOffset(&instructions[next]) > 0;
+            if (exit) {
+                if (!jumps || blocks[*exit].lpHead != &instructions[next] || blocks[*exit].lpTail != &instructions[next])
                     return exit;
-            if (next >= instructions.size() || instructions[next].operation != LiftedOperation::JUMP || GetJumpOffset(&instructions[next]) <= 0)
+                bareJumpExit = bareJumpExit.value_or(*exit);
+            }
+            if (!jumps)
                 break;
             afterIndex = next + static_cast<size_t>(GetJumpOffset(&instructions[next]));
         }
-        return std::nullopt;
+        return bareJumpExit;
     };
 
     // An O2-inlined `return` leaves the loop through code placed inside it, past the natural exit. Every
@@ -1421,8 +1427,83 @@ bool ControlFlowAnalyzer::ConvergeReturns(AnalyzedFunction &func) {
     return false;
 }
 
+bool ControlFlowAnalyzer::FoldConditionValues(AnalyzedFunction &func) {
+    auto &blocks = func.basicBlocks;
+    const auto realInstruction = [](const BasicBlock &block) -> LiftedInstruction * {
+        LiftedInstruction *found = nullptr;
+        if (!block.lpHead || !block.lpTail)
+            return nullptr;
+        for (auto *inst = block.lpHead; inst <= block.lpTail; ++inst) {
+            if (inst->operation == LiftedOperation::NOP)
+                continue;
+            if (found)
+                return nullptr;
+            found = inst;
+        }
+        return found;
+    };
+    const auto boolLoad = [](const LiftedInstruction *inst, LiftedOperation operation) {
+        return inst && inst->operation == operation && inst->operands.size() >= 2 && inst->operands[0].type == LiftedOperandType::Register &&
+               inst->operands[1].type == LiftedOperandType::ImmediateBool;
+    };
+
+    bool changed = false;
+    for (auto &header : blocks) {
+        auto *branch = header.lpTail;
+        if (header.bType == BlockType::Dead || !branch || !header.ifStatementTrue || !header.ifStatementFalse)
+            continue;
+        switch (branch->operation) {
+        case LiftedOperation::JUMPIF:
+        case LiftedOperation::JUMPIFNOT:
+        case LiftedOperation::JUMPIFEQ:
+        case LiftedOperation::JUMPIFLE:
+        case LiftedOperation::JUMPIFLT:
+        case LiftedOperation::JUMPIFNOTEQ:
+        case LiftedOperation::JUMPIFNOTLE:
+        case LiftedOperation::JUMPIFNOTLT:
+        case LiftedOperation::JUMPXEQK:
+            break;
+        default:
+            continue;
+        }
+        const auto &taken = blocks[*header.ifStatementTrue], &fallthrough = blocks[*header.ifStatementFalse];
+        auto *falseLoad = realInstruction(fallthrough);
+        auto *trueLoad = realInstruction(taken);
+        if (!boolLoad(falseLoad, LiftedOperation::LOADNJUMP) || !boolLoad(trueLoad, LiftedOperation::LOAD) ||
+            falseLoad->operands[0].value.reg != trueLoad->operands[0].value.reg || falseLoad->operands[1].value.imm.b == trueLoad->operands[1].value.imm.b)
+            continue;
+        // the arms sit between the branch and their join, reached only through this branch
+        if (fallthrough.lpHead != branch + 1 || taken.lpHead != fallthrough.lpTail + 1 || fallthrough.predecessors.size() != 1 ||
+            taken.predecessors.size() != 1 || fallthrough.successors.size() != 1 || taken.successors != fallthrough.successors)
+            continue;
+        const auto &join = blocks[fallthrough.successors[0]];
+        if (join.lpHead != taken.lpTail + 1 || join.predecessors.size() != 2)
+            continue;
+
+        std::vector<LiftedOperand> operands{falseLoad->operands[0]};
+        operands.insert(operands.end(), branch->operands.begin(), branch->operands.end());
+        operands.emplace_back().type = LiftedOperandType::ImmediateInteger;
+        operands.back().value.imm.n = static_cast<int32_t>(branch->operation);
+        operands.emplace_back().type = LiftedOperandType::ImmediateBool;
+        operands.back().value.imm.b = trueLoad->operands[1].value.imm.b;
+        branch->operation = LiftedOperation::CONDVALUE;
+        branch->operands = std::move(operands);
+        for (auto *load : {falseLoad, trueLoad}) {
+            load->operation = LiftedOperation::NOP;
+            load->operands.clear();
+        }
+        Explain(header, "optimize: branch only selects a boolean; folded into one value");
+        changed = true;
+    }
+    return changed;
+}
+
 void ControlFlowAnalyzer::OptimizeGraph(AnalyzedFunction &func) {
     SetDebugFunction(func.lpLiftedFunction);
+    if (this->FoldConditionValues(func)) {
+        func.basicBlocks = this->PartitionBlocks(func.lpLiftedFunction);
+        this->LinkBasicBlocks(func.basicBlocks);
+    }
     for (int round = 0; round < 64 && this->ConvergeReturns(func); ++round) {
         func.basicBlocks = this->PartitionBlocks(func.lpLiftedFunction);
         this->LinkBasicBlocks(func.basicBlocks);

@@ -531,6 +531,15 @@ namespace fuzz {
                             }
                             std::set<int32_t> leaves;
                             flattenRead(*inst, *fissionBlockAt[pc], reg, *found->second.begin(), leaves);
+                            // a CONDVALUE stands for the branch's two boolean loads
+                            for (const int32_t def : std::vector<int32_t>(leaves.begin(), leaves.end())) {
+                                if (def < 0 || def >= static_cast<int32_t>(code.size()) || !fissionAt[def] ||
+                                    fissionAt[def]->operation != LiftedOperation::CONDVALUE)
+                                    continue;
+                                leaves.erase(def);
+                                for (size_t k = static_cast<size_t>(opIndexAt[def]) + 1, loads = 0; k < opStarts.size() && loads < 2; ++k, ++loads)
+                                    leaves.insert(opStarts[k]);
+                            }
                             const std::vector<int32_t> fission(leaves.begin(), leaves.end());
                             ++report.readsCompared;
                             if (fission != state[reg]) {

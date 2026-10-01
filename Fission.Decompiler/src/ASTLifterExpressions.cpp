@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <functional>
+#include <ranges>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -230,6 +231,17 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     }
 
     switch (def->operation) {
+
+    case LiftedOperation::CONDVALUE: {
+        if (def->operands.size() < 3)
+            return std::make_shared<BooleanLiteralNode>(false);
+        const LiftedInstruction branch{
+            static_cast<LiftedOperation>(def->operands[def->operands.size() - 2].value.imm.n), def->instructionIndex,
+            std::vector<LiftedOperand>(def->operands.begin() + 1, def->operands.end() - 2)
+        };
+        auto condition = LiftCondition(&branch);
+        return def->operands.back().value.imm.b ? condition : InvertCondition(condition);
+    }
 
     case LiftedOperation::SUBRK:
     case LiftedOperation::DIVRK: {
@@ -626,10 +638,13 @@ bool ASTLifter::RenderClosureInPlace(const LiftedInstruction &closure, const std
         return true;
     }
     // `t[k] = function() ... end`: a nameless closure stored right after its captures
+    const auto readsRef = [&](const LiftedOperand &operand) {
+        return operand.type == LiftedOperandType::Register && operand.value.reg == ref.regIndex && operand.ssaVersion == ref.version;
+    };
     if (const auto *store = SoleUser(ref);
         store &&
         (store->operation == LiftedOperation::SETTABLE || store->operation == LiftedOperation::SETTABLEKS || store->operation == LiftedOperation::SETTABLEN) &&
-        store->operands[0].value.reg == ref.regIndex && store->operands[0].ssaVersion == ref.version && !BeginsDebugLocal(closure, ref.regIndex)) {
+        readsRef(store->operands[0]) && std::ranges::none_of(store->operands | std::views::drop(1), readsRef) && !BeginsDebugLocal(closure, ref.regIndex)) {
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
         bool adjacent = BlockOf(store) == BlockOf(&closure);
         for (auto k = static_cast<size_t>(closure.instructionIndex) + 1; adjacent && k < static_cast<size_t>(store->instructionIndex); ++k)
@@ -748,6 +763,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         }
     bool bFoundSetList = false;
 
+    // a template holding constant values lists every record field in source order; the others arrive as stores
+    std::unordered_map<std::string, std::shared_ptr<BinaryExpressionNode>> templateSlots;
     if (inst.operation == LiftedOperation::DUPTABLE) {
         int constantIdx = inst.operands[1].value.imm.k;
         const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
@@ -760,16 +777,16 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
                 const auto valIdx = tableData.valueConstantIndices[i];
                 const bool hasValue = valIdx >= 0 && static_cast<size_t>(valIdx) < constants.size();
-                elements.push_back(
-                    std::make_shared<BinaryExpressionNode>(
-                        "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
-                    )
+                auto entry = std::make_shared<BinaryExpressionNode>(
+                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
                 );
+                if (!hasValue)
+                    templateSlots.try_emplace(tableData.keys[i], entry);
+                elements.push_back(std::move(entry));
             }
         }
-        if (!elements.empty())
-            return dryRun ? nullptr : std::make_shared<TableLiteralNode>(elements);
     }
+    const size_t templateEntries = elements.size();
 
     std::unordered_set<SSARef, std::hash<SSARef>> closureVisited;
     std::function<bool(const LiftedOperand &)> dependsOnClosure = [&](const LiftedOperand &op) -> bool {
@@ -870,6 +887,14 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             const auto shape = constant.GetValue<LuauTable>();
             templateKeys.insert(shape.keys.begin(), shape.keys.end());
         }
+    // unoptimized code stores a template field through a key loaded into a register
+    const auto templateKey = [&](const LiftedOperand &key) {
+        const auto *def = key.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(key) : nullptr;
+        if (!def || def->operation != LiftedOperation::LOAD || def->operands.size() < 2 || def->operands[1].type != LiftedOperandType::ImmediateConstant)
+            return false;
+        const auto *name = std::get_if<std::string>(&ConstantAt(def->operands[1].value.imm.k).constantData);
+        return name && templateKeys.contains(*name);
+    };
 
     // a closure built for this local table renders in its constructor; the closure's handler, which runs
     // after this declaration, fills the slot. It may not capture the table or a local declared after it.
@@ -893,12 +918,13 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             if (shared != m_sharedClosures.end() && shared->second.count > 1)
                 return false;
         }
+        const bool templateStore = inst.operation == LiftedOperation::DUPTABLE && store->operation == LiftedOperation::SETTABLE && templateKey(store->operands[2]);
         if (store->operation == LiftedOperation::SETTABLEKS) {
             if (inst.operation == LiftedOperation::DUPTABLE
                     ? !templateKeys.contains(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData))
                     : !bFoundSetList || keyedFields >= hashCapacity)
                 return false;
-        } else if (store->operation != LiftedOperation::SETLIST && (!bFoundSetList || keyedFields >= hashCapacity)) {
+        } else if (!templateStore && store->operation != LiftedOperation::SETLIST && (!bFoundSetList || keyedFields >= hashCapacity)) {
             return false;
         }
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
@@ -1130,8 +1156,9 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         if (inst.operation == LiftedOperation::DUPTABLE) {
             if (tableBlock < 0 || i > static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex))
                 break;
-            const bool fieldStore = candidate.operation == LiftedOperation::SETTABLEKS && candidate.operands[1].value.reg == tableReg &&
-                                    candidate.operands[1].ssaVersion == tableVersion;
+            const bool fieldStore =
+                (candidate.operation == LiftedOperation::SETTABLEKS || (candidate.operation == LiftedOperation::SETTABLE && templateKey(candidate.operands[2]))) &&
+                candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion == tableVersion;
             const bool closure = (candidate.operation == LiftedOperation::NEWCLOSURE || candidate.operation == LiftedOperation::DUPCLOSURE) &&
                                  closureField(candidate.operands[0]);
             const size_t storedOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
@@ -1286,6 +1313,27 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     if (bFoundSetList || !elements.empty())
         for (const auto &ins : candidatesIndexes)
             m_processedInstructions.insert(ins);
+    // a template names only record fields; beside list items a record field and a bracketed string key compile alike
+    for (auto &element : elements)
+        if (const auto keyed = std::dynamic_pointer_cast<TableBinaryExpressionNode>(element))
+            if (const auto str = std::dynamic_pointer_cast<StringLiteralNode>(keyed->left); str && (bFoundSetList || templateKeys.contains(str->value)))
+                element = std::make_shared<BinaryExpressionNode>("=", MakeTableKey(str->value), keyed->right);
+    for (size_t i = templateEntries; i < elements.size();) {
+        const auto keyed = std::dynamic_pointer_cast<BinaryExpressionNode>(elements[i]);
+        std::string key;
+        if (const auto id = keyed ? std::dynamic_pointer_cast<IdentifierExpressionNode>(keyed->left) : nullptr; id && id->identifier)
+            key = id->identifier->name;
+        else if (const auto str = keyed ? std::dynamic_pointer_cast<StringLiteralNode>(keyed->left) : nullptr)
+            key = str->value;
+        const auto slot = key.empty() ? templateSlots.end() : templateSlots.find(key);
+        if (slot == templateSlots.end()) {
+            ++i;
+            continue;
+        }
+        slot->second->right = keyed->right;
+        templateSlots.erase(slot);
+        elements.erase(elements.begin() + static_cast<std::ptrdiff_t>(i));
+    }
 
     return elements.empty() ? std::make_shared<TableLiteralNode>() : std::make_shared<TableLiteralNode>(elements);
 }

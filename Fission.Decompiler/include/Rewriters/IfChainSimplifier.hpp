@@ -21,6 +21,34 @@ class IfChainSimplifier : public ASTRewriter {
         Simplify(stmts);
     }
 
+    void RewriteLoopStatements(std::vector<std::shared_ptr<Statement>> &stmts) override {
+        if (stmts.size() < 3 ||
+            (!std::dynamic_pointer_cast<AssignmentStatementNode>(stmts.back()) && !std::dynamic_pointer_cast<ExpressionStatementNode>(stmts.back())))
+            return;
+        size_t first = stmts.size() - 1;
+        while (first > 0) {
+            const auto branch = std::dynamic_pointer_cast<IfStatementNode>(stmts[first - 1]);
+            if (!branch || branch->elseBranch || !branch->thenBranch || branch->thenBranch->body.size() < 2 ||
+                !std::dynamic_pointer_cast<ContinueStatementNode>(branch->thenBranch->body.back()))
+                break;
+            --first;
+        }
+        if (stmts.size() - first < 3)
+            return;
+        auto tail = std::make_shared<BlockStatementNode>();
+        tail->body.push_back(stmts.back());
+        for (size_t i = stmts.size() - 1; i-- > first;) {
+            auto branch = std::static_pointer_cast<IfStatementNode>(stmts[i]);
+            branch->thenBranch->body.pop_back();
+            branch->elseBranch = tail;
+            tail = std::make_shared<BlockStatementNode>();
+            tail->body.push_back(branch);
+        }
+        auto chain = tail->body.front();
+        stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(first), stmts.end());
+        stmts.push_back(chain);
+    }
+
   private:
     // Luau copies the return that follows an if chain into each arm, so the chain arrives as guards that return.
     // Where a block continues into `return R`, `if c then A; return R end; rest` is `if c then A else rest end`.
@@ -50,7 +78,8 @@ class IfChainSimplifier : public ASTRewriter {
             return guard && !guard->elseBranch && guard->thenBranch && guard->thenBranch->body.size() > 1 && Render(guard->thenBranch->body.back()) == returned;
         });
         // statements from the first if on may move into an arm, scoping their locals to it; the hoisted return may not read one
-        const auto moved = std::ranges::find_if(body, [](const std::shared_ptr<Statement> &stmt) { return std::dynamic_pointer_cast<IfStatementNode>(stmt) != nullptr; });
+        const auto moved =
+            std::ranges::find_if(body, [](const std::shared_ptr<Statement> &stmt) { return std::dynamic_pointer_cast<IfStatementNode>(stmt) != nullptr; });
         if (!split || DeclaresNameIn({moved, body.end()}, returned))
             return;
         FoldIntoReturn(body, returned);
@@ -116,7 +145,8 @@ class IfChainSimplifier : public ASTRewriter {
             } else if (const auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt); fn && fn->bIsLocalDeclaration && mentions(fn->functionName)) {
                 return true;
             } else if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-                if ((branch->thenBranch && DeclaresNameIn(branch->thenBranch->body, text)) || (branch->elseBranch && DeclaresNameIn(branch->elseBranch->body, text)))
+                if ((branch->thenBranch && DeclaresNameIn(branch->thenBranch->body, text)) ||
+                    (branch->elseBranch && DeclaresNameIn(branch->elseBranch->body, text)))
                     return true;
             }
         }

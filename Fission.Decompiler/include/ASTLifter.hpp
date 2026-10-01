@@ -207,7 +207,7 @@ class ASTLifter {
     std::unordered_map<const LiftedInstruction *, bool> m_constructorElementMemo;
     std::unordered_set<const LiftedInstruction *> m_shouldInlineActive;
     // Materialized LOADB-diamond booleans cannot fold into table literals.
-    std::unordered_set<int32_t> m_diamondBoolRegs;
+    std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
     static bool CanOperationRaise(LiftedOperation op);
     // Prevent effectful definitions from crossing retained instructions.
     bool StaysAsStatement(const LiftedInstruction *e);
@@ -266,6 +266,8 @@ class ASTLifter {
         return m_blockOfInstruction[inst - instructions.data()];
     }
     std::string ResolveVariableName(const LiftedOperand &op, bool markDefined = true);
+    // The register's previous write in this block belongs to a differently named variable.
+    bool RegisterHeldOtherVariable(const LiftedInstruction &inst, const LiftedOperand &target);
     void SeedEnclosingNames(AnalyzedFunction &target) const;
     int32_t FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJumpsExit = false);
 
@@ -290,7 +292,8 @@ class ASTLifter {
         uint32_t continueBlock;                // merge block (T) to keep lifting from
     };
     // Collapse a matching LOADB diamond into a boolean expression.
-    std::optional<BoolMaterialization> DetectBooleanMaterialization(uint32_t headerId);
+    // Without `build` only the diamond's shape is checked and nothing is lifted.
+    std::optional<BoolMaterialization> DetectBooleanMaterialization(uint32_t headerId, bool build = true);
 
     // Short-circuit OR chain whose headers share one body.
     struct OrChainInfo {
@@ -300,8 +303,9 @@ class ASTLifter {
         std::vector<uint32_t> chainBlocks;     // the header blocks subsumed into `condition`
     };
     // Match consecutive headers ending in the inverted term that distinguishes OR from AND.
-    std::optional<OrChainInfo> DetectOrChain(uint32_t headerId);
-    std::optional<OrChainInfo> DetectGuardRegion(uint32_t headerId);
+    // Lifting the condition marks its definitions processed; without `build` only the structure is returned.
+    std::optional<OrChainInfo> DetectOrChain(uint32_t headerId, bool build = true);
+    std::optional<OrChainInfo> DetectGuardRegion(uint32_t headerId, bool build = true);
 
     // Recover an outer infinite loop when it shares an inner loop's header.
     std::optional<uint32_t> DetectInfiniteWhileLatch(uint32_t headerId, uint32_t innerLatchId);

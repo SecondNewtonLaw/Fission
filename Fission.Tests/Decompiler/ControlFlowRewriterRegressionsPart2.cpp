@@ -491,7 +491,7 @@ TEST_CASE("Regress: SETLIST first element indexing an inner table is sound", "[D
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+v\d+\s*=\s*\{\s*\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\],\s*43\s*\})")));
+    CHECK(ContainsRegex(out, std::regex(R"(local\s+t\s*=\s*\{\s*\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\],\s*43\s*\})")));
     CHECK(NoForwardReference(out));
     CHECK(Recompiles(out));
 }

@@ -31,8 +31,8 @@ TEST_CASE("Debug notes retain final shared-loop decisions", "[Decompiler][DebugN
     CHECK(result.debugNotes.find("reconstruct outer repeat") != std::string::npos);
     CHECK(result.debugNotes.find("(_start) B1:") != std::string::npos);
     CHECK(result.debugNotes.find("phi R1 input[0] from B0 = R1#") != std::string::npos);
-    CHECK(result.debugNotes.find("phi R1 input[1] from B5 = R1#") != std::string::npos);
-    CHECK(result.debugNotes.find("phi R1 input[2] from B14 = R1#") != std::string::npos);
+    CHECK(result.debugNotes.find("phi R1 input[1] from B8 = R1#") != std::string::npos);
+    CHECK(result.debugNotes.find("phi R1 input[2] from B2 = R1#") != std::string::npos);
     CHECK(result.debugNotes.size() < 16384);
 }
 

@@ -5,6 +5,7 @@
 
 #include <algorithm>
 #include <memory>
+#include <ranges>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -31,6 +32,7 @@ class DeclarationHoister {
                 m_accessSites.clear();
                 m_declSites.clear();
                 m_nestedFunctions.clear();
+                m_capturedNames.clear();
                 m_walkOrder = 0;
                 m_namedCaptureDiscovered = false;
             };
@@ -96,6 +98,7 @@ class DeclarationHoister {
     std::vector<FunctionWork> m_nestedFunctions;
     std::unordered_set<std::string> m_excludedNames;
     std::unordered_set<std::string> m_locallyCapturedNames;
+    std::unordered_set<std::string> m_capturedNames;
     bool m_namedCaptureDiscovered{};
     size_t m_walkOrder{};
     size_t m_currentOrder{};
@@ -227,7 +230,7 @@ class DeclarationHoister {
         switch (e->nodeKind) {
         case ASTNodeKind::IdentifierExpression:
             if (auto id = std::static_pointer_cast<IdentifierExpressionNode>(e); id->identifier && !id->identifier->bIsGlobal)
-                RecordAccess(id->identifier->name, scopeId);
+                RecordTrackedAccess(id->identifier->name, scopeId);
             break;
         case ASTNodeKind::Identifier:
             if (auto id = std::dynamic_pointer_cast<Identifier>(e))
@@ -302,8 +305,9 @@ class DeclarationHoister {
                         m_namedCaptureDiscovered = true;
                     }
                     RecordTrackedAccess(name, scopeId);
+                    m_capturedNames.insert(name);
                 }
-                m_nestedFunctions.push_back({&fn->lpFunctionBody->body, fn->capturedNames});
+                m_nestedFunctions.push_back({&fn->lpFunctionBody->body, BoundOutsideBody(*fn)});
             }
             break;
         }
@@ -333,7 +337,7 @@ class DeclarationHoister {
         }
         if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s)) {
             if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
-                id && id->identifier && !id->identifier->bIsGlobal && IsOwnedRegisterName(id->identifier->name)) {
+                id && id->identifier && !id->identifier->bIsGlobal && IsTrackedBinding(id->identifier->name)) {
                 m_bareAssigned.insert(id->identifier->name);
                 m_bareAssignmentScopes[id->identifier->name].insert(scopeId);
             }
@@ -343,7 +347,7 @@ class DeclarationHoister {
         }
         if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(s)) {
             if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(compound->left);
-                id && id->identifier && !id->identifier->bIsGlobal && IsOwnedRegisterName(id->identifier->name)) {
+                id && id->identifier && !id->identifier->bIsGlobal && IsTrackedBinding(id->identifier->name)) {
                 m_bareAssigned.insert(id->identifier->name);
                 m_bareAssignmentScopes[id->identifier->name].insert(scopeId);
             }
@@ -359,7 +363,7 @@ class DeclarationHoister {
                 if (local) {
                     RecordDecl(name, scopeId);
                     RecordTrackedAccess(name, scopeId);
-                } else if (IsOwnedRegisterName(name)) {
+                } else if (IsTrackedBinding(name)) {
                     m_bareAssigned.insert(name);
                     m_bareAssignmentScopes[name].insert(scopeId);
                 }
@@ -445,8 +449,9 @@ class DeclarationHoister {
                         m_namedCaptureDiscovered = true;
                     }
                     RecordTrackedAccess(name, scopeId);
+                    m_capturedNames.insert(name);
                 }
-                m_nestedFunctions.push_back({&fdn->lpFunctionBody->body, fdn->capturedNames});
+                m_nestedFunctions.push_back({&fdn->lpFunctionBody->body, BoundOutsideBody(*fdn)});
             }
             return;
         }
@@ -531,29 +536,36 @@ class DeclarationHoister {
             if (target < 0)
                 continue;
 
-            // hoist above every loop body: a decl inside a loop re-runs per iteration
-            while (target >= 0 && m_scopes[target].isLoopBody && m_scopes[target].parent >= 0)
-                target = m_scopes[target].parent;
-            if (target < 0)
-                continue;
-
             if (!HasUnboundBareAssignment(name) && !m_declSites.contains(name))
                 continue;
 
             // Prefer PROMOTION: when the target block itself holds the first bare `name = expr` (and no
             // earlier statement references the name), rewrite it to `local name = expr` in place :
             // keeps decl+value as one node, which the downstream naming passes match on.
-            auto *body = m_scopes[target].body;
-            bool promoted = false;
-            for (auto &stmt : *body) {
-                if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt); asn && IsBareIdentifier(asn->left, name)) {
-                    stmt = std::make_shared<VariableDeclarationNode>(asn->left, asn->right);
-                    promoted = true;
-                    break;
+            const auto promote = [&](std::vector<std::shared_ptr<Statement>> &body) {
+                for (auto &stmt : body) {
+                    if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt);
+                        asn && IsBareIdentifier(asn->left, name) && !ExprMentions(asn->right, name)) {
+                        stmt = std::make_shared<VariableDeclarationNode>(asn->left, asn->right);
+                        return true;
+                    }
+                    if (StatementMentions(stmt, name))
+                        return false; // a use precedes the assignment in this block; cannot promote here
                 }
-                if (StatementMentions(stmt, name))
-                    break; // a use precedes the assignment in this block; cannot promote here
-            }
+                return false;
+            };
+            // a loop body that writes before any read carries nothing; a captured binding stays out so iterations share it
+            if (m_scopes[target].isLoopBody && !m_capturedNames.contains(name) && promote(*m_scopes[target].body))
+                continue;
+
+            // hoist above every loop body: a decl inside a loop re-runs per iteration
+            while (target >= 0 && m_scopes[target].isLoopBody && m_scopes[target].parent >= 0)
+                target = m_scopes[target].parent;
+            if (target < 0)
+                continue;
+
+            auto *body = m_scopes[target].body;
+            const bool promoted = promote(*body);
 
             // Otherwise the bare assignment lives in a deeper scope (e.g. a loop body while the value is
             // carried across iterations / read after the loop). Declare `local name` once at the target
@@ -611,9 +623,15 @@ class DeclarationHoister {
             // Find the declaration in its owning block.
             int declIdx = -1;
             bool callDecl = false;
+            std::shared_ptr<FunctionDeclarationNode> functionDecl;
             for (int i = 0; i < static_cast<int>(declBody->size()); ++i)
                 if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>((*declBody)[i]); vd && DeclName(vd) == name) {
                     declIdx = i;
+                    break;
+                } else if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>((*declBody)[i]);
+                           fdn && fdn->bIsLocalDeclaration && fdn->functionName == name && lca != declScope) {
+                    declIdx = i;
+                    functionDecl = fdn;
                     break;
                 } else if (auto call = LocalDeclCall((*declBody)[i])) {
                     bool multi = false;
@@ -644,7 +662,9 @@ class DeclarationHoister {
             }
 
             // rewrite: `local name = expr` becomes `name = expr`; declare `local name` at target front
-            if (callDecl)
+            if (functionDecl)
+                functionDecl->bIsLocalDeclaration = false;
+            else if (callDecl)
                 DemoteLocal((*declBody)[declIdx]);
             else {
                 auto vd = std::static_pointer_cast<VariableDeclarationNode>((*declBody)[declIdx]);
@@ -675,6 +695,14 @@ class DeclarationHoister {
             InsertLeadingDeclaration(*root, name);
             rootDeclarations.insert(name);
         }
+    }
+
+    static std::unordered_set<std::string> BoundOutsideBody(const FunctionDeclarationNode &fn) {
+        auto names = fn.capturedNames;
+        for (const auto &argument : fn.argumentsNames | std::views::values)
+            if (auto id = argument ? std::dynamic_pointer_cast<IdentifierExpressionNode>(argument->argumentName) : nullptr; id && id->identifier)
+                names.insert(id->identifier->name);
+        return names;
     }
 
     static std::string DeclName(const std::shared_ptr<VariableDeclarationNode> &vd) {

@@ -254,6 +254,9 @@ struct AnalyzedFunction {
                std::all_of(s.begin() + static_cast<std::ptrdiff_t>(start + 3), s.end(), [](char c) { return std::isdigit(static_cast<unsigned char>(c)); });
     }
 
+    // a debug name of this shape would collide with the names given to unnamed registers
+    static bool IsGeneratedNameShaped(const std::string &s) { return IsAutoNameShaped(s) || IsParameterNameShaped(s); }
+
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
 
     // Explicit names outrank automatic and parameter names for every register version.
@@ -382,7 +385,7 @@ struct AnalyzedFunction {
         for (size_t i = 0; i < lpDeserialized->numparams; i++) {
             // a parameter's debug local opens at the function entry and spans the whole body
             const auto debugLocal = std::ranges::find_if(lpDeserialized->locvars, [&](const auto &local) {
-                return local.reg == static_cast<int32_t>(i) && local.startpc <= 1 && IsIdentifier(local.varname);
+                return local.reg == static_cast<int32_t>(i) && local.startpc <= 1 && IsIdentifier(local.varname) && !IsGeneratedNameShaped(local.varname);
             });
             std::string name = debugLocal != lpDeserialized->locvars.end() ? debugLocal->varname : std::format("arg{}", i);
             while (debugLocal == lpDeserialized->locvars.end() && this->globalAutoNameCollisions.contains(name))
@@ -479,6 +482,9 @@ class ControlFlowAnalyzer {
     AnalyzedFunction DetermineBasicBlocksInternal(LiftedFunction *lpLiftedFunction);
 
     bool ConvergeReturns(AnalyzedFunction &func);
+
+    // Rewrites a branch whose two arms only load opposite booleans into one CONDVALUE.
+    bool FoldConditionValues(AnalyzedFunction &func);
 
     void OptimiseGraphInternal(std::vector<BasicBlock> &blocks);
 

@@ -636,3 +636,53 @@ for i = 1, 2 do
 end
 print(v0))LUA");
 }
+
+TEST_CASE("Replay: a closure before an if-loop remains visible after it", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(t({ nil })
+local v0 = function(p0)
+end
+if ... then
+    for i1 = "value", "" do
+    end
+end
+for g1_0 in v0.field() do
+end)LUA";
+    const replay_divergence::CompileLevels levels(2, 2);
+    const Luau::CompileOptions options{2, 2};
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    const auto prelude = Luau::compile(fuzz::kSemPreludes[1], options);
+    const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.output, options), prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Error);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}
+
+TEST_CASE("Replay: callee lookup precedes effectful argument", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(string.field.field(..., (false):set(..., print.field))
+repeat
+    while not v0 do
+        local function f1(...)
+        end
+        local v2 = v0
+        for i3 = {}, v2 ~= true do
+            v2("")
+        end
+    end
+until table[""].field.field)LUA";
+    const replay_divergence::CompileLevels levels(2, 2);
+    const Luau::CompileOptions options{2, 2};
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    const auto prelude = Luau::compile(fuzz::kSemPreludes[0], options);
+    const auto original = fuzz::RunLuauTrace(Luau::compile(source, options), prelude);
+    const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.output, options), prelude);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Error);
+    CHECK(reconstructed.status == original.status);
+    CHECK(reconstructed.trace == original.trace);
+}

@@ -589,7 +589,7 @@ TEST_CASE("Lift: FastWait keeps short-circuit duration separate from timer", "[D
     REQUIRE(std::regex_search(function, timer, std::regex(R"(local\s+(\w+) = tick\(\))")));
     CHECK(Contains(function, std::string(" = ") + timer[1].str() + " + (" + duration[1].str() + " or 0.03333333333333333)"));
     CHECK(Contains(function, std::string("coroutine.yield() - ") + timer[1].str()));
-    CHECK(Contains(function, ": thread = coroutine.running()"));
+    CHECK(Contains(function, "[coroutine.running()] = " + timer[1].str() + " + ("));
     CHECK_FALSE(Contains(function, "v2 + (v2 or"));
     CHECK_FALSE(Contains(function, "\n    do\n"));
     CHECK_FALSE(Contains(result.decompilationOutput, ": table"));

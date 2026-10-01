@@ -226,10 +226,23 @@ std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Exp
 
 ASTLifter::ASTLifter() {}
 
+bool ASTLifter::RegisterHeldOtherVariable(const LiftedInstruction &inst, const LiftedOperand &target) {
+    const int block = BlockOf(&inst);
+    if (block < 0 || target.type != LiftedOperandType::Register)
+        return false;
+    for (const auto *previous = &inst - 1; previous >= m_currentFunction->basicBlocks[block].lpHead; --previous)
+        if (const auto defs = m_defsByInstruction.find(previous); defs != m_defsByInstruction.end())
+            for (const auto &ref : defs->second)
+                if (ref.regIndex == target.value.reg)
+                    return ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}, false) != ResolveVariableName(target, false);
+    return false;
+}
+
 // The debug name of a loop variable bound right after its `for` prep instruction.
 std::optional<std::string> ASTLifter::LoopDebugName(int32_t reg, int32_t prepIndex) const {
     for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
-        if (local.reg == reg && local.startpc == prepIndex + 1 && IsValidLuauIdent(local.varname) && !m_globalNames.contains(local.varname))
+        if (local.reg == reg && local.startpc == prepIndex + 1 && IsValidLuauIdent(local.varname) && !m_globalNames.contains(local.varname) &&
+            !AnalyzedFunction::IsGeneratedNameShaped(local.varname))
             return local.varname;
     return std::nullopt;
 }
@@ -368,11 +381,22 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     // def still looks like a plain bool LOAD. Folding it would bake the raw `true`/`false` into the
     // `{ ... }` literal and drop the comparison. Recording the LOADNJUMP-bool targets here lets the
     // fold decline and fall back to sound sequential `t.field = <cond>` stores.
-    this->m_diamondBoolRegs.clear();
-    for (const auto &i : analyzedFunction.lpLiftedFunction->instructions)
-        if (i.operation == LiftedOperation::LOADNJUMP && i.operands.size() >= 2 && i.operands[0].type == LiftedOperandType::Register &&
-            i.operands[1].type == LiftedOperandType::ImmediateBool)
-            this->m_diamondBoolRegs.insert(i.operands[0].value.reg);
+    // Only the diamond's own two loads count; another bool load into a reused register is an ordinary value.
+    this->m_diamondBoolLoads.clear();
+    const auto &liftedInstructions = analyzedFunction.lpLiftedFunction->instructions;
+    for (size_t index = 0; index < liftedInstructions.size(); ++index) {
+        const auto &i = liftedInstructions[index];
+        if (i.operation != LiftedOperation::LOADNJUMP || i.operands.size() < 2 || i.operands[0].type != LiftedOperandType::Register ||
+            i.operands[1].type != LiftedOperandType::ImmediateBool)
+            continue;
+        this->m_diamondBoolLoads.insert(&i);
+        if (index + 1 < liftedInstructions.size()) {
+            const auto &other = liftedInstructions[index + 1];
+            if (other.operation == LiftedOperation::LOAD && other.operands.size() >= 2 && other.operands[0].type == LiftedOperandType::Register &&
+                other.operands[0].value.reg == i.operands[0].value.reg && other.operands[1].type == LiftedOperandType::ImmediateBool)
+                this->m_diamondBoolLoads.insert(&other);
+        }
+    }
 
     // reverse-index definitionMap once: instruction -> its SSARefs. avoids per-instruction full scans (O(N^2)).
     this->m_defsByInstruction.clear();
@@ -714,7 +738,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
         for (const size_t i : openOrder) {
             const auto &local = locals[i];
-            if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
+            if (!IsValidLuauIdent(local.varname) || AnalyzedFunction::IsGeneratedNameShaped(local.varname) ||
+                local.reg < analyzedFunction.lpLiftedFunction->numparams)
                 continue;
             // a move-elided inline parameter opens on a register another local still owns; it names nothing
             if (std::ranges::any_of(locals, [&](const auto &owner) {
@@ -784,12 +809,20 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                     if (!inserted && entry->second && debugNames[*entry->second] != debugNames[*local])
                         entry->second.reset();
                 }
-        // a value read after its local's scope closes (an inlined call's result) is not that local once scopes flatten
+        // a value read outside its local's scope (an inlined call's result) is not that local; constructor stores precede the open
+        const auto populates = [](const LiftedInstruction &user, const SSARef &table) {
+            const size_t operand = user.operation == LiftedOperation::SETLIST ? 0 : 1;
+            return (user.operation == LiftedOperation::SETLIST || user.operation == LiftedOperation::SETTABLE ||
+                    user.operation == LiftedOperation::SETTABLEKS || user.operation == LiftedOperation::SETTABLEN) &&
+                   user.operands.size() > operand && user.operands[operand].type == LiftedOperandType::Register &&
+                   user.operands[operand].value.reg == table.regIndex && user.operands[operand].ssaVersion == table.version;
+        };
         for (const auto &[ref, users] : analyzedFunction.users)
             if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
                 for (const auto *user : users)
                     if (user->operation != LiftedOperation::PHI &&
-                        (user->instructionIndex < locals[*owner->second].startpc - 1 || user->instructionIndex >= locals[*owner->second].endpc)) {
+                        ((user->instructionIndex < locals[*owner->second].startpc - 1 && !populates(*user, ref)) ||
+                         user->instructionIndex >= locals[*owner->second].endpc)) {
                         owner->second.reset();
                         break;
                     }
@@ -1344,6 +1377,17 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             m_loopExitStack.pop_back();
                             if (!body.empty() && body.back()->nodeKind == ASTNodeKind::BreakStatement)
                                 body.pop_back();
+                            const auto guard = std::ranges::find_if(body, [](const std::shared_ptr<Statement> &stmt) {
+                                const auto branch = std::dynamic_pointer_cast<IfStatementNode>(stmt);
+                                const auto breaks = [](const std::shared_ptr<BlockStatementNode> &arm) {
+                                    return arm && !arm->body.empty() && arm->body.back()->nodeKind == ASTNodeKind::BreakStatement;
+                                };
+                                return branch && (breaks(branch->thenBranch) || breaks(branch->elseBranch));
+                            });
+                            if (guard != body.end()) {
+                                nodes.insert(nodes.end(), body.begin(), guard);
+                                body.erase(body.begin(), guard);
+                            }
                             auto repeat = std::make_shared<RepeatStatementNode>();
                             repeat->body = CreateBlock(body);
                             repeat->condition = std::make_shared<BooleanLiteralNode>(true);
@@ -1496,15 +1540,18 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 uint32_t trueIdx = block.ifStatementTrue.value();
                 uint32_t falseIdx = block.ifStatementFalse.value();
                 std::shared_ptr<Expression> trueCond;
+                bool compoundTest = false;
 
                 // coalesce `if a or b or c then BODY else ELSE` before merge analysis: as nested ifs,
                 // FindMergeBlock mistakes the shared BODY for the merge and clobbers sibling branches.
-                if (auto orChain = DetectOrChain(currentBlockId); orChain && std::ranges::none_of(orChain->chainBlocks, [&](uint32_t id) {
-                                                                      return id != currentBlockId && (id == stopBlockId || visited.contains(id));
-                                                                  })) {
+                if (auto orChain = DetectOrChain(currentBlockId, false); orChain && std::ranges::none_of(orChain->chainBlocks, [&](uint32_t id) {
+                                                                             return id != currentBlockId && (id == stopBlockId || visited.contains(id));
+                                                                         })) {
+                    orChain = DetectOrChain(currentBlockId);
                     trueCond = orChain->condition;
                     trueIdx = orChain->bodyIdx;
                     falseIdx = orChain->elseIdx;
+                    compoundTest = true;
                     for (uint32_t cb : orChain->chainBlocks)
                         visited.insert(cb);
                 } else {
@@ -1523,9 +1570,22 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                            });
                 };
                 const bool loopJumpMerge = mergeIdx == InvalidBlockId || isInnermostLatch(mergeIdx);
+                // an arm with code before its jump to the latch joins there as `if`/`else`; only a bare jump is `continue`
+                const auto armJoinsAtLatch = [&](int32_t join) {
+                    if (mergeIdx == InvalidBlockId)
+                        return false;
+                    return std::ranges::any_of(std::array{trueIdx, falseIdx}, [&](uint32_t arm) {
+                        const auto &block = m_currentFunction->basicBlocks[arm];
+                        return arm != static_cast<uint32_t>(join) && block.lpHead &&
+                               std::any_of(block.lpHead, block.lpTail + 1, [](const LiftedInstruction &instruction) {
+                                   return instruction.operation != LiftedOperation::NOP && instruction.operation != LiftedOperation::JUMP;
+                               }) &&
+                               !CanReach(arm, static_cast<uint32_t>(join), currentBlockId, {currentBlockId});
+                    });
+                };
                 if (loopJumpMerge || jumpedReturn(mergeIdx))
                     if (const int32_t join = FindMergeBlock(trueIdx, falseIdx, true);
-                        join >= 0 && !isInnermostLatch(static_cast<uint32_t>(join)) &&
+                        join >= 0 && !isInnermostLatch(static_cast<uint32_t>(join)) && !(loopJumpMerge && armJoinsAtLatch(join)) &&
                         (stopBlockId == InvalidBlockId || static_cast<uint32_t>(join) == stopBlockId ||
                          CanReach(static_cast<uint32_t>(join), stopBlockId, currentBlockId, {currentBlockId})) &&
                         // an `elseif` chain's arms jump to their shared return too; its only other join sits inside one arm
@@ -1567,6 +1627,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         mergeIdx = falseIdx;
                     } else if (!trueIsReturn && falseIsReturn) {
                         mergeIdx = trueIdx;
+                    } else if (trueIsReturn && falseIsReturn) {
+                        // both arms end in a bare `return`, so `if`/`else` and a guard compile alike; a compound test reads as a guard
+                        const auto bareReturn = [&](uint32_t id) {
+                            const auto *tail = m_currentFunction->basicBlocks[id].lpTail;
+                            return tail->operands.size() > 1 && tail->operands[1].value.imm.n == 1;
+                        };
+                        if (compoundTest && bareReturn(trueIdx) && bareReturn(falseIdx))
+                            mergeIdx = falseIdx;
                     }
                 }
 
@@ -1674,9 +1742,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 break;
                             if (!chainBlock.ifStatementTrue.has_value() || !chainBlock.ifStatementFalse.has_value())
                                 break;
-                            if (DetectBooleanMaterialization(chainBlockId).has_value())
+                            if (DetectBooleanMaterialization(chainBlockId, false).has_value())
                                 break;
-                            if (DetectOrChain(chainBlockId).has_value())
+                            if (DetectOrChain(chainBlockId, false).has_value())
                                 break;
                             uint32_t cTrueIdx = chainBlock.ifStatementTrue.value();
                             uint32_t cFalseIdx = chainBlock.ifStatementFalse.value();
@@ -1776,7 +1844,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     }
                 }
 
-                HoistPhiLocals(static_cast<int32_t>(mergeIdx), stopBlockId, ifStmt, nodes, definedBeforeBranches);
+                // a latch phi fed only from inside this `if` belongs to it, though the latch also ends the loop body
+                const bool latchJoinsOnlyThisIf = mergeIdx == stopBlockId && isInnermostLatch(mergeIdx) &&
+                                                  std::ranges::all_of(m_currentFunction->basicBlocks[mergeIdx].predecessors, [&](uint32_t pred) {
+                                                      return pred > currentBlockId;
+                                                  });
+                HoistPhiLocals(static_cast<int32_t>(mergeIdx), latchJoinsOnlyThisIf ? InvalidBlockId : stopBlockId, ifStmt, nodes, definedBeforeBranches);
                 nodes.push_back(ifStmt);
 
                 for (const uint32_t branchBlockId : visitedCopy)
@@ -1878,7 +1951,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                                static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Pairs) |
                                                static_cast<uint32_t>(LoopBlockFlags::ForGeneralLoop_Indexed);
                 if ((block.dwBlockFlags & kForFlags) != 0 && block.loopExit) {
-                    const uint32_t natural = ResolveLoopExitFromLatch(m_currentFunction->basicBlocks, latchIdx, currentBlockId);
+                    uint32_t natural = ResolveLoopExitFromLatch(m_currentFunction->basicBlocks, latchIdx, currentBlockId);
+                    // a bare jump runs no code between the natural exit and the one a threaded break takes
+                    for (int hops = 0; hops < 8 && natural != InvalidBlockId && natural != *block.loopExit; ++hops) {
+                        const auto &exitBlock = m_currentFunction->basicBlocks[natural];
+                        if (exitBlock.lpHead != exitBlock.lpTail || !exitBlock.lpTail || exitBlock.lpTail->operation != LiftedOperation::JUMP ||
+                            exitBlock.successors.size() != 1)
+                            break;
+                        natural = exitBlock.successors.front();
+                    }
                     if (natural != InvalidBlockId && natural != *block.loopExit && CanReach(natural, *block.loopExit, currentBlockId, {currentBlockId})) {
                         std::string name = std::format("__fission_early_for_{}", currentBlockId);
                         const auto occupied = [&](const std::string &candidate) {
@@ -3854,8 +3935,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bIsLocalDeclaration = false;
                 // a merged value defined ahead of its merges opens the variable nothing declared yet; inside an arm, the
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
-                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) &&
-                    DominatesMerges(inst, saveWhere)) {
+                if ((!m_definedRegisters.contains(saveWhere.value.reg) || RegisterHeldOtherVariable(inst, saveWhere)) &&
+                    !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
                     statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }
@@ -4111,8 +4192,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bIsLocalDeclaration = false;
                 // a merged value defined ahead of its merges opens the variable nothing declared yet; inside an arm, the
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
-                if (!m_definedRegisters.contains(saveWhere.value.reg) && !m_hoistedRegisters.contains(saveWhere.value.reg) &&
-                    DominatesMerges(inst, saveWhere)) {
+                if ((!m_definedRegisters.contains(saveWhere.value.reg) || RegisterHeldOtherVariable(inst, saveWhere)) &&
+                    !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
                     statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }

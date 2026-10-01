@@ -41,6 +41,8 @@ static bool EvaluatesInlinedCall(LiftedOperation op, bool branches) {
     case LiftedOperation::SETTABLE:
     case LiftedOperation::SETTABLEKS:
     case LiftedOperation::SETTABLEN:
+    case LiftedOperation::SETGLOBAL:
+    case LiftedOperation::SETUPVAL:
     case LiftedOperation::RETURN:
     case LiftedOperation::CALL:
     case LiftedOperation::CALLFB:
@@ -60,6 +62,7 @@ static bool EvaluatesInlinedCall(LiftedOperation op, bool branches) {
     case LiftedOperation::GETTABLEKS:
     case LiftedOperation::GETTABLEN:
     case LiftedOperation::SETLIST:
+    case LiftedOperation::CONDVALUE:
         return true;
     case LiftedOperation::JUMPIFEQ:
     case LiftedOperation::JUMPIFNOTEQ:
@@ -101,11 +104,10 @@ void ASTLifter::ConsumeInlinedInputs(const LiftedInstruction &def) {
 }
 
 bool ASTLifter::IsDiamondBoolLoad(const LiftedOperand &operand) const {
-    if (operand.type != LiftedOperandType::Register || !m_diamondBoolRegs.contains(operand.value.reg))
+    if (operand.type != LiftedOperandType::Register)
         return false;
     const auto *def = m_currentFunction->GetDefinition(operand);
-    return def && (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::LOADNJUMP) && def->operands.size() >= 2 &&
-           def->operands[1].type == LiftedOperandType::ImmediateBool;
+    return def && m_diamondBoolLoads.contains(def);
 }
 
 std::vector<LiftedOperand> ASTLifter::SetListElements(const LiftedInstruction &setList) const {
@@ -425,9 +427,14 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         if (users != m_currentFunction->users.end() &&
             std::ranges::any_of(users->second, [&](const LiftedInstruction *user) { return ownStore(user) && user->operation != LiftedOperation::SETLIST; })) {
             boost::unordered_flat_set<const LiftedInstruction *> readers;
+            bool readTwice = false;
             for (const auto *user : users->second)
-                if (!ownStore(user) && !IsFastCall(user->operation))
-                    readers.insert(user);
+                if (!ownStore(user) && !IsFastCall(user->operation) && !readers.insert(user).second && user->operation != LiftedOperation::SETLIST)
+                    readTwice = true;
+            if (readTwice) {
+                ExplainKeep(inst, "constructor is read more than once by its reader");
+                return false;
+            }
             if (readers.size() != 1 || BlockOf(*readers.begin()) != BlockOf(inst)) {
                 ExplainKeep(inst, "constructor has no single reader in its block");
                 return false;
@@ -449,6 +456,13 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                     ExplainKeep(inst, "a population store does not fold into the constructor", user);
                     return false;
                 }
+            // AND/OR read both registers eagerly; the folded elements would only run when the right side is needed
+            if (const auto *reader = *readers.begin();
+                (reader->operation == LiftedOperation::AND || reader->operation == LiftedOperation::OR) && reader->operands.size() > 2 &&
+                reader->operands[2].value.reg == defRef.regIndex && reader->operands[2].ssaVersion == defRef.version) {
+                ExplainKeep(inst, "populated constructor would become the lazy side of a short-circuit");
+                return false;
+            }
             return !InliningReordersEffect(inst, *readers.begin());
         }
     }
@@ -754,8 +768,10 @@ void ASTLifter::DeferIntoCondition(
     const auto index = def.instructionIndex;
     if (index >= 2 && instructions[index - 2].operation == LiftedOperation::NAMECALL && instructions[index - 2].operands.size() > 1 &&
         instructions[index - 2].operands[0].value.reg == def.operands[0].value.reg && BlockOf(&instructions[index - 2]) == BlockOf(&def) &&
-        !InliningReordersEffect(&instructions[index - 2], &def))
+        !InliningReordersEffect(&instructions[index - 2], &def)) {
         m_deferToConditionInline.insert(&instructions[index - 2]);
+        pending.emplace_back(instructions[index - 2].operands[1], &instructions[index - 2]);
+    }
 }
 
 bool ASTLifter::DominatesMerges(const LiftedInstruction &def, const LiftedOperand &value) {
@@ -1174,6 +1190,16 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
     if (InputRebound(def, use, useOwnNameCall))
         return true;
 
+    // a method receiver renders before the arguments of its call, which the compiler evaluates before the method lookup
+    const LiftedInstruction *methodCall = nullptr;
+    if (use->operation == LiftedOperation::NAMECALL || use->operation == LiftedOperation::NAMECALLUDATA) {
+        auto next = static_cast<size_t>(useIdx) + 1;
+        while (next < insts.size() && insts[next].operation == LiftedOperation::NOP)
+            ++next;
+        if (next < insts.size() && (insts[next].operation == LiftedOperation::CALL || insts[next].operation == LiftedOperation::CALLFB))
+            methodCall = &insts[next];
+    }
+
     // a fastcall loads its callee after the arguments whatever the source order
     const auto fastCallCallee = [&](int32_t k) {
         if (&insts[k] != calleeDef)
@@ -1241,9 +1267,22 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         return end;
     };
 
+    // CALL operand 0 carries the callee's input version, not the result's version
+    std::optional<SSARef> defValue;
+    if (def->operands[0].type == LiftedOperandType::Register) {
+        defValue = SSARef{static_cast<uint8_t>(def->operands[0].value.reg), def->operands[0].ssaVersion};
+        if (const auto defs = m_defsByInstruction.find(def); defs != m_defsByInstruction.end())
+            if (const auto result = std::ranges::find(defs->second, defValue->regIndex, &SSARef::regIndex); result != defs->second.end())
+                defValue = *result;
+    }
+
     for (int32_t k = defIdx + 1; k < useIdx && static_cast<size_t>(k) < insts.size(); ++k) {
         if (k == useOwnNameCall || fastCallCallee(k) || ownStore(insts[k]))
             continue;
+        if (methodCall && InlinedChainInto(insts[k], methodCall)) {
+            k = constructorEnd(k);
+            continue;
+        }
         if (defIsTable && InlinedChainInto(insts[k], def)) {
             k = constructorEnd(k);
             continue;
@@ -1286,8 +1325,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         default:
             break;
         }
-        if (def->operands[0].type == LiftedOperandType::Register &&
-            RendersAfter(insts[k], {static_cast<uint8_t>(def->operands[0].value.reg), def->operands[0].ssaVersion}, directUse)) {
+        if (defValue && RendersAfter(insts[k], *defValue, directUse)) {
             k = constructorEnd(k);
             continue;
         }
@@ -1337,6 +1375,7 @@ bool ASTLifter::CanOperationRaise(LiftedOperation op) {
     case LiftedOperation::CONCAT:
     case LiftedOperation::LENGTH:
     case LiftedOperation::MINUS:
+    case LiftedOperation::CONDVALUE:
         return true;
     default:
         return false;

@@ -573,6 +573,53 @@ TEST_CASE("Regress: repeat-until with two separate accumulations has both", "[De
     CHECK(Contains(out, "*"));
 }
 
+TEST_CASE("Regress: loop value or remains an expression", "[Decompiler][ShortCircuit][Regression]") {
+    const std::string source = R"(
+        local function run()
+            local found = false
+            local i = 0
+            while not found do
+                i += 1
+                found = i > 10 or i % 3 == 0
+            end
+            return i
+        end
+        return run()
+    )";
+    const auto out = DecompileOrFail(source);
+    INFO(out);
+    REQUIRE(Recompiles(out));
+    CHECK(Contains(out, "found = i > 10 or i % 3 == 0"));
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("")});
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+}
+
+TEST_CASE("Regress: loop terminal branches recover elseif", "[Decompiler][ControlFlow][Regression]") {
+    const std::string source = R"(
+        local function build()
+            local row = {}
+            for j = 1, 4 do
+                if j == 1 then
+                    row[j] = 1
+                elseif j < 3 then
+                    row[j] = j + 1
+                else
+                    row[j] = j * 2
+                end
+            end
+            return row[1], row[2], row[3], row[4]
+        end
+        return build()
+    )";
+    const auto out = DecompileOrFail(source);
+    INFO(out);
+    REQUIRE(Recompiles(out));
+    CHECK(Contains(out, "elseif"));
+    CHECK_FALSE(Contains(out, "continue"));
+    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("")});
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+}
+
 // Phi-merged call result must not shadow the merge variable with `local`
 // Known bug: a value defined in both branches of an if/else, where one branch
 // is a method-call result, emitted `local v = obj:Method()` inside the branch

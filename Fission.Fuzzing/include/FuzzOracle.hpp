@@ -92,6 +92,78 @@ namespace fuzz {
         }
     }
 
+    // The lookups, stores and calls of the compiled program in order, per function depth-first. Register traffic,
+    // constants and jumps legitimately differ; an import chain counts as one index per link past its root, a
+    // method lookup as an index, and stores that populate a constructor before anything can observe it are skipped.
+    inline std::optional<std::vector<char>> EffectTrace(const std::string &source) {
+        std::string bc;
+        if (!LuauCompiles(source, &bc))
+            return std::nullopt;
+        try {
+            Deserializer des{};
+            auto d = des.Deserialize(bc);
+            if (!d || d->functions.empty())
+                return std::nullopt;
+            Fission::InstructionDecoder decoder{};
+            BytecodeLifter lifter{&decoder};
+            const LiftedFunction lifted = lifter.LiftDeserializedBytecode(*d);
+            std::vector<char> trace;
+            std::function<void(const LiftedFunction &)> walk = [&](const LiftedFunction &f) {
+                std::array<bool, 256> fresh{};
+                for (const auto &inst : f.instructions) {
+                    const auto reg = [&](size_t i) { return inst.operands.size() > i ? inst.operands[i].value.reg & 0xff : 0; };
+                    switch (inst.operation) {
+                    case LiftedOperation::GETIMPORT:
+                    case LiftedOperation::GETGLOBAL: {
+                        // a fastcall loads its builtin after the arguments; global reads only order against an environment metatable
+                        const uint32_t links = inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() > 2 ? inst.operands[2].value.imm.u >> 30 : 1;
+                        for (uint32_t link = 1; link < links; ++link)
+                            trace.push_back('I');
+                        break;
+                    }
+                    case LiftedOperation::GETTABLE:
+                    case LiftedOperation::GETTABLEKS:
+                    case LiftedOperation::GETTABLEN:
+                    case LiftedOperation::NAMECALL:
+                        trace.push_back('I');
+                        break;
+                    case LiftedOperation::SETTABLE:
+                    case LiftedOperation::SETTABLEKS:
+                    case LiftedOperation::SETTABLEN:
+                        if (!fresh[reg(1)])
+                            trace.push_back('S');
+                        continue;
+                    case LiftedOperation::SETLIST:
+                        continue;
+                    case LiftedOperation::CALL:
+                    case LiftedOperation::CALLFB:
+                        trace.push_back('C');
+                        fresh.fill(false);
+                        break;
+                    case LiftedOperation::SETGLOBAL:
+                        trace.push_back('W');
+                        break;
+                    case LiftedOperation::SETUPVAL:
+                        trace.push_back('U');
+                        break;
+                    default:
+                        break;
+                    }
+                    if (!inst.operands.empty() && inst.operands[0].type == LiftedOperandType::Register)
+                        fresh[reg(0)] = inst.operation == LiftedOperation::NEWTABLE || inst.operation == LiftedOperation::DUPTABLE ||
+                                        (inst.operation == LiftedOperation::MOVE && fresh[reg(1)]);
+                }
+                trace.push_back('|');
+                for (const auto &sub : f.subfunctions)
+                    walk(sub);
+            };
+            walk(lifted);
+            return trace;
+        } catch (...) {
+            return std::nullopt;
+        }
+    }
+
     // Run the pipeline stage-by-stage, returning the stage name that threw, or nullptr if all
     // stages completed. `stage` tracks progress so the catch attributes the failure precisely.
     // Caller must have a Fission::ScopedThrowingAssertHandler live so asserts throw here.

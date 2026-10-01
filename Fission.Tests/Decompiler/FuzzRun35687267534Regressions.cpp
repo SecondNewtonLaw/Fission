@@ -80,6 +80,6 @@ return count)LUA";
     REQUIRE(result.resultCode == DecompileResult::Success);
     INFO("CFG bytes: " << result.cfgGraph.size());
     CHECK(result.cfgGraph.find("<B>WHY</B>") != std::string::npos);
-    CHECK(result.cfgGraph.find("back-edge reaches B1 through inner-loop exit B6") != std::string::npos);
-    CHECK(result.cfgGraph.find("preserve inner latch B4") != std::string::npos);
+    CHECK(result.cfgGraph.find("back-edge reaches B1 through inner-loop exit B3") != std::string::npos);
+    CHECK(result.cfgGraph.find("preserve inner latch B2") != std::string::npos);
 }

@@ -19,6 +19,7 @@ class ASTRewriter {
   protected:
     // Runs post-order after nested blocks.
     virtual void RewriteStatements(std::vector<std::shared_ptr<Statement>> &stmts) = 0;
+    virtual void RewriteLoopStatements(std::vector<std::shared_ptr<Statement>> &) {}
 
     // A repeat condition shares its body's scope and must participate in use analysis.
     std::shared_ptr<Expression> m_tailScopeExpr;
@@ -36,19 +37,23 @@ class ASTRewriter {
             } else if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt); w && w->body) {
                 RewriteExpression(w->condition);
                 RewriteBlock(w->body->body);
+                RewriteLoopStatements(w->body->body);
             } else if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt); r && r->body) {
                 RewriteExpression(r->condition);
                 RewriteBlock(r->body->body, r->condition);
+                RewriteLoopStatements(r->body->body);
             } else if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt); fnum && fnum->lpLoopBody) {
                 RewriteExpression(fnum->startVariable);
                 RewriteExpression(fnum->maxIncreased);
                 RewriteExpression(fnum->increaseBy);
                 RewriteBlock(fnum->lpLoopBody->body);
+                RewriteLoopStatements(fnum->lpLoopBody->body);
             } else if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt); fgen && fgen->body) {
                 RewriteExpression(fgen->generator);
                 RewriteExpression(fgen->state);
                 RewriteExpression(fgen->index);
                 RewriteBlock(fgen->body->body);
+                RewriteLoopStatements(fgen->body->body);
             } else if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
                 RewriteExpression(asn->left);
                 RewriteExpression(asn->right);

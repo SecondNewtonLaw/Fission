@@ -36,7 +36,7 @@ static const std::array<AccessType, 256> kOpcodeAccessTable = [] {
           LiftedOperation::ANDK,       LiftedOperation::ORK,          LiftedOperation::NOT,        LiftedOperation::MINUS,      LiftedOperation::LENGTH,
           LiftedOperation::NEWTABLE,   LiftedOperation::DUPTABLE,     LiftedOperation::GETVARARGS, LiftedOperation::DUPCLOSURE, LiftedOperation::SUBRK,
           LiftedOperation::CONCAT,     LiftedOperation::DIVRK,        LiftedOperation::IDIV,       LiftedOperation::IDIVK,
-          LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA, LiftedOperation::NEWCLASS}) {
+          LiftedOperation::GETUDATAKS, LiftedOperation::NAMECALLUDATA, LiftedOperation::NEWCLASS,      LiftedOperation::CONDVALUE}) {
         set(op, AccessType::Write);
     }
 

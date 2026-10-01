@@ -276,6 +276,52 @@ TEST_CASE("DeclarationHoister: coalesces only safe adjacent assignments", "[Deco
     }
 }
 
+TEST_CASE("DeclarationHoister: a loop arm's own temporary is declared in the arm", "[Decompiler][Rewriter]") {
+    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+    auto call = [&](std::shared_ptr<Expression> argument) {
+        auto print = std::make_shared<Identifier>("print");
+        print->bIsGlobal = true;
+        return std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(
+            std::make_shared<IdentifierExpressionNode>(print), std::vector<std::shared_ptr<Expression>>{std::move(argument)},
+            std::vector<std::shared_ptr<Expression>>{}, false, false
+        ));
+    };
+    // returns whether the loop's parent declares `v5_9`, and the arm's first statement
+    auto run = [&](std::vector<std::shared_ptr<Statement>> armBody) {
+        auto arm = std::make_shared<IfStatementNode>();
+        arm->condition = std::make_shared<BooleanLiteralNode>(true);
+        arm->thenBranch = std::make_shared<BlockStatementNode>();
+        arm->thenBranch->body = std::move(armBody);
+        auto loop = std::make_shared<WhileStatementNode>();
+        loop->condition = std::make_shared<BooleanLiteralNode>(true);
+        loop->body = std::make_shared<BlockStatementNode>();
+        loop->body->body.push_back(arm);
+        std::vector<std::shared_ptr<Statement>> statements{loop};
+        DeclarationHoister{}.Run(statements);
+        const bool outside = std::ranges::any_of(statements, [](const auto &stmt) { return std::dynamic_pointer_cast<VariableDeclarationNode>(stmt) != nullptr; });
+        return std::pair{outside, arm->thenBranch->body.front()};
+    };
+
+    auto [outside, first] = run({std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1)), call(id("v5_9"))});
+    CHECK_FALSE(outside);
+    const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(first);
+    REQUIRE(declaration);
+    CHECK(declaration->value);
+
+    CHECK(run({call(id("v5_9")), std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1))}).first);
+    CHECK(run({std::make_shared<AssignmentStatementNode>(
+                  id("v5_9"), std::make_shared<BinaryExpressionNode>("+", id("v5_9"), std::make_shared<NumberLiteralNode>(1))
+              )})
+              .first);
+
+    auto body = std::make_shared<BlockStatementNode>();
+    body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v5_9")}));
+    auto closure =
+        std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
+    closure->capturedNames.insert("v5_9");
+    CHECK(run({std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1)), call(closure)}).first);
+}
+
 TEST_CASE("DeclarationHoister: hoists branch writes with suffixed register names", "[Decompiler][Rewriter]") {
     auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
 

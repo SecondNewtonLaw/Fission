@@ -17,7 +17,7 @@
 #endif
 #endif
 
-std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterialization(uint32_t headerId) {
+std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterialization(uint32_t headerId, bool build) {
     const auto &blocks = m_currentFunction->basicBlocks;
     if (headerId >= blocks.size())
         return std::nullopt;
@@ -87,6 +87,8 @@ std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterializ
     // The merge must be entered only from the two loads, so that `reg` is provably the diamond's boolean.
     if (mIdx >= blocks.size() || std::set<uint32_t>(blocks[mIdx].predecessors.begin(), blocks[mIdx].predecessors.end()) != std::set<uint32_t>{tIdx, fIdx})
         return std::nullopt;
+    if (!build)
+        return BoolMaterialization{nullptr, mIdx};
 
     // Only collapse genuine condition jumps; LiftCondition yields BooleanLiteral
     // for opcodes it cannot turn into a comparison/truth test.
@@ -461,7 +463,15 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
                 return blocks[pred].lpTail && blocks[pred].lpTail->operation == LiftedOperation::JUMP;
             }))
             return false;
-        if (block.lpTail->operands.size() > 1 && block.lpTail->operands[1].value.imm.n == 1)
+        // only a short-circuit value, whose merged register is tested on the way here, is consumed before the bare `return`
+        const auto testsMergedValue = [&](const LiftedInstruction &phi) {
+            return std::ranges::any_of(block.predecessors, [&](uint32_t pred) {
+                const auto *tail = blocks[pred].lpTail;
+                return tail && (tail->operation == LiftedOperation::JUMPIF || tail->operation == LiftedOperation::JUMPIFNOT) && !tail->operands.empty() &&
+                       tail->operands[0].type == LiftedOperandType::Register && tail->operands[0].value.reg == phi.operands[0].value.reg;
+            });
+        };
+        if (block.lpTail->operands.size() > 1 && block.lpTail->operands[1].value.imm.n == 1 && std::ranges::any_of(block.phiNodes, testsMergedValue))
             return true;
         return std::all_of(block.lpHead, block.lpTail + 1, [](const LiftedInstruction &instruction) {
             return instruction.operation == LiftedOperation::RETURN || instruction.operation == LiftedOperation::NOP;
@@ -520,8 +530,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
     return result;
 }
 
-std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId) {
-    if (auto guard = DetectGuardRegion(headerId))
+std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId, bool build) {
+    if (auto guard = DetectGuardRegion(headerId, build))
         return guard;
     const auto &blocks = m_currentFunction->basicBlocks;
     if (headerId >= blocks.size())
@@ -627,6 +637,15 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
             return std::nullopt;
     }
 
+    OrChainInfo info;
+    info.bodyIdx = body;
+    info.elseIdx = elseIdx;
+    info.chainBlocks.reserve(links.size());
+    for (const auto &lk : links)
+        info.chainBlocks.push_back(lk.blockId);
+    if (!build)
+        return info;
+
     // Structure confirmed. Lift each link's condition (the condition under which it
     // reaches `body`) and OR-fold left to right.
     std::vector<std::shared_ptr<Expression>> conditions;
@@ -651,17 +670,11 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         conditions = std::move(next);
     }
 
-    OrChainInfo info;
     info.condition = std::move(conditions.front());
-    info.bodyIdx = body;
-    info.elseIdx = elseIdx;
-    info.chainBlocks.reserve(links.size());
-    for (const auto &lk : links)
-        info.chainBlocks.push_back(lk.blockId);
     return info;
 }
 
-std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t headerId) {
+std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t headerId, bool build) {
     const auto &blocks = m_currentFunction->basicBlocks;
     using Expr = std::shared_ptr<Expression>;
 
@@ -978,6 +991,10 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             return std::nullopt;
     }
 
+    std::vector<uint32_t> chainBlocks(headers.begin(), headers.end());
+    chainBlocks.insert(chainBlocks.end(), termBlocks.begin(), termBlocks.end());
+    if (!build)
+        return OrChainInfo{nullptr, body, exit, std::move(chainBlocks)};
     const auto binary = [](const char *op, const Expr &lhs, const Expr &rhs) -> Expr { return std::make_shared<BinaryExpressionNode>(op, lhs, rhs); };
     std::map<uint32_t, Expr> conditions;
     conditions[body] = std::make_shared<BooleanLiteralNode>(true);
@@ -1015,7 +1032,5 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             conditions[termEntry->second] = result;
     }
     m_valueTermOverrides = overridesBefore;
-    std::vector<uint32_t> chainBlocks(headers.begin(), headers.end());
-    chainBlocks.insert(chainBlocks.end(), termBlocks.begin(), termBlocks.end());
     return OrChainInfo{conditions.at(headerId), body, exit, std::move(chainBlocks)};
 }

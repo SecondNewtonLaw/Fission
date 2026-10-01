@@ -1270,6 +1270,31 @@ int main(int argc, char **argv) {
                   : v.kind == fuzz::SemVerdict::Kind::Diverge ? ":diverge"
                                                               : ":unchecked")]++;
 
+            // execution cannot judge most erroring programs; the recompiled effect order still can
+            const auto originalEffects = fuzz::EffectTrace(source), liftedEffects = fuzz::EffectTrace(dec.output);
+            const bool effectsDiffer = originalEffects && liftedEffects && *originalEffects != *liftedEffects;
+            const std::string effectBucket = v.kind == fuzz::SemVerdict::Kind::Match        ? "MATCH_EFFECT_DIFF"
+                                             : v.kind == fuzz::SemVerdict::Kind::Unrunnable ? "UNCHECKED_EFFECT_DIFF"
+                                                                                            : "";
+            if (!effectBucket.empty() && effectsDiffer) {
+                c.buckets[effectBucket]++;
+                const auto [o, l] = std::ranges::mismatch(*originalEffects, *liftedEffects);
+                const auto window = [](auto from, auto end) { return std::string(from, from + (std::min)(std::ptrdiff_t{3}, end - from)); };
+                const std::string effectClass = window(o, originalEffects->end()) + ">" + window(l, liftedEffects->end());
+                if (v.kind == fuzz::SemVerdict::Kind::Unrunnable)
+                    c.buckets["  effect:" + effectClass]++;
+                if (c.savedExamples[effectBucket]++ < 200) {
+                    const std::string id = effectBucket + "_" + tag + std::to_string(i);
+                    Write(crashDir / (id + ".lua"), source);
+                    Write(crashDir / (id + ".out.lua"), dec.output);
+                    Write(
+                        crashDir / (id + ".effects"),
+                        effectClass + "\n" + std::string(originalEffects->begin(), originalEffects->end()) + "\n" +
+                            std::string(liftedEffects->begin(), liftedEffects->end()) + "\n"
+                    );
+                }
+            }
+
             if (fuzz::UsesGeneratedLocalBeforeDeclared(dec.output, &source)) {
                 // Name matching can flag unrelated scopes; the VM verdict determines divergence.
                 const std::string b = irSame ? "FORWARDREF_IR_STABLE" : "FORWARDREF_IR_DIVERGE";

@@ -1880,6 +1880,8 @@ std::string_view OperationToString(LiftedOperation operation) {
         return "CMPPROTO";
     case LiftedOperation::NEWCLASS:
         return "NEWCLASS";
+    case LiftedOperation::CONDVALUE:
+        return "CONDVALUE";
     case LiftedOperation::PHI:
         return "PHI";
     default:

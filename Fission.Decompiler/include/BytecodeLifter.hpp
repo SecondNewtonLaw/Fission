@@ -92,6 +92,9 @@ enum class LiftedOperation : uint32_t {
     CMPPROTO,
     NEWCLASS,
 
+    // a branch whose arms only load true/false: dest, the branch's operands, the branch operation, the value when it jumps
+    CONDVALUE,
+
     PHI // phi node on SSA.
 };
 

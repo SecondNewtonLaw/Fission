@@ -239,6 +239,281 @@ print(change(), type(rawget(_G, "missing")))
         CheckTraceWith(mutatingArgument, optimization, 1);
 }
 
+TEST_CASE("Fuzz: a method receiver stays inline ahead of its loaded arguments", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(o = {get = function(self, x) return x > 3 end}
+k = 5
+print(o:get(k)))LUA";
+    for (int optimization : {0, 1, 2}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        CHECK(lifting_semantics_test::Contains(output, "print(o:get(k))"));
+        CheckTraceWith(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Fuzz: a break threaded past the jump over an else leaves its for loop", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local function run(a, b, items, limit)
+    local out = {}
+    if a then
+        if b then
+            out[#out + 1] = "b"
+        else
+            for _, v in ipairs(items) do
+                if v > limit then break end
+                out[#out + 1] = v
+            end
+        end
+    else
+        out[#out + 1] = "else"
+    end
+    out[#out + 1] = if limit > 2 then "hi" else tostring(limit)
+    return table.concat(out, ",")
+end
+print(run(true, false, {1, 2, 3, 4}, 2), run(true, false, {1, 2}, 5), run(false, false, {}, 1), run(true, true, {}, 3)))LUA";
+    for (int optimization : {1, 2})
+        for (int debug : {1, 2}) {
+            const auto output = DecompileWith(source, optimization, debug, static_cast<DecompilerFlags>(0));
+            INFO(output);
+            CHECK(lifting_semantics_test::Contains(output, "break"));
+            CHECK_FALSE(lifting_semantics_test::Contains(output, "__fission_early_for"));
+            CheckTraceWith(source, optimization, debug);
+        }
+}
+
+TEST_CASE("Fuzz: loop conditions keep method receivers and argument calls in order", "[Decompiler][CheckPending][Semantics]") {
+    const std::string receiver = R"LUA(local log = {}
+local box = {n = 0}
+function box:tick(v) self.n += 1; log[#log + 1] = "tick" .. v; return self.n end
+local source = setmetatable({}, {__index = function(_, k) log[#log + 1] = "get" .. k; return box end})
+repeat until source.a.n + source.b:tick(1) > 6
+print(box.n, table.concat(log, ",")))LUA";
+    const std::string argument = R"LUA(local log = {}
+local function f(x) log[#log + 1] = "f" .. x; return x end
+local obj = {get = function(self, x) log[#log + 1] = "get" .. x; return x > 1 end}
+for k, v in ipairs({obj, obj}) do
+    local i = 0
+    repeat
+        repeat i += 1 until i % 2 == 0
+        if i > 6 then break end
+    until v:get(f(i))
+end
+print(table.concat(log, ",")))LUA";
+    for (int optimization : {1, 2})
+        for (int debug : {1, 2}) {
+            CheckTraceWith(receiver, optimization, debug);
+            CheckTraceWith(argument, optimization, debug);
+        }
+}
+
+TEST_CASE("Fuzz: a constructor read twice by one expression is built once", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local calls = 0
+local function f() calls += 1; return calls end
+local function mk()
+    local t = {f(), key = "k"}
+    return t[t]
+end
+print(mk(), calls))LUA";
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(source, optimization, 1);
+}
+
+TEST_CASE("Fuzz: a merged local function reusing a register stays local", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(label = tostring(1)
+local function step(n) if n > 0 then return step(n - 1) end return "done" end
+if label == "x" then step = print end
+print(step(2), rawget(_G, "step"), label))LUA";
+    for (int optimization : {0, 1, 2})
+        for (int debug : {1, 2}) {
+            const auto output = DecompileWith(source, optimization, debug, static_cast<DecompilerFlags>(0));
+            INFO(output);
+            CHECK(lifting_semantics_test::Contains(output, "label = tostring(1)"));
+            CheckTraceWith(source, optimization, debug);
+        }
+}
+
+TEST_CASE("Fuzz: code after an if at the function end is not copied into its arms", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local function f(a)
+    local x = 1
+    if a then print("a") x = 2 end
+    print("tail", x)
+end
+f(true)
+f(false))LUA";
+    for (int optimization : {0, 1}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        const auto first = output.find("\"tail\"");
+        REQUIRE(first != std::string::npos);
+        CHECK(output.find("\"tail\"", first + 1) == std::string::npos);
+    }
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(source, optimization, 1);
+}
+
+TEST_CASE("Fuzz: an if/else ending a loop body joins at the latch", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local calls = 0
+local function f() calls += 1 return calls % 2 == 0 end
+for i = 1, 3 do
+    if f() then print("a", i) else print("b", i) end
+end
+for i = 1, 4 do
+    local a, b = f(), f()
+    if a and b then print("both") elseif not a and b then print("second") elseif a then print("first") end
+end
+local n = 0
+repeat
+    X = if f() then 1 else 2
+    print(X)
+    n += 1
+until n > 3)LUA";
+    for (int optimization : {0, 1}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        CHECK(output.find("continue") == std::string::npos);
+        CHECK(output.find("else") != std::string::npos);
+        CHECK(output.find("elseif") != std::string::npos);
+        CHECK(output.find("if f() then 1 else 2") != std::string::npos);
+    }
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(source, optimization, 1);
+}
+
+TEST_CASE("Fuzz: debug locals shaped like register names keep their own binding", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local v2 = {n = 1}
+local s = {}
+s[if v2.n then "a" else "b"] = 5
+print(s.a, s.b, v2.n))LUA";
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(source, optimization, 2);
+}
+
+TEST_CASE("Fuzz: a reassigned local captured by a closure stays local to each call", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local function make(n)
+    local x = tostring(n)
+    print(x)
+    x = x .. "!"
+    return function() return x end
+end
+local a, b = make(1), make(2)
+print(a(), b()))LUA";
+    for (int optimization : {0, 1, 2})
+        CheckTraceWith(source, optimization, 1);
+}
+
+TEST_CASE("Fuzz: a computed call key folds into its constructor", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(n = 0
+function g() n += 1 return "k" .. n end
+h = 7
+print({ [g()] = h })
+print({ [g()] = h, 1, 2 })
+local t = {}
+t[g()] = h + n
+print(t.k3, n))LUA";
+    for (int optimization : {0, 1, 2}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        if (optimization > 0)
+            CHECK(output.find("{ [g()] = h }") != std::string::npos);
+        CheckTraceWith(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Fuzz: an unoptimized string key beside array items keeps record syntax", "[Decompiler][CheckPending][Naturalness]") {
+    const std::string source = R"LUA(local state = { value = 8, ["two words"] = 1, 8 }
+print(state.value, state["two words"], state[1]))LUA";
+    const auto output = DecompileWith(source, 0, 1, static_cast<DecompilerFlags>(0));
+    INFO(output);
+    CHECK(output.find("{ value = 8, [\"two words\"] = 1, 8 }") != std::string::npos);
+    CheckTraceWith(source, 0, 1);
+
+    const std::string record = R"LUA(local state = { value = 8, other = "x" }
+local bracketed = { ["value"] = 8 }
+local proxy = setmetatable({}, { __index = function(_, key) return key end })
+print(state.value, state.other, bracketed.value, proxy.missing))LUA";
+    const auto recordOutput = DecompileWith(record, 0, 1, static_cast<DecompilerFlags>(0));
+    INFO(recordOutput);
+    CHECK(recordOutput.find("{ value = 8, other = \"x\" }") != std::string::npos);
+    CHECK(recordOutput.find("{ [\"value\"] = 8 }") != std::string::npos);
+    CHECK(recordOutput.find("__index = function(") != std::string::npos);
+    CheckTraceWith(record, 0, 1);
+}
+
+TEST_CASE("Naturalness: a record constructor mixing constant and computed fields stays one constructor", "[Decompiler][CheckPending][Naturalness]") {
+    const std::string source = R"LUA(local function make(x, part)
+    local first = { a = x + 1, b = 2 }
+    local second = { Size = part.Size * 2, Name = "n", Parent = part }
+    local third = { b = 2, a = tostring(x), c = nil }
+    print(first.a, first.b, second.Size, second.Name, third.a, third.b)
+    return first, second, third
+end
+make(3, { Size = 4 }))LUA";
+    for (int optimization : {1, 2}) {
+        const auto output = DecompileWith(source, optimization, 2, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        CHECK(output.find("local first = { a = x + 1, b = 2 }") != std::string::npos);
+        CHECK(output.find("local second = { Size = part.Size * 2, Name = \"n\", Parent = part }") != std::string::npos);
+        CHECK(output.find("local third = { b = 2, a = tostring(x)") != std::string::npos);
+        CheckTraceWith(source, optimization, 2);
+        CheckTraceWith(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Fuzz: a closure stored into itself keeps its local", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(print(pcall(function()
+    local key = {}
+    local g = function() return 2 end
+    g[key] = g
+    print("unreachable")
+end)))LUA";
+    for (int optimization : {0, 1, 2}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        CHECK(output.find(")[") == std::string::npos);
+        CheckTraceWith(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Fuzz: a closure assigned inside nested loops binds the outer local", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local v = tostring(1)
+local n = 0
+repeat
+    repeat
+        v = function(x) return x end
+    until n >= 0
+    n += 1
+until n > 2
+local function g() return v end
+print(type(v), type(g())))LUA";
+    for (int optimization : {0, 1})
+        for (int debug : {1, 2})
+            CheckTraceWith(source, optimization, debug);
+}
+
+TEST_CASE("Fuzz: a populated constructor is not sunk into the lazy side of or", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(probe = setmetatable({}, { __index = function(_, k) print("read", k) return 1 end })
+local t = { n = probe.y }
+local f = function() end or t
+print(type(f)))LUA";
+    for (int optimization : {0, 1, 2}) {
+        const auto output = DecompileWith(source, optimization, 1, static_cast<DecompilerFlags>(0));
+        INFO(output);
+        CHECK(output.find("or {") == std::string::npos);
+        CheckTraceWith(source, optimization, 1);
+    }
+}
+
+TEST_CASE("Fuzz: a reassigned parameter captured by a closure is not redeclared", "[Decompiler][CheckPending][Semantics]") {
+    const std::string source = R"LUA(local function f(a, b)
+    print(b)
+    if a then b = b .. "!" end
+    return function() return b end
+end
+print(f(true, "x")(), f(false, "y")()))LUA";
+    for (int optimization : {0, 1})
+        for (int debug : {1, 2})
+            CheckTraceWith(source, optimization, debug);
+}
+
 TEST_CASE("Check pending: the most negative integer constant renders as valid source", "[Decompiler][CheckPending][Semantics]") {
     lifting_semantics_test::EnableLuauFFlagsOnce();
     Luau::BytecodeBuilder builder{};
