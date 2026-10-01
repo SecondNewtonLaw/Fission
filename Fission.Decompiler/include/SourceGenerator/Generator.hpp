@@ -61,6 +61,8 @@ class SourceGenerator : public Visitor {
 
     static bool IsRightAssociative(const std::string &op) { return op == ".." || op == "^"; }
 
+    static constexpr int kUnaryPrec = 7;
+
     // Treat concatenation chains as associative for rendering.
     static bool IsAssociative(const std::string &op) { return op == "or" || op == "and" || op == ".."; }
 
@@ -451,7 +453,6 @@ class SourceGenerator : public Visitor {
 
     void Visit(UnaryExpressionNode *lpNode) override {
         (void)lpNode;
-        constexpr int kUnaryPrec = 7;
         const bool wrap = kUnaryPrec < m_minPrecedence;
         if (wrap)
             buffer << "(";
@@ -773,18 +774,20 @@ class SourceGenerator : public Visitor {
     }
 
     void Visit(NumberLiteralNode *lpNode) override {
-        if (lpNode->bUseParenthesis)
-            buffer << "(";
         // Floating-point predicates can fold to false under fast-math.
         const uint64_t bits = std::bit_cast<uint64_t>(lpNode->value);
         const uint64_t magnitude = bits & 0x7fffffffffffffffULL;
+        // a leading minus lexes as unary, which binds looser than `^`
+        const bool wrap = lpNode->bUseParenthesis || ((bits >> 63) && magnitude < 0x7ff0000000000000ULL && kUnaryPrec < m_minPrecedence);
+        if (wrap)
+            buffer << "(";
         if (magnitude > 0x7ff0000000000000ULL)
             buffer << "(0 / 0)";
         else if (magnitude == 0x7ff0000000000000ULL)
             buffer << ((bits >> 63) ? "(-1 / 0)" : "(1 / 0)");
         else
             buffer << std::format("{}", lpNode->value);
-        if (lpNode->bUseParenthesis)
+        if (wrap)
             buffer << ")";
     }
 
@@ -1103,14 +1106,16 @@ class SourceGenerator : public Visitor {
         lpNode->right->Accept(this);
     }
     void Visit(IntegerLiteralNode *lpNode) override {
-        if (lpNode->bUseParenthesis)
+        const bool isMin = lpNode->value == std::numeric_limits<int64_t>::min();
+        const bool wrap = lpNode->bUseParenthesis || (lpNode->value < 0 && !isMin && kUnaryPrec < m_minPrecedence);
+        if (wrap)
             buffer << "(";
         // 2^63 has no literal; -2^63 is exact as a number
-        if (lpNode->value == std::numeric_limits<int64_t>::min())
+        if (isMin)
             buffer << "integer.create(-9223372036854775808)";
         else
             buffer << std::format("{}i", lpNode->value);
-        if (lpNode->bUseParenthesis)
+        if (wrap)
             buffer << ")";
     }
 

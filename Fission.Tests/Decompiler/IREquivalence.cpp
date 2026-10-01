@@ -468,6 +468,10 @@ TEST_CASE("IR: modulo round-trips to identical opcodes", "[Decompiler][IREquival
 
 TEST_CASE("IR: power round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(a, b) return a ^ b end"); }
 
+TEST_CASE("IR: negative constant base of a power keeps its parentheses", "[Decompiler][IREquivalence]") {
+    RequireSameIR("return function(a) return (-401) ^ a, (-1.5) ^ a end");
+}
+
 TEST_CASE("IR: not-equal comparison round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
     RequireSameIR("return function(a, b) return a ~= b end");
 }
