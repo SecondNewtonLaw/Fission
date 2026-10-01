@@ -1328,6 +1328,11 @@ int main(int argc, char **argv) {
             } else {
                 const std::string b = v.kind == fuzz::SemVerdict::Kind::Diverge ? "SEM_DIVERGE" : "SEM_UNCHECKED";
                 c.buckets[b]++;
+                if (v.kind == fuzz::SemVerdict::Kind::Unrunnable) {
+                    static const std::regex nameRe(R"('[^']*'|\d+)");
+                    const std::string reason = v.skipped ? "skipped" : v.opaque ? "opaque" : "errors:" + std::regex_replace(v.original.error.value_or("?"), nameRe, "_");
+                    c.buckets["  unch:" + reason]++;
+                }
                 if (v.kind == fuzz::SemVerdict::Kind::Diverge && c.savedExamples[b]++ < 50) {
                     const std::string id = tag + std::to_string(c.savedExamples[b]);
                     Write(crashDir / ("SEM_DIVERGE_" + id + ".lua"), source);

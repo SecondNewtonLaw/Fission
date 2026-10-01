@@ -7,6 +7,7 @@
 #include <cstring>
 #include <functional>
 #include <optional>
+#include <ranges>
 #include <regex>
 #include <set>
 #include <string>
@@ -162,6 +163,11 @@ namespace fuzz {
         inline int TracePrint(lua_State *L) {
             auto *trace = static_cast<std::string *>(lua_tolightuserdata(L, lua_upvalueindex(1)));
             auto *budget = static_cast<RunBudget *>(lua_callbacks(L)->userdata);
+            if (trace->size() > (1u << 22)) {
+                budget->deadline = {};
+                budget->expired = true;
+                luaL_errorL(L, "FUZZ_TIMEOUT");
+            }
             const bool earlierComparable = budget->comparable;
             budget->comparable = true;
             const size_t start = trace->size();
@@ -175,6 +181,26 @@ namespace fuzz {
             *trace += '\n';
             budget->prints.push_back(budget->comparable ? std::optional(trace->substr(start)) : std::nullopt);
             budget->comparable &= earlierComparable;
+            return 0;
+        }
+
+        inline int SetPrimitiveMetatable(lua_State *L) {
+            luaL_checktype(L, 1, LUA_TTABLE);
+            const auto apply = [&] {
+                lua_pushvalue(L, 1);
+                lua_setmetatable(L, -2);
+                lua_pop(L, 1);
+            };
+            lua_pushnil(L);
+            apply();
+            lua_pushboolean(L, false);
+            apply();
+            lua_pushnumber(L, 0);
+            apply();
+            lua_pushinteger64(L, 0);
+            apply();
+            lua_pushcfunction(L, SetPrimitiveMetatable, nullptr);
+            apply();
             return 0;
         }
 
@@ -219,6 +245,35 @@ namespace fuzz {
         // P2: hostile scalars; forces the error/short-circuit paths from a different angle.
         "t = 0\n"
         "obj = 'hostile'\n"
+        "math.randomseed(0)\n",
+        // P3: permissive primitives; nil, booleans, numbers and functions answer every operator with a
+        // traced marker, so type-incoherent programs keep running and their operator order is observed.
+        "local print, type, select = print, type, select\n"
+        "local function tag(v)\n"
+        "    local ty = type(v)\n"
+        "    if ty == 'nil' or ty == 'boolean' or ty == 'number' or ty == 'integer' or ty == 'string' then return v end\n"
+        "    return '<' .. ty .. '>'\n"
+        "end\n"
+        "local mt = {\n"
+        "    __index = function(s, k) print('<index>', tag(s), tag(k)) return nil end,\n"
+        "    __newindex = function(s, k, v) print('<newindex>', tag(s), tag(k), tag(v)) end,\n"
+        "    __call = function(s, ...) print('<call>', tag(s), select('#', ...)) return nil end,\n"
+        "    __unm = function(a) print('<unm>', tag(a)) return 0 end,\n"
+        "    __len = function(a) print('<len>', tag(a)) return 0 end,\n"
+        "    __concat = function(a, b) print('<concat>', tag(a), tag(b)) return '' end,\n"
+        "    __lt = function(a, b) print('<lt>', tag(a), tag(b)) return false end,\n"
+        "    __le = function(a, b) print('<le>', tag(a), tag(b)) return false end,\n"
+        "}\n"
+        "local smt = getmetatable('')\n"
+        "for _, op in { 'add', 'sub', 'mul', 'div', 'idiv', 'mod', 'pow' } do\n"
+        "    local name = '<' .. op .. '>'\n"
+        "    mt['__' .. op] = function(a, b) print(name, tag(a), tag(b)) return 0 end\n"
+        "    smt['__' .. op] = mt['__' .. op]\n"
+        "end\n"
+        "smt.__call, smt.__unm, smt.__concat = mt.__call, mt.__unm, mt.__concat\n"
+        "__fuzz_setmt(mt)\n"
+        "t = { 1, 2, 3, key = 'value', x = 5 }\n"
+        "obj = { x = 1, y = 'hello', items = { 4, 5 } }\n"
         "math.randomseed(0)\n",
     };
     inline constexpr size_t kSemPreludeCount = sizeof(kSemPreludes) / sizeof(kSemPreludes[0]);
@@ -289,10 +344,14 @@ namespace fuzz {
             return status;
         };
 
+        lua_pushcfunction(L, detail::SetPrimitiveMetatable, "__fuzz_setmt");
+        lua_setglobal(L, "__fuzz_setmt");
         if (runChunk(preludeBc, false) != 0) {
             lua_close(L);
             return result; // fixture must run clean; anything else is a harness bug
         }
+        lua_pushnil(L);
+        lua_setglobal(L, "__fuzz_setmt");
 
         const int status = runChunk(bytecode, true);
         if (status == -1) {
@@ -328,7 +387,7 @@ namespace fuzz {
         size_t successful = 0, equalErrors = 0, opaque = 0, skipped = 0;
     };
 
-    // Equal errors alone do not establish coverage of the program body.
+    // An equal error establishes coverage only when the body traced something before it.
     inline SemVerdict CompareSemantics(const std::string &originalBc, const std::string &decompiledBc, const std::vector<std::string> &preludeBcs) {
         SemVerdict v{};
         bool judgedAny = false;
@@ -362,6 +421,16 @@ namespace fuzz {
                 printsDiffer = orig.prints[p] && dec.prints[p] && orig.prints[p] != dec.prints[p];
             if (dec.status != orig.status || printsDiffer || (orig.error && dec.error && orig.error != dec.error) ||
                 (orig.comparable && dec.comparable && dec.trace != orig.trace)) {
+                // pointer-keyed tables iterate in allocation order, which differs between states
+                const bool deterministic = std::ranges::all_of(std::views::iota(0, 3), [&](int) {
+                    const SemTrace again = RunLuauTrace(originalBc, preludeBcs[i]);
+                    return again.status == orig.status && again.trace == orig.trace;
+                });
+                if (!deterministic) {
+                    ++v.skipped;
+                    incomplete = true;
+                    continue;
+                }
                 v.kind = SemVerdict::Kind::Diverge;
                 v.original = std::move(orig);
                 v.decompiled = std::move(dec);
@@ -374,7 +443,7 @@ namespace fuzz {
             else if (orig.status == SemTrace::Status::Error)
                 ++v.equalErrors;
             incomplete |= !orig.comparable || !dec.comparable;
-            judgedAny |= orig.status == SemTrace::Status::Ok && orig.comparable && dec.comparable;
+            judgedAny |= orig.comparable && dec.comparable && (orig.status == SemTrace::Status::Ok || !orig.prints.empty());
             v.original = std::move(orig);
             v.decompiled = std::move(dec);
         }
