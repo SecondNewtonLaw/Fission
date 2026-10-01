@@ -497,6 +497,22 @@ print(v3))LUA";
         CheckTraceWith(source, optimization, 0);
 }
 
+TEST_CASE("Fuzz: chained compound assignments in a repeat body evaluate each operator once", "[Decompiler][CheckPending][EvaluationOrder]") {
+    const std::string source = R"LUA(local mt = { __add = function(a) print("add") return a end, __sub = function(a) print("sub") return a end }
+local a = setmetatable({}, mt)
+local v0 = a
+local n = 0
+repeat
+    v0 += tostring
+    v0 -= ipairs
+    n += 1
+until n >= 2
+print(v0 == a))LUA";
+    for (int optimization = 0; optimization <= 2; optimization++)
+        for (int debug = 0; debug <= 2; debug++)
+            CheckTraceWith(source, optimization, debug);
+}
+
 TEST_CASE("Fuzz: an inlined constructor value is not delayed past a nil-key store","[Decompiler][CheckPending][EvaluationOrder]") {
     CheckTraceWith(R"LUA(local mt = setmetatable({}, { __add = function() print("add") return 1 end })
 print(pcall(function()

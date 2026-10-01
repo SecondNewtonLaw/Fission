@@ -4360,19 +4360,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                                            (users == m_currentFunction->users.end() || users->second.empty());
                     statements.push_back(std::make_shared<VariableDeclarationNode>(target, unreadNil ? nullptr : val));
                 } else {
-                    if (val->nodeKind == ASTNodeKind::BinaryExpression) {
-                        // binary expressions may be compounded under specific conditions.
-                        if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(val); lpBinExpr != nullptr)
-                            if (auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(lpBinExpr->left); identifier != nullptr) {
-                                // expression is compound.
-                                if (identifier->identifier->name == target->identifier->name) {
-                                    statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(lpBinExpr->op, lpBinExpr->left, lpBinExpr->right));
-                                    break;
-                                }
-                            }
-                    }
-
-                    statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
+                    const auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(val);
+                    const auto left = binary ? std::dynamic_pointer_cast<IdentifierExpressionNode>(binary->left) : nullptr;
+                    if (left && left->identifier->name == target->identifier->name)
+                        statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(binary->op, binary->left, binary->right));
+                    else
+                        statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
                 }
                 if (inst.operation == LiftedOperation::NEWTABLE)
                     if (const auto *setList = delayedVariadicSetList(inst); setList)
