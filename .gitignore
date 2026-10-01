@@ -14,3 +14,5 @@
 /build
 /out
 /cmake/CPM_*
+/Agents
+/docs/DRAFT_RELEASE_NOTES.md
