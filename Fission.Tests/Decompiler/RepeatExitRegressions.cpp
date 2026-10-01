@@ -472,6 +472,23 @@ until false)LUA",
     CHECK(result.decompilationOutput.find("until false") != std::string::npos);
 }
 
+TEST_CASE("Infinite while ending in a conditional break becomes repeat-until", "[Decompiler][RepeatExitSemantic]") {
+    fuzz::EnableLuauFlags();
+    for (const int opt : {0, 1, 2}) {
+        Decompiler decompiler{};
+        const auto result = decompiler.DecompileTestCode(R"LUA(repeat
+    g = g + 1
+    if g > 5 then break end
+    v3 = v4
+until {})LUA",
+                                                         DecompilerFlags::OmitFissionComments, Luau::CompileOptions{opt, 0});
+        INFO("O" << opt << "\n" << result.decompilationOutput);
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        CHECK(result.decompilationOutput.find("while true do") == std::string::npos);
+        CHECK(result.decompilationOutput.find("until {}") != std::string::npos);
+    }
+}
+
 TEST_CASE("Numeric-for step merged from a short-circuit keeps both operands", "[Decompiler][FuzzRegress]") {
     fuzz::EnableLuauFlags();
     Decompiler decompiler{};

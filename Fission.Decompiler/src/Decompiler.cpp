@@ -25,6 +25,7 @@
 #include "Rewriters/SelfAssignmentEliminator.hpp"
 #include "Rewriters/ShortCircuitChainFolder.hpp"
 #include "Rewriters/ShortCircuitFolder.hpp"
+#include "Rewriters/WhileTrueRepeatRewriter.hpp"
 #include "SafetyGuard.hpp"
 #include "SourceGenerator/AstJsonSerializer.hpp"
 #include "Luau/Bytecode.h"
@@ -837,6 +838,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     timeRewriter("Declaration Hoister 1", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
 
     timeRewriter("Short-Circuit Folder", [&] { ShortCircuitFolder{}.Run(liftedAST.statements); });
+    timeRewriter("While-True Repeat Rewriter", [&] { WhileTrueRepeatRewriter{}.Run(liftedAST.statements); });
     // Method reconstruction must precede dead-local elimination.
     timeRewriter("Class Method Rewriter", [&] { ClassMethodRewriter{}.Run(liftedAST.statements); });
     timeRewriter("Declaration Hoister 2", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
