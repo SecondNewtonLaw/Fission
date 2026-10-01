@@ -884,7 +884,7 @@ class SourceGenerator : public Visitor {
             buffer << "(";
 
         if (lpNode->expressions.empty()) {
-            buffer << "{  }";
+            buffer << "{}";
             if (lpNode->bUseParenthesis)
                 buffer << ")";
             return;
@@ -1072,13 +1072,11 @@ class SourceGenerator : public Visitor {
         if (lpNode->body) // defensive: a malformed (null-body) loop must not segfault the generator
             lpNode->body->Accept(this);
         this->DecreaseIndentation();
-        this->NextLine();
-        buffer << this->GetIndentation() << "until (";
+        buffer << this->GetIndentation() << "until ";
         if (lpNode->condition)
-            lpNode->condition->Accept(this);
+            EmitWithPrecedence(0, lpNode->condition.get());
         else
             buffer << "true"; // a missing condition is malformed; emit a parseable placeholder
-        buffer << ")";
         this->NextLine();
     }
 

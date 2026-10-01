@@ -404,7 +404,7 @@ end, true;
     REQUIRE(Recompiles(result.decompilationOutput, &error));
     INFO("recompile error: " << error);
     CHECK(result.decompilationOutput.find("while true do") == std::string::npos);
-    const auto untilFunction = result.decompilationOutput.find("until (function");
+    const auto untilFunction = result.decompilationOutput.find("until function");
     REQUIRE(untilFunction != std::string::npos);
     CHECK(result.decompilationOutput.find("return function(", untilFunction) != std::string::npos);
     const bool hasStrandedConditionClosure =
