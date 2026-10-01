@@ -438,6 +438,64 @@ print(state.value, state.other, bracketed.value, proxy.missing))LUA";
     CheckTraceWith(record, 0, 1);
 }
 
+TEST_CASE("Naming: debug names spelled like generated names survive", "[Decompiler][CheckPending][Naming]") {
+    const std::string source = R"LUA(local v1 = 1
+local v3 = true
+local function f() return v1, v3 end
+local v2 = f()
+print(v1, v3))LUA";
+    const auto output = DecompileWith(source, 0, 2, DecompilerFlags::OmitFissionComments);
+    INFO(output);
+    CHECK(output.find("local v1 = 1") != std::string::npos);
+    CHECK(output.find("local v3 = true") != std::string::npos);
+    CHECK(output.find("local v2 = f()") != std::string::npos);
+    CHECK(output.find("_v") == std::string::npos);
+    CheckTraceWith(source, 0, 2);
+}
+
+TEST_CASE("Naming: a populated constructor declares its local after its register held a temporary", "[Decompiler][CheckPending][Naming]") {
+    const std::string source = R"LUA(local a = function()
+    return (true)[163i]
+end
+a[{ ["\n"] = print, if 135 then nil else nil }] = a(nil)[string("key")] > (function()
+    return true
+end).y
+local b = {
+    { ["x\n]"] = 56.857142857142854 },
+    (nil)[false],
+    ("key").x,
+    { 25i, ["x\n]"] = 233, "x" },
+}
+return b, b)LUA";
+    for (int optimization = 0; optimization <= 2; optimization++) {
+        const auto output = DecompileWith(source, optimization, 2, DecompilerFlags::OmitFissionComments);
+        INFO("O" << optimization << "\n" << output);
+        CHECK(output.find("local b = {") != std::string::npos);
+    }
+}
+
+TEST_CASE("Fuzz: a closure assigned to a parameter without debug info stays an assignment", "[Decompiler][CheckPending][Naming]") {
+    const std::string source = R"LUA(local f = function(p0)
+    p0 = function(p1)
+        print(p1)
+    end
+    p0(1)
+end
+print(pcall(f, nil)))LUA";
+    for (int optimization = 0; optimization <= 2; optimization++)
+        CheckTraceWith(source, optimization, 0);
+}
+
+TEST_CASE("Fuzz: an inlined constructor value is not delayed past a nil-key store","[Decompiler][CheckPending][EvaluationOrder]") {
+    CheckTraceWith(R"LUA(local mt = setmetatable({}, { __add = function() print("add") return 1 end })
+print(pcall(function()
+    local inner = { field = mt + 1 }
+    local outer = { [nil] = "value", inner }
+    return outer
+end)))LUA",
+                   2, 1);
+}
+
 TEST_CASE("Naturalness: a record constructor mixing constant and computed fields stays one constructor", "[Decompiler][CheckPending][Naturalness]") {
     const std::string source = R"LUA(local function make(x, part)
     local first = { a = x + 1, b = 2 }

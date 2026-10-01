@@ -154,8 +154,13 @@ class DeclarationHoister {
         return static_cast<int>(m_scopes.size() - 1);
     }
 
-    // A generated register local is `vN`, optionally with an upvalue-collision suffix (`vN_M`).
-    static bool IsRegisterName(const std::string &s) {
+    // A generated register local is `vN`, optionally with an upvalue-collision suffix (`vN_M`), a collision prefix (`_vN`),
+    // or the reserved prefix of a debug name spelled like one.
+    static bool IsRegisterName(std::string_view s) {
+        if (s.starts_with(kReservedNamePrefix))
+            s.remove_prefix(kReservedNamePrefix.size());
+        while (!s.empty() && s[0] == '_')
+            s.remove_prefix(1);
         if (s.size() < 2 || s[0] != 'v')
             return false;
         size_t i = 1;

@@ -5,6 +5,7 @@
 #pragma once
 #include <set>
 
+#include "AbstractSyntaxTree/ASTNode.hpp"
 #include "BytecodeLifter.hpp"
 #include "Deserializer.hpp"
 #include "FissionDebugNotes.hpp"
@@ -257,6 +258,28 @@ struct AnalyzedFunction {
     // a debug name of this shape would collide with the names given to unnamed registers
     static bool IsGeneratedNameShaped(const std::string &s) { return IsAutoNameShaped(s) || IsParameterNameShaped(s); }
 
+    // a lifted scope can outlive the source's, so a debug name a global also spells takes the same `_` as an automatic one
+    std::string DebugLocalName(const std::string &s) const {
+        if (!IsGeneratedNameShaped(s))
+            return s;
+        std::string name = s;
+        while (globalAutoNameCollisions.contains(name))
+            name = "_" + name;
+        return std::string(kReservedNamePrefix) + name;
+    }
+
+    // an automatic name must not spell a reserved debug name, nor one of its shadow suffixes
+    bool IsReservedName(const std::string &name) const {
+        if (globalAutoNameCollisions.contains(name))
+            return true;
+        for (const auto &reserved : reservedDebugNames)
+            if (name == reserved || (name.size() > reserved.size() + 1 && name.starts_with(reserved) && name[reserved.size()] == '_' &&
+                                     std::all_of(name.begin() + static_cast<std::ptrdiff_t>(reserved.size() + 1), name.end(),
+                                                 [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })))
+                return true;
+        return false;
+    }
+
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
 
     // Explicit names outrank automatic and parameter names for every register version.
@@ -312,11 +335,11 @@ struct AnalyzedFunction {
 
         std::string base = std::format("v{}", reg);
         std::string name = DisambiguateOwnName(base);
-        if (globalAutoNameCollisions.contains(name)) {
+        if (IsReservedName(name)) {
             const std::string collided = name;
             do {
                 name = DisambiguateOwnName("_" + name);
-            } while (globalAutoNameCollisions.contains(name));
+            } while (IsReservedName(name));
             prefixedLocalRenames[name] = collided;
         }
         return name;
@@ -360,6 +383,12 @@ struct AnalyzedFunction {
                     if (IsAutoNameShaped(s) || IsParameterNameShaped(s))
                         this->globalAutoNameCollisions.insert(s);
                 };
+                for (const auto &local : function.lpDeserialized->locvars)
+                    if (IsIdentifier(local.varname) && IsGeneratedNameShaped(local.varname))
+                        this->reservedDebugNames.insert(local.varname);
+                for (const auto &upvalue : function.lpDeserialized->upvalueNames)
+                    if (IsIdentifier(upvalue) && IsGeneratedNameShaped(upvalue))
+                        this->reservedDebugNames.insert(upvalue);
                 for (const auto &inst : function.instructions) {
                     if ((inst.operation == LiftedOperation::GETGLOBAL || inst.operation == LiftedOperation::SETGLOBAL) && inst.operands.size() >= 2)
                         addIfShaped(inst.operands[1].value.imm.k);
@@ -370,11 +399,15 @@ struct AnalyzedFunction {
                     collect(nested);
             };
             collect(*this->lpLiftedFunction);
+            std::unordered_set<std::string> spelled;
+            for (const auto &name : this->reservedDebugNames)
+                spelled.insert(RestoreReservedNames(DebugLocalName(name)));
+            this->reservedDebugNames = std::move(spelled);
         }
 
         int32_t uIdx = 0;
         for (const auto &name : lpDeserialized->upvalueNames)
-            this->upvalueNames[uIdx++] = name;
+            this->upvalueNames[uIdx++] = DebugLocalName(name);
 
         if (uIdx != lpDeserialized->nups) {
             for (uint64_t i = uIdx; i < lpDeserialized->nups; i++) {
@@ -385,10 +418,10 @@ struct AnalyzedFunction {
         for (size_t i = 0; i < lpDeserialized->numparams; i++) {
             // a parameter's debug local opens at the function entry and spans the whole body
             const auto debugLocal = std::ranges::find_if(lpDeserialized->locvars, [&](const auto &local) {
-                return local.reg == static_cast<int32_t>(i) && local.startpc <= 1 && IsIdentifier(local.varname) && !IsGeneratedNameShaped(local.varname);
+                return local.reg == static_cast<int32_t>(i) && local.startpc <= 1 && IsIdentifier(local.varname);
             });
-            std::string name = debugLocal != lpDeserialized->locvars.end() ? debugLocal->varname : std::format("arg{}", i);
-            while (debugLocal == lpDeserialized->locvars.end() && this->globalAutoNameCollisions.contains(name))
+            std::string name = debugLocal != lpDeserialized->locvars.end() ? DebugLocalName(debugLocal->varname) : std::format("arg{}", i);
+            while (debugLocal == lpDeserialized->locvars.end() && IsReservedName(name))
                 name = "_" + name;
             this->SetGlobalName(i, name);
         }
@@ -401,6 +434,9 @@ struct AnalyzedFunction {
 
     // Trailing defaults preserve existing positional aggregate initialization.
     std::unordered_set<std::string> globalAutoNameCollisions{};
+    std::unordered_set<std::string> reservedDebugNames{};
+    // (instruction index, register): the write that initializes a debug local opening later on every path
+    std::set<std::pair<int32_t, int32_t>> debugLocalInitializers{};
     std::unordered_map<std::string, std::string> prefixedLocalRenames{};
     bool globalCollisionsComputed{false}; // globalAutoNameCollisions is built once (immutable per function)
 };

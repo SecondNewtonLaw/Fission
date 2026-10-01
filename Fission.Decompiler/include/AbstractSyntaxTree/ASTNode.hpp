@@ -9,10 +9,20 @@
 #include <memory>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
 #include <vector>
+
+// A generated-shaped debug name (`v3`, `arg0`) travels under this prefix so rewriters do not take it for an automatic name.
+inline constexpr std::string_view kReservedNamePrefix = "__fission_dbg_";
+
+inline std::string RestoreReservedNames(std::string text) {
+    for (size_t at = text.find(kReservedNamePrefix); at != std::string::npos; at = text.find(kReservedNamePrefix, at))
+        text.erase(at, kReservedNamePrefix.size());
+    return text;
+}
 
 class Visitor;
 enum class ASTNodeKind {

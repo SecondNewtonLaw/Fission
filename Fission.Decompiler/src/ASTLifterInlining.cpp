@@ -133,6 +133,8 @@ const LiftedInstruction *ASTLifter::SoleUser(const SSARef &ref) const {
 }
 
 bool ASTLifter::BeginsDebugLocal(const LiftedInstruction &inst, int32_t reg) const {
+    if (m_currentFunction->debugLocalInitializers.contains({inst.instructionIndex, reg}))
+        return true;
     const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
     auto next = static_cast<size_t>(inst.instructionIndex) + 1;
     while (next < instructions.size() && instructions[next].operation == LiftedOperation::NOP)
@@ -1333,7 +1335,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
             ExplainKeep(def, "intervening call would execute first", use, &insts[k]);
             return true;
         }
-        if (CanOperationRaise(insts[k].operation) && !elementAfterDef(insts[k])) {
+        if ((CanOperationRaise(insts[k].operation) || KeyMayRaise(insts[k])) && !elementAfterDef(insts[k])) {
             ExplainKeep(def, "intervening evaluation can raise", use, &insts[k]);
             return true;
         }
@@ -1343,6 +1345,29 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
         }
     }
     return false;
+}
+
+// A store even into a fresh table raises on a nil or NaN key.
+bool ASTLifter::KeyMayRaise(const LiftedInstruction &store) const {
+    if (store.operation != LiftedOperation::SETTABLE || store.operands.size() < 3 || store.operands[2].type != LiftedOperandType::Register)
+        return false;
+    const auto *key = m_currentFunction->GetDefinition(store.operands[2]);
+    if (!key || key->operation != LiftedOperation::LOAD || key->operands.size() < 2)
+        return true;
+    const auto &value = key->operands[1];
+    switch (value.type) {
+    case LiftedOperandType::ImmediateInteger:
+    case LiftedOperandType::ImmediateBool:
+        return false;
+    case LiftedOperandType::ImmediateConstant: {
+        const auto &constant = ConstantAt(value.value.imm.k);
+        if (constant.kType == LUA_TNUMBER)
+            return std::isnan(std::get<double>(constant.constantData));
+        return constant.kType == LUA_TNIL;
+    }
+    default:
+        return true;
+    }
 }
 
 // Operations that can raise a runtime error (index, arithmetic, concat and length metamethods or type errors).

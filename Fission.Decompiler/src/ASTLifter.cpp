@@ -255,9 +255,8 @@ bool ASTLifter::RegisterHeldOtherVariable(const LiftedInstruction &inst, const L
 // The debug name of a loop variable bound right after its `for` prep instruction.
 std::optional<std::string> ASTLifter::LoopDebugName(int32_t reg, int32_t prepIndex) const {
     for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
-        if (local.reg == reg && local.startpc == prepIndex + 1 && IsValidLuauIdent(local.varname) && !m_globalNames.contains(local.varname) &&
-            !AnalyzedFunction::IsGeneratedNameShaped(local.varname))
-            return local.varname;
+        if (local.reg == reg && local.startpc == prepIndex + 1 && IsValidLuauIdent(local.varname) && !m_globalNames.contains(local.varname))
+            return m_currentFunction->DebugLocalName(local.varname);
     return std::nullopt;
 }
 
@@ -666,10 +665,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                         m_valueCapturedValues.insert({reg, cap.operands[1].ssaVersion});
                     }
                     const bool selfCapture = reg == inst.operands[0].value.reg && cap.operands[1].ssaVersion == inst.operands[0].ssaVersion;
-                    // An auto-shaped debug name (`v1`, from recompiled output) would alias another register's default name.
-                    if (proto->upvalueNames.size() > capIdx && !AnalyzedFunction::IsAutoNameShaped(proto->upvalueNames[capIdx])) {
+                    if (proto->upvalueNames.size() > capIdx) {
                         const SSARef ref{reg, cap.operands[1].ssaVersion};
-                        std::string name = localName(proto->upvalueNames[capIdx], reg);
+                        std::string name = localName(analyzedFunction.DebugLocalName(proto->upvalueNames[capIdx]), reg);
                         if (const auto shared = referenceCaptureNames.find(ref); shared != referenceCaptureNames.end())
                             name = shared->second;
                         else if (
@@ -752,15 +750,15 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
         for (const size_t i : openOrder) {
             const auto &local = locals[i];
-            if (!IsValidLuauIdent(local.varname) || AnalyzedFunction::IsGeneratedNameShaped(local.varname) ||
-                local.reg < analyzedFunction.lpLiftedFunction->numparams)
+            if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
                 continue;
             // a move-elided inline parameter opens on a register another local still owns; it names nothing
             if (std::ranges::any_of(locals, [&](const auto &owner) {
                     return &owner != &local && owner.reg == local.reg && owner.startpc < local.startpc && local.startpc < owner.endpc;
                 }))
                 continue;
-            std::string name = localName(local.varname, static_cast<uint8_t>(local.reg));
+            const std::string baseName = analyzedFunction.DebugLocalName(local.varname);
+            std::string name = localName(baseName, static_cast<uint8_t>(local.reg));
             const auto shadows = [&](const std::string &candidate) {
                 for (size_t j = 0; j < locals.size(); ++j)
                     if (debugNames[j] == candidate && locals[j].reg != local.reg && locals[j].startpc < local.endpc && local.startpc < locals[j].endpc)
@@ -768,7 +766,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 return false;
             };
             for (int suffix = 2; shadows(name); ++suffix)
-                name = std::format("{}_{}", local.varname, suffix);
+                name = std::format("{}_{}", baseName, suffix);
             debugNames[i] = name;
         }
         std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
@@ -783,6 +781,44 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 return index < write && write < local.startpc;
             });
         };
+        analyzedFunction.debugLocalInitializers.clear();
+        std::optional<std::map<int32_t, DominatorInfo>> dominators;
+        const auto dominates = [&](int32_t ancestor, int32_t block) {
+            if (ancestor < 0 || block < 0)
+                return false;
+            if (!dominators)
+                dominators = AnalyzeDenominators(analyzedFunction);
+            for (int32_t cursor = block; cursor >= 0;) {
+                if (cursor == ancestor)
+                    return true;
+                const auto it = dominators->find(cursor);
+                if (it == dominators->end() || it->second.idom == cursor)
+                    return false;
+                cursor = it->second.idom;
+            }
+            return false;
+        };
+        for (size_t i = 0; i < locals.size(); ++i) {
+            const auto &local = locals[i];
+            if (debugNames[i].empty() || local.startpc <= 0 || static_cast<size_t>(local.startpc) > instrs.size())
+                continue;
+            const auto &opener = instrs[local.startpc - 1];
+            if (opener.operation == LiftedOperation::FORNPREP || opener.operation == LiftedOperation::FORGPREP ||
+                opener.operation == LiftedOperation::FORGPREP_NEXT || opener.operation == LiftedOperation::FORGPREP_INEXT)
+                continue;
+            int32_t last = -1;
+            for (const int32_t write : writesByRegister[static_cast<uint8_t>(local.reg)])
+                if (write < local.startpc)
+                    last = std::max(last, write);
+            // a later write on one arm of a branch is the last by index but not every path's initializer
+            if (last < 0 || !dominates(analyzedFunction.GetBlockId(&instrs[last]), analyzedFunction.GetBlockId(&opener)))
+                continue;
+            if (std::ranges::any_of(locals, [&](const auto &owner) {
+                    return &owner != &local && owner.reg == local.reg && owner.startpc <= last && owner.endpc > local.startpc && !owner.varname.empty();
+                }))
+                continue;
+            analyzedFunction.debugLocalInitializers.emplace(last, local.reg);
+        }
         const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
             std::optional<size_t> found;
             for (size_t i = 0; i < locals.size(); ++i) {
@@ -3192,7 +3228,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         for (const auto &local : m_currentFunction->lpLiftedFunction->lpDeserialized->locvars)
             if (local.reg == target.value.reg && local.startpc <= instruction.instructionIndex && instruction.instructionIndex < local.endpc &&
                 !local.varname.empty())
-                return local.varname;
+                return m_currentFunction->DebugLocalName(local.varname);
         return std::nullopt;
     };
 
@@ -3646,10 +3682,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (const auto it = m_defsByInstruction.find(&resultInst); it != m_defsByInstruction.end())
                 defs = it->second;
             std::ranges::sort(defs, [](auto &a, auto &b) { return a.regIndex < b.regIndex; });
-            // results bind by position, so unused ones before a used one still take a slot
+            // results bind by position, so unused ones before a used one still take a slot; an unread debug local still declares
             int32_t lastUsed = -1;
             for (const auto &ref : defs)
-                if (m_currentFunction->useCounts[ref] > 0)
+                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(resultInst, ref.regIndex))
                     lastUsed = ref.regIndex;
 
             for (const auto &ref : defs)
@@ -3928,7 +3964,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
                 (m_definedRegisters.contains(saveWhere.value.reg) &&
-                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
+                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion}) || IsParameterRegister(saveWhere.value.reg)))) {
                 if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                     if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())
@@ -4185,7 +4221,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             const auto localName = activeLocalName(inst, saveWhere);
             if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
                 (m_definedRegisters.contains(saveWhere.value.reg) &&
-                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion})))) {
+                 (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion}) || IsParameterRegister(saveWhere.value.reg)))) {
                 if (localName) {
                     m_currentFunction->SetVariableName(saveWhere.value.reg, saveWhere.ssaVersion, *localName);
                     if (const auto users = m_currentFunction->users.find({saveWhere.value.reg, saveWhere.ssaVersion}); users != m_currentFunction->users.end())

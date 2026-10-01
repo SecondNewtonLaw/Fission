@@ -279,7 +279,7 @@ class SourceGenerator : public Visitor {
         }
     }
 
-    void Visit(Identifier *lpNode) override { buffer << lpNode->name; }
+    void Visit(Identifier *lpNode) override { buffer << RestoreReservedNames(lpNode->name); }
 
     void EmitFunctionArguments(FunctionDeclarationNode *lpNode) {
         for (int32_t i = 0; i < lpNode->argumentCount; i++) {
@@ -316,7 +316,7 @@ class SourceGenerator : public Visitor {
             buffer << "export ";
         else if (lpNode->bIsLocalDeclaration)
             buffer << "local ";
-        buffer << std::format("function {}(", lpNode->functionName);
+        buffer << std::format("function {}(", RestoreReservedNames(lpNode->functionName));
 
         EmitFunctionArguments(lpNode);
 
@@ -369,7 +369,7 @@ class SourceGenerator : public Visitor {
             return;
 
         if (lpNode->comment.find('\n') == std::string::npos) {
-            buffer << this->GetIndentation() << "-- " << lpNode->comment;
+            buffer << this->GetIndentation() << "-- " << RestoreReservedNames(lpNode->comment);
             if (lpNode->bNewLine)
                 this->NextLine();
             return;

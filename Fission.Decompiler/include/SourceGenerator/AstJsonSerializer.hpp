@@ -207,7 +207,7 @@ class AstJsonSerializer : public Visitor {
 
     void Visit(RootNode *lpNode) override { Obj(lpNode, "Root", {{"body", Arr(lpNode->programBody)}}); }
 
-    void Visit(Identifier *lpNode) override { Obj(lpNode, "Identifier", {{"name", Quote(lpNode->name)}}); }
+    void Visit(Identifier *lpNode) override { Obj(lpNode, "Identifier", {{"name", Quote(RestoreReservedNames(lpNode->name))}}); }
 
     void Visit(IdentifierExpressionNode *lpNode) override { Obj(lpNode, "IdentifierExpression", {{"identifier", Render(lpNode->identifier)}}); }
 
@@ -229,7 +229,7 @@ class AstJsonSerializer : public Visitor {
         }
         args += "]";
         Obj(lpNode, "FunctionDeclaration",
-            {{"name", Quote(lpNode->functionName)},
+            {{"name", Quote(RestoreReservedNames(lpNode->functionName))},
              {"exported", Bool(lpNode->bExported)},
              {"argumentCount", std::to_string(lpNode->argumentCount)},
              {"arguments", args},

@@ -209,6 +209,9 @@ class ASTLifter {
     // Materialized LOADB-diamond booleans cannot fold into table literals.
     std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
     static bool CanOperationRaise(LiftedOperation op);
+    bool KeyMayRaise(const LiftedInstruction &store) const;
+    // Luau never reallocates a parameter's register, so any write to it assigns the parameter.
+    bool IsParameterRegister(int32_t reg) const { return reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams; }
     // Prevent effectful definitions from crossing retained instructions.
     bool StaysAsStatement(const LiftedInstruction *e);
     // Defers `def`, read by `reader`, into the loop condition that renders it, and queues its inputs (a constructor's
