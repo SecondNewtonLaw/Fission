@@ -290,7 +290,8 @@ int main(int argc, char **argv) {
             std::cout << "\n===SOURCE===\n" << dr.decompilationOutput << "\n===END===\n";
             return dr.resultCode == DecompileResult::Success ? 0 : 1;
         }
-        const bool isBin = (arg == "--roblox-file");
+        const bool isVanilla = (arg == "--vanilla-file");
+        const bool isBin = (arg == "--roblox-file") || isVanilla;
         const bool isB64 = (arg == "--roblox-b64");
         if (!isBin && !isB64)
             continue;
@@ -313,7 +314,8 @@ int main(int argc, char **argv) {
                 flag->value = true;
         decompiler.SetDecompileBudget(std::chrono::seconds(120));
         const auto t0 = std::chrono::steady_clock::now();
-        const auto r = decompiler.DecompileRobloxBytecode(bytecode, DecompilerFlags::PrintTimingBreakdown | outputFlags);
+        const auto r = isVanilla ? decompiler.DecompileVanillaBytecode(bytecode, DecompilerFlags::PrintTimingBreakdown | outputFlags)
+                                 : decompiler.DecompileRobloxBytecode(bytecode, DecompilerFlags::PrintTimingBreakdown | outputFlags);
         const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::steady_clock::now() - t0).count();
         const size_t lines = static_cast<size_t>(std::count(r.decompilationOutput.begin(), r.decompilationOutput.end(), '\n'));
         std::fprintf(
