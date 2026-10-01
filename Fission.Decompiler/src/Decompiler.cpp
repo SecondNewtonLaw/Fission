@@ -821,6 +821,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto irOptimizationEnd = std::chrono::steady_clock::now();
 
     const auto astStart = std::chrono::steady_clock::now();
+    astLifter.SetInlineSources(BuildInlineSourceMap(*deserializedBytecode, decoder));
     auto liftedAST = astLifter.Lift(controlFlowAnalyzedFunction);
     AddDecompilerOptionsToHeader(liftedAST, flags);
     const size_t statementsBeforeRewrite = liftedAST.statements.size();

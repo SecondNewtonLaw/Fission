@@ -28,6 +28,22 @@ struct ASTFunction {
 
 };
 
+// Source line spans of every function in a chunk; an instruction whose line falls in another function's span is that function's body inlined
+// by the compiler at O2. Needs line info (debug level 1+).
+struct InlineSourceMap {
+    struct Source {
+        const DeserializedFunction *function;
+        int32_t parent;
+        int32_t firstLine;
+        int32_t lastLine;
+    };
+    std::vector<Source> sources;
+    // per source line: the innermost inlinable function whose body spans it, or -1
+    std::vector<int32_t> innermostByLine;
+    bool hasLineInfo = false;
+};
+std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder);
+
 class ControlFlowTask;
 
 // Limit recovery failure to one function.
@@ -41,6 +57,7 @@ class ASTLifter {
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
     std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
     void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
+    void SetInlineSources(std::shared_ptr<const InlineSourceMap> sources) { m_inlineSources = std::move(sources); }
 
     boost::unordered_flat_set<int32_t> m_definedRegisters;
     std::unordered_set<std::string> m_globalNames;
@@ -125,6 +142,12 @@ class ASTLifter {
 
   private:
     FissionDebugNotes *m_debugNotes = nullptr;
+    std::shared_ptr<const InlineSourceMap> m_inlineSources;
+    // per instruction index: the InlineSourceMap source whose inlined body it belongs to, or -1
+    std::vector<int32_t> m_inlineOrigin;
+    void ComputeInlineOrigins();
+    // Wraps each run of statements from one inlined function in a commented `do ... end`.
+    void MarkInlinedRegions(std::vector<std::shared_ptr<Statement>> &statements, int32_t enclosing = -1);
     std::string m_debugFunction;
 
     template <typename... Args> void Explain(std::format_string<Args...> format, Args &&...args) const {

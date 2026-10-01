@@ -432,8 +432,51 @@ print(dispatch(0), dispatch(1), dispatch(2), dispatch(3)))LUA";
         const CompileLevels levels(2, 1);
         const auto output = fuzz::FullDecompile(source).output;
         INFO(output);
-        CHECK(output.find("local v1 = 16\n    if arg0 == 0 then\n        print(0)\n        v1 += 0\n    elseif arg0 == 1 then") != std::string::npos);
-        CHECK(output.find("    else\n        print(3)\n        v1 += 3\n    end\n    return v1\n") != std::string::npos);
+        constexpr auto inlined = "            -- Fission: INFO: inlined call to 'advance' (defined at line 1, bytecode ID 0)\n";
+        CHECK(
+            output.find(std::string("local v1 = 16\n    if arg0 == 0 then\n        do\n") + inlined + "            print(0)\n            v1 += 0\n        end\n    elseif arg0 == 1 then") !=
+            std::string::npos
+        );
+        CHECK(output.find(std::string("    else\n        do\n") + inlined + "            print(3)\n            v1 += 3\n        end\n    end\n    return v1\n") != std::string::npos);
+    }
+}
+
+TEST_CASE("Compiler audit: inlined calls are marked by the line info they keep", "[Decompiler][ReplayRegress][Semantics][Inlining]") {
+    const auto source = R"LUA(local total = 0
+local function step(n)
+    local doubled = n * 2
+    total = total + doubled
+    print("step", doubled)
+end
+step(math.random(1, 3))
+local r = (function(q)
+    local t = q + 1
+    return t * t
+end)(total)
+print(total, r))LUA";
+    for (const int debug : {0, 1, 2})
+        CheckSemanticParity(source, 2, debug);
+
+    fuzz::EnableLuauFlags();
+    {
+        const CompileLevels levels(2, 1);
+        const auto output = fuzz::FullDecompile(source).output;
+        INFO(output);
+        CHECK(output.find("-- Fission: INFO: inlined call to 'step' (defined at line 2, bytecode ID 0)") != std::string::npos);
+        CHECK(output.find("-- Fission: INFO: inlined call to an anonymous function (defined at line 8, bytecode ID 1)") != std::string::npos);
+    }
+    {
+        const CompileLevels levels(2, 0);
+        const auto output = fuzz::FullDecompile(source).output;
+        INFO(output);
+        CHECK(output.find("no line info (debug level 0)") != std::string::npos);
+        CHECK(output.find("inlined call to") == std::string::npos);
+    }
+    {
+        const CompileLevels levels(1, 1);
+        const auto output = fuzz::FullDecompile(source).output;
+        INFO(output);
+        CHECK(output.find("inlined call to") == std::string::npos);
     }
 }
 

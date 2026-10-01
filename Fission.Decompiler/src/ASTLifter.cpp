@@ -6,6 +6,7 @@
 #include "ASTLifterShared.hpp"
 
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "Rewriters/DeclarationHoister.hpp"
 #include "SSABuilder.hpp"
 #include "SafetyGuard.hpp"
 
@@ -18,6 +19,7 @@ const LuauConstant &ASTLifter::ConstantAt(long idx) const {
 
 #include <algorithm>
 #include <coroutine>
+#include <cstring>
 #include <exception>
 #include <functional>
 #include <numeric>
@@ -329,6 +331,221 @@ static void ScanBinding(const std::vector<std::shared_ptr<Statement>> &statement
     }
 }
 
+// Stamps statements appended during its lifetime with the instruction they were lifted for.
+struct OriginStamp {
+    std::vector<std::shared_ptr<Statement>> &statements;
+    size_t from;
+    int32_t pc;
+    ~OriginStamp() {
+        for (size_t i = from; i < statements.size(); ++i)
+            if (statements[i] && statements[i]->originPc < 0)
+                statements[i]->originPc = pc;
+    }
+};
+
+static std::optional<int32_t> SourceLine(const DeserializedFunction &function, int32_t pc) {
+    if (function.lineinfo.empty() || pc < 0 || static_cast<size_t>(pc) >= function.instructions.size())
+        return std::nullopt;
+    const size_t offset = function.abslineinfoOffset + (static_cast<size_t>(pc) >> function.linegaplog2) * sizeof(int);
+    if (offset + sizeof(int) > function.lineinfo.size())
+        return std::nullopt;
+    int base = 0;
+    std::memcpy(&base, function.lineinfo.data() + offset, sizeof(int));
+    return base + function.lineinfo[pc];
+}
+
+std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder) {
+    auto map = std::make_shared<InlineSourceMap>();
+    const auto &functions = bytecode.functions;
+    map->sources.reserve(functions.size());
+    for (const auto &function : functions) {
+        int32_t lastLine = -1;
+        if (!function.lineinfo.empty() && !function.instructions.empty()) {
+            map->hasLineInfo = true;
+            // the implicit `return` sits on the closing `end`, which the caller's next statement may share
+            auto end = static_cast<int32_t>(function.instructions.size());
+            const LuauInstruction tail{decoder ? decoder->DecodeInstruction(function.instructions.back().instruction) : function.instructions.back().instruction};
+            if (tail.GetOpCode() == LOP_RETURN && tail.GetABCOperand(LuauInstruction::LuauOperand::B) == 1)
+                --end;
+            for (int32_t pc = 0; pc < end; ++pc)
+                if (const auto line = SourceLine(function, pc))
+                    lastLine = (std::max)(lastLine, *line);
+        }
+        map->sources.push_back({&function, -1, static_cast<int32_t>(function.lineDefined), lastLine});
+    }
+    for (size_t index = 0; index < functions.size(); ++index)
+        for (const auto *child : functions[index].subfunctions)
+            if (child >= functions.data() && child < functions.data() + functions.size())
+                map->sources[child - functions.data()].parent = static_cast<int32_t>(index);
+
+    // a body owns the lines after its header up to its last statement; spans nest, so painting widest first leaves the innermost
+    constexpr int32_t kMaxTrackedLine = 1 << 22;
+    std::vector<int32_t> order;
+    for (int32_t index = 0; index < static_cast<int32_t>(map->sources.size()); ++index) {
+        const auto &source = map->sources[index];
+        if (!source.function->isvararg && source.firstLine >= 0 && source.lastLine > source.firstLine && source.lastLine < kMaxTrackedLine)
+            order.push_back(index);
+    }
+    std::ranges::sort(order, [&](int32_t a, int32_t b) {
+        const auto &left = map->sources[a], &right = map->sources[b];
+        return left.lastLine - left.firstLine > right.lastLine - right.firstLine;
+    });
+    for (const int32_t index : order) {
+        const auto &source = map->sources[index];
+        if (static_cast<size_t>(source.lastLine) >= map->innermostByLine.size())
+            map->innermostByLine.resize(source.lastLine + 1, -1);
+        std::fill(map->innermostByLine.begin() + source.firstLine + 1, map->innermostByLine.begin() + source.lastLine + 1, index);
+    }
+    return map;
+}
+
+void ASTLifter::ComputeInlineOrigins() {
+    const auto &lifted = *m_currentFunction->lpLiftedFunction;
+    m_inlineOrigin.assign(lifted.instructions.size(), -1);
+    if (!m_inlineSources || !m_inlineSources->hasLineInfo || !lifted.lpDeserialized)
+        return;
+    const auto &sources = m_inlineSources->sources;
+    std::vector<bool> enclosing(sources.size(), false);
+    for (int32_t index = 0; index < static_cast<int32_t>(sources.size()); ++index)
+        if (sources[index].function == lifted.lpDeserialized)
+            for (int32_t at = index; at >= 0; at = sources[at].parent)
+                enclosing[at] = true;
+    const auto &byLine = m_inlineSources->innermostByLine;
+    std::string inlined;
+    for (const auto &instruction : lifted.instructions) {
+        const auto line = SourceLine(*lifted.lpDeserialized, instruction.instructionIndex);
+        if (!line || *line < 0 || static_cast<size_t>(*line) >= byLine.size() || instruction.instructionIndex < 0 ||
+            static_cast<size_t>(instruction.instructionIndex) >= m_inlineOrigin.size())
+            continue;
+        if (const int32_t source = byLine[*line]; source >= 0 && !enclosing[source]) {
+            m_inlineOrigin[instruction.instructionIndex] = source;
+            if (m_debugNotes && m_debugNotes->Enabled())
+                inlined += std::format(" {}@L{}<F{}", instruction.instructionIndex, *line, sources[source].function->bytecodeId);
+        }
+    }
+    if (!inlined.empty())
+        Explain("function {}: inlined instructions (pc@line<function):{}", m_debugFunction, inlined);
+}
+
+static std::vector<std::vector<std::shared_ptr<Statement>> *> ChildBodies(const std::shared_ptr<Statement> &statement) {
+    std::vector<std::vector<std::shared_ptr<Statement>> *> bodies;
+    if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(statement)) {
+        for (const auto &arm : {branch->thenBranch, branch->elseBranch})
+            if (arm)
+                bodies.push_back(&arm->body);
+    } else if (const auto loop = std::dynamic_pointer_cast<WhileStatementNode>(statement); loop && loop->body) {
+        bodies.push_back(&loop->body->body);
+    } else if (const auto repeat = std::dynamic_pointer_cast<RepeatStatementNode>(statement); repeat && repeat->body) {
+        bodies.push_back(&repeat->body->body);
+    } else if (const auto numeric = std::dynamic_pointer_cast<ForNumericNode>(statement); numeric && numeric->lpLoopBody) {
+        bodies.push_back(&numeric->lpLoopBody->body);
+    } else if (const auto generic = std::dynamic_pointer_cast<ForGeneralNode>(statement); generic && generic->body) {
+        bodies.push_back(&generic->body->body);
+    } else if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(statement)) {
+        bodies.push_back(&block->body);
+    }
+    return bodies;
+}
+
+void ASTLifter::MarkInlinedRegions(std::vector<std::shared_ptr<Statement>> &statements, int32_t enclosing) {
+    constexpr int32_t kCaller = -1, kUnknown = -2;
+    const auto originOf = [&](const std::shared_ptr<Statement> &statement) {
+        if (!statement || statement->originPc < 0 || static_cast<size_t>(statement->originPc) >= m_inlineOrigin.size())
+            return kUnknown;
+        return m_inlineOrigin[statement->originPc];
+    };
+    const std::function<bool(const std::shared_ptr<Statement> &)> holdsCallerCode = [&](const std::shared_ptr<Statement> &statement) {
+        for (const auto *body : ChildBodies(statement))
+            for (const auto &child : *body)
+                if (originOf(child) == kCaller || holdsCallerCode(child))
+                    return true;
+        return false;
+    };
+    std::vector<int32_t> origins(statements.size());
+    for (size_t i = 0; i < statements.size(); ++i) {
+        origins[i] = originOf(statements[i]);
+        // a test the compiler merged with an inlined return still guards caller code
+        if (origins[i] >= 0 && holdsCallerCode(statements[i]))
+            origins[i] = kCaller;
+        const int32_t inner = origins[i] >= 0 ? origins[i] : enclosing;
+        for (auto *body : ChildBodies(statements[i]))
+            MarkInlinedRegions(*body, inner);
+    }
+
+    std::vector<std::shared_ptr<Statement>> rebuilt;
+    rebuilt.reserve(statements.size());
+    for (size_t i = 0; i < statements.size();) {
+        const int32_t origin = origins[i];
+        if (origin < 0 || origin == enclosing) {
+            rebuilt.push_back(std::move(statements[i++]));
+            continue;
+        }
+        const auto &source = m_inlineSources->sources[origin];
+        auto region = std::make_shared<BlockStatementNode>();
+        region->bEmitAsDoBlock = true;
+        region->body.push_back(std::make_shared<CommentNode>(
+            std::format(
+                "Fission: INFO: inlined call to {} (defined at line {}, bytecode ID {})",
+                source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function"), source.firstLine,
+                source.function->bytecodeId
+            ),
+            true, true
+        ));
+        const size_t start = i;
+        while (i < statements.size() && origins[i] == origin)
+            ++i;
+        // a local the region declares and the rest of this block reads must outlive the `do`
+        const auto usedAfter = [&](const std::string &name) {
+            return std::any_of(statements.begin() + static_cast<std::ptrdiff_t>(i), statements.end(), [&](const auto &later) {
+                return DeclarationHoister::Mentions(later, name);
+            });
+        };
+        const auto nameOf = [](const std::shared_ptr<Expression> &target) {
+            const auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(target);
+            return identifier && identifier->identifier ? identifier->identifier->name : std::string{};
+        };
+        const auto hoistAll = [&](const std::vector<std::string> &names) {
+            if (std::ranges::none_of(names, [&](const std::string &name) { return !name.empty() && usedAfter(name); }))
+                return false;
+            for (const auto &name : names)
+                if (!name.empty())
+                    rebuilt.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+            return true;
+        };
+        const auto hoist = [&](const std::shared_ptr<Expression> &target) { return hoistAll({nameOf(target)}); };
+        for (size_t k = start; k < i; ++k) {
+            auto &statement = statements[k];
+            if (const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statement)) {
+                if (hoist(declaration->identifier)) {
+                    if (!declaration->value)
+                        continue;
+                    statement = std::make_shared<AssignmentStatementNode>(declaration->identifier, declaration->value);
+                }
+            } else if (const auto function = std::dynamic_pointer_cast<FunctionDeclarationNode>(statement); function && function->bIsLocalDeclaration) {
+                if (hoist(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(function->functionName))))
+                    function->bIsLocalDeclaration = false;
+            } else if (const auto expression = std::dynamic_pointer_cast<ExpressionStatementNode>(statement)) {
+                const auto hoistRets = [&](auto &call) {
+                    if (!call || !call->bIsLocalDeclaration)
+                        return;
+                    std::vector<std::string> names;
+                    for (const auto &ret : call->rets)
+                        names.push_back(nameOf(ret));
+                    if (hoistAll(names))
+                        call->bIsLocalDeclaration = false;
+                };
+                auto call = std::dynamic_pointer_cast<CallExpressionNode>(expression->expression);
+                hoistRets(call);
+                auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression);
+                hoistRets(nameCall);
+            }
+            region->body.push_back(std::move(statement));
+        }
+        rebuilt.push_back(std::move(region));
+    }
+    statements = std::move(rebuilt);
+}
+
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     this->m_currentFunction = &analyzedFunction;
     if (m_debugNotes && m_debugNotes->Enabled())
@@ -338,6 +555,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             analyzedFunction.lpLiftedFunction->name
         );
     Explain("function {}: lifting {} CFG blocks", m_debugFunction, analyzedFunction.basicBlocks.size());
+    ComputeInlineOrigins();
     this->m_definedRegisters.clear();
     this->m_globalNames.clear();
     this->m_pinnedRegisters.clear();
@@ -1052,6 +1270,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         KeepOrderedCompoundAssignments();
         boost::unordered_flat_set<uint32_t> visited;
         ast.statements = LiftControlFlow(0, InvalidBlockId, visited).Run();
+        MarkInlinedRegions(ast.statements);
         std::vector<std::shared_ptr<Statement>> sharedDeclarations;
         std::unordered_set<int32_t> insertedShared;
         for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions)
@@ -1122,6 +1341,16 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                         "Fission: INFO: local '{}' was prefixed (from '{}') to avoid overwriting a global of the same name.", renamed.first, renamed.second
                     ),
                     true, true
+                )
+            );
+
+        if (analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain && m_inlineSources && !m_inlineSources->hasLineInfo &&
+            m_inlineSources->sources.size() > 1)
+            ast.statements.insert(
+                ast.statements.begin(),
+                std::make_shared<CommentNode>(
+                    "Fission: INFO: no line info (debug level 0); calls the compiler inlined at O2 cannot be located and stay expanded in place.", true,
+                    true
                 )
             );
 
@@ -1544,6 +1773,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         const LiftingScope liftingScope{m_liftingBlocks};
 
         auto &block = m_currentFunction->basicBlocks[currentBlockId];
+        const OriginStamp stamp{nodes, nodes.size(), block.lpTail ? block.lpTail->instructionIndex : -1};
 
         if (block.bType == BlockType::Return && block.predecessors.size() > 1 && currentBlockId != stopBlockId)
             for (auto *instruction = block.lpHead; instruction && instruction <= block.lpTail; ++instruction)
@@ -3370,6 +3600,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         if (m_processedInstructions.contains(i))
             continue;
 
+        const OriginStamp stamp{statements, statements.size(), i};
         const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
 
         if (inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 && inst.operands[1].type == LiftedOperandType::ImmediateNil) {
@@ -3850,6 +4081,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             ASTLifter subLifter;
             subLifter.SetDebugNotes(m_debugNotes);
+            subLifter.SetInlineSources(m_inlineSources);
             ASTFunction subAst = subLifter.Lift(*targetFunc);
 
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
@@ -4158,6 +4390,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
 
             ASTLifter subLifter;
             subLifter.SetDebugNotes(m_debugNotes);
+            subLifter.SetInlineSources(m_inlineSources);
             ASTFunction subAst = subLifter.Lift(*targetFunc);
 
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});

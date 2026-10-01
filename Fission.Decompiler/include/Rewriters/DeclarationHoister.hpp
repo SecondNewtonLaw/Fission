@@ -13,6 +13,13 @@
 
 class DeclarationHoister {
   public:
+    // true when `statement` may read or write `name`
+    static bool Mentions(const std::shared_ptr<Statement> &statement, const std::string &name) {
+        MentionSet set;
+        CollectStatementMentions(statement, set);
+        return set.everything || set.names.contains(name);
+    }
+
     void Run(std::vector<std::shared_ptr<Statement>> &statements) {
         std::vector<FunctionWork> functions{{&statements, {}}};
         for (size_t i = 0; i < functions.size(); ++i) {
@@ -812,7 +819,7 @@ class DeclarationHoister {
     }
 
     // Every name StatementMentionsDeep / ExprMentions would report, with `everything` for a node they treat as mentioning all.
-    void CollectStatementMentions(const std::shared_ptr<Statement> &s, MentionSet &out) {
+    static void CollectStatementMentions(const std::shared_ptr<Statement> &s, MentionSet &out) {
         if (!s)
             return;
         const auto block = [&](const std::shared_ptr<BlockStatementNode> &body) {
@@ -859,7 +866,7 @@ class DeclarationHoister {
     }
 
     // a closure reaches outer locals only through captures; its own same-named locals are not outer uses
-    void CollectFunctionMentions(const FunctionDeclarationNode &fn, MentionSet &out) {
+    static void CollectFunctionMentions(const FunctionDeclarationNode &fn, MentionSet &out) {
         if (!fn.lpFunctionBody)
             return;
         MentionSet inner;
@@ -902,7 +909,7 @@ class DeclarationHoister {
         }
     }
 
-    void CollectExprMentions(const std::shared_ptr<Expression> &e, MentionSet &out) {
+    static void CollectExprMentions(const std::shared_ptr<Expression> &e, MentionSet &out) {
         if (!e)
             return;
         switch (e->nodeKind) {

@@ -162,6 +162,8 @@ class ASTNode {
 
 class Statement : public ASTNode {
   public:
+    // instruction index the lifter emitted this statement for, or -1
+    int32_t originPc = -1;
 };
 class Expression : public Statement {
   public:
