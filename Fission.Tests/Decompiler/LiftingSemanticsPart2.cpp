@@ -525,6 +525,39 @@ TEST_CASE("DeclarationHoister: loop binding only covers its body", "[Decompiler]
     }
 }
 
+TEST_CASE("DeclarationHoister: a closure's own same-named local is not an earlier use", "[Decompiler][DeclarationHoister][Rewriter]") {
+    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+    const auto run = [&](bool captured) {
+        auto body = std::make_shared<BlockStatementNode>();
+        if (!captured)
+            body->body.push_back(std::make_shared<VariableDeclarationNode>(identifier("v5"), std::make_shared<NumberLiteralNode>(1)));
+        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v5")}));
+        auto fn = std::make_shared<FunctionDeclarationNode>("f", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, true);
+        if (captured)
+            fn->capturedNames.insert("v5");
+        std::vector<std::shared_ptr<Statement>> statements{
+            fn, std::make_shared<VariableDeclarationNode>(identifier("v5"), std::make_shared<NumberLiteralNode>(2)),
+            std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v5")})
+        };
+        DeclarationHoister{}.Run(statements);
+        return statements;
+    };
+
+    SECTION("own local leaves the outer declaration in place") {
+        const auto statements = run(false);
+        REQUIRE(statements.size() == 3);
+        const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statements[1]);
+        REQUIRE(declaration);
+        CHECK(declaration->value);
+    }
+
+    SECTION("captured name still hoists above the closure") {
+        const auto statements = run(true);
+        REQUIRE(statements.size() == 4);
+        CHECK(std::dynamic_pointer_cast<VariableDeclarationNode>(statements.front()));
+    }
+}
+
 TEST_CASE("DeclarationHoister: disjoint locals cover their own uses", "[Decompiler][DeclarationHoister][Rewriter]") {
     const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
     auto branch = std::make_shared<IfStatementNode>();

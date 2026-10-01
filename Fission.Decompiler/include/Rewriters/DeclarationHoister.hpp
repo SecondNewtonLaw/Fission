@@ -852,7 +852,51 @@ class DeclarationHoister {
             CollectExprMentions(fg->index, out);
             block(fg->body);
         } else if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
-            block(fdn->lpFunctionBody);
+            CollectFunctionMentions(*fdn, out);
+        } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
+            block(blk);
+        }
+    }
+
+    // a closure reaches outer locals only through captures; its own same-named locals are not outer uses
+    void CollectFunctionMentions(const FunctionDeclarationNode &fn, MentionSet &out) {
+        if (!fn.lpFunctionBody)
+            return;
+        MentionSet inner;
+        std::unordered_set<std::string> own;
+        for (const auto &argument : fn.argumentsNames | std::views::values)
+            if (auto id = argument ? std::dynamic_pointer_cast<IdentifierExpressionNode>(argument->argumentName) : nullptr; id && id->identifier)
+                own.insert(id->identifier->name);
+        for (const auto &c : fn.lpFunctionBody->body) {
+            CollectStatementMentions(c, inner);
+            CollectOwnDeclarations(c, own);
+        }
+        out.everything |= inner.everything;
+        for (const auto &name : inner.names)
+            if (!own.contains(name) || fn.capturedNames.contains(name))
+                out.names.insert(name);
+    }
+
+    static void CollectOwnDeclarations(const std::shared_ptr<Statement> &s, std::unordered_set<std::string> &own) {
+        const auto block = [&](const std::shared_ptr<BlockStatementNode> &body) {
+            if (body)
+                for (const auto &c : body->body)
+                    CollectOwnDeclarations(c, own);
+        };
+        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
+            if (const auto name = DeclName(decl); !name.empty())
+                own.insert(name);
+        } else if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
+            block(iff->thenBranch);
+            block(iff->elseBranch);
+        } else if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(s)) {
+            block(w->body);
+        } else if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s)) {
+            block(r->body);
+        } else if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s)) {
+            block(fn->lpLoopBody);
+        } else if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s)) {
+            block(fg->body);
         } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
             block(blk);
         }
@@ -929,13 +973,9 @@ class DeclarationHoister {
                 for (const auto &el : t->expressions)
                     CollectExprMentions(el, out);
             return;
-        case ASTNodeKind::FunctionDeclarationNode: {
-            auto fn = std::static_pointer_cast<FunctionDeclarationNode>(e);
-            if (fn->lpFunctionBody)
-                for (const auto &c : fn->lpFunctionBody->body)
-                    CollectStatementMentions(c, out);
+        case ASTNodeKind::FunctionDeclarationNode:
+            CollectFunctionMentions(*std::static_pointer_cast<FunctionDeclarationNode>(e), out);
             return;
-        }
         default:
             out.everything = true;
             return;
