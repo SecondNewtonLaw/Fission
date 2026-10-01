@@ -990,7 +990,33 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             return (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) &&
                                    inst.operands.size() > 2 && inst.operands[2].value.imm.n == 1;
                         });
-                        if (!bodyCallBeforeTest && std::find(successor.successors.begin(), successor.successors.end(), other) != successor.successors.end())
+                        // overwriting a register live into the header is an assignment, which no while condition holds
+                        const bool headerAssigns = [&] {
+                            std::set<int32_t> liveIn, written;
+                            for (auto *inst = successor.lpHead; inst && inst < successor.lpTail; ++inst) {
+                                std::vector<int32_t> writes;
+                                for (size_t idx = 0; idx < inst->operands.size(); ++idx) {
+                                    if (inst->operands[idx].type != LiftedOperandType::Register)
+                                        continue;
+                                    const int32_t reg = inst->operands[idx].value.reg;
+                                    const AccessType access = SSABuilder::GetRegisterAccess(*inst, idx);
+                                    if ((access == AccessType::Read || access == AccessType::ReadWrite) && !written.contains(reg))
+                                        liveIn.insert(reg);
+                                    if (access == AccessType::Write || access == AccessType::ReadWrite)
+                                        writes.push_back(reg);
+                                }
+                                for (const int reg : SSABuilder::GetImplicitDefinitions(*inst))
+                                    writes.push_back(reg);
+                                for (const int32_t reg : writes) {
+                                    if (liveIn.contains(reg))
+                                        return true;
+                                    written.insert(reg);
+                                }
+                            }
+                            return false;
+                        }();
+                        if (!bodyCallBeforeTest && !headerAssigns &&
+                            std::find(successor.successors.begin(), successor.successors.end(), other) != successor.successors.end())
                             continue;
                         if (reachesBefore(other, block.dwBlockId, successor.dwBlockId))
                             continue;

@@ -172,6 +172,20 @@ static bool IsSingleUseClassMemberValue(AnalyzedFunction *func, int32_t reg, int
     return user && user->operation == LiftedOperation::NEWCLASSMEMBER && user->operands.size() >= 2 && user->operands[1].value.reg == reg;
 }
 
+// the one version a loop-header phi carries in from outside the loop, or -1 when entry edges merge distinct values
+static int32_t SoleEntryVersion(const BasicBlock &header, const LiftedInstruction &phi) {
+    int32_t entry = -1;
+    for (size_t i = 0; i < header.predecessors.size() && i + 1 < phi.operands.size(); ++i) {
+        if (header.loopLatch.has_value() && header.predecessors[i] == header.loopLatch.value())
+            continue;
+        const int32_t version = phi.operands[i + 1].ssaVersion;
+        if (entry >= 0 && entry != version)
+            return -1;
+        entry = version;
+    }
+    return entry;
+}
+
 // valid Luau ident (alnum + _, no leading digit). Roblox instance names may have spaces; reject those.
 static bool IsValidLuauIdent(const std::string &s) {
     if (s.empty() || std::isdigit(static_cast<unsigned char>(s[0])))
@@ -950,12 +964,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                         return;
                     const bool headerPhi = std::ranges::any_of(b.phiNodes, [&](const LiftedInstruction &phi) { return &phi == def; });
                     if (headerPhi) {
-                        for (size_t pi = 0; pi < b.predecessors.size() && pi + 1 < def->operands.size(); ++pi) {
-                            if (b.loopLatch.has_value() && b.predecessors[pi] == b.loopLatch.value())
-                                continue;
-                            def = lookupDef(r, def->operands[pi + 1].ssaVersion);
-                            break;
-                        }
+                        const int32_t entry = SoleEntryVersion(b, *def);
+                        def = entry < 0 ? nullptr : lookupDef(r, entry);
                     }
                     if (def && def->operation == LiftedOperation::LOAD)
                         m_processedInstructions.insert(def->instructionIndex);
@@ -2453,14 +2463,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             int32_t effectiveVer = ver;
                             auto *def = m_currentFunction->GetDefinition(makeKey(reg, ver));
                             const bool headerPhi = std::ranges::any_of(block.phiNodes, [&](const LiftedInstruction &phi) { return &phi == def; });
-                            if (headerPhi && def->operands.size() >= 2) {
-                                for (size_t i = 0; i < block.predecessors.size() && i + 1 < def->operands.size(); ++i) {
-                                    if (block.loopLatch.has_value() && block.predecessors[i] == block.loopLatch.value())
-                                        continue;
-                                    effectiveVer = def->operands[i + 1].ssaVersion;
-                                    break;
-                                }
-                            }
+                            if (headerPhi && def->operands.size() >= 2)
+                                if (const int32_t entry = SoleEntryVersion(block, *def); entry >= 0)
+                                    effectiveVer = entry;
                             auto *effDef = m_currentFunction->GetDefinition(makeKey(reg, effectiveVer));
                             if (effDef && effDef->operation == LiftedOperation::LOAD) {
                                 m_processedInstructions.insert(effDef->instructionIndex);

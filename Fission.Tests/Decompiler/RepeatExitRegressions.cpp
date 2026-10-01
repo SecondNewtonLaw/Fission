@@ -456,6 +456,36 @@ return count)LUA"
     repeat_exit_regressions::CheckRepeatExit(sample, true);
 }
 
+TEST_CASE("Repeat whose header updates a local before a shared-exit break stays a repeat", "[Decompiler][RepeatExitSemantic]") {
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(R"LUA(local n = 0
+repeat
+    n = n + 1
+    if n > 5 then break end
+    print(n)
+until false)LUA",
+                                                     DecompilerFlags::OmitFissionComments, Luau::CompileOptions{0, 1});
+    INFO(result.decompilationOutput);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    CHECK(result.decompilationOutput.find("while true do") == std::string::npos);
+    CHECK(result.decompilationOutput.find("until false") != std::string::npos);
+}
+
+TEST_CASE("Numeric-for step merged from a short-circuit keeps both operands", "[Decompiler][FuzzRegress]") {
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(R"LUA(local t = {}
+for i = 1, 2, (true and t[""]) do
+    print(i)
+end)LUA",
+                                                     DecompilerFlags::OmitFissionComments, Luau::CompileOptions{0, 1});
+    INFO(result.decompilationOutput);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    CHECK(result.decompilationOutput.find("true and") != std::string::npos);
+    CHECK(result.decompilationOutput.find(", 2, true do") == std::string::npos);
+}
+
 TEST_CASE("Infinite while preserves effects in its unconditional latch", "[Decompiler][FuzzRegress][RepeatExitSemantic]") {
     constexpr repeat_exit_regressions::Sample sample{
         "observable-no-exit-while-latch",
