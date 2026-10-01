@@ -18,6 +18,7 @@ Compared with `0.2.0-alpha`.
 - Preserved first-error behavior: raising reads are no longer reordered past stores, inlined constructors keep their raising position under `and`/`or`/`not`, and constant folding no longer removes runtime errors.
 - Preserved captured locals, parameters, and closure bindings when closures reassign them; shared closure identity is kept across branches.
 - A closure stored into itself (`g[k] = g`) keeps its local.
+- A closure assigned to a parameter in a function without debug information stays an assignment instead of becoming an unrelated `local function`.
 - A nested `local function` whose reads reach an outer scope is demoted to a plain assignment.
 - Globals named like generated locals stay global; closures can no longer shadow global names.
 - Fixed `CALL` result versions used for inlining and effect ordering.
@@ -28,6 +29,8 @@ Compared with `0.2.0-alpha`.
 - Negative constant bases of `^` keep their parentheses (`(-2) ^ x`).
 - Numeric-for operands merged from a short-circuit (`for i = 1, 2, (true and t[k])`) keep both operands instead of collapsing to the first.
 - Integer and normalized legacy parameter type tags are recovered; NaN table-key errors are preserved.
+- An inlined value is no longer moved past a table store whose key may be `nil` or NaN, so the store's error stays first.
+- A local whose register earlier held a temporary keeps its `local` declaration, including populated constructors and multi-value `local a, b, c = ...` declarations.
 
 ## Control flow
 
@@ -55,6 +58,7 @@ Compared with `0.2.0-alpha`.
 ## Natural output
 
 - Debug local names are restored, including locals initialized by populated constructors.
+- Debug names spelled like generated names (`v3`, `arg0`) are kept as written instead of being renumbered or prefixed.
 - Record constructors with mixed constant and computed fields stay a single constructor; `DUPTABLE` template fields fill in place.
 - O0 record keys stored through a loaded string key recover record syntax.
 - `export` declarations are recovered from `table.freeze` module returns.
@@ -83,7 +87,7 @@ Compared with `0.2.0-alpha`.
 
 ## Tests
 
-- Suite grew from 428 to 707 tests.
+- Suite grew from 428 to 711 tests.
 - Added compiler-lowering audits, semantic replay regressions, loop-shape, capture and merge matrices, SSA invariant coverage, and fuzz-derived regressions.
 - Removed vacuous cases and split oversized test translation units.
 
@@ -97,7 +101,7 @@ Compared with `0.2.0-alpha`.
 
 ## Validation
 
-- Windows test suite: 707 tests passed, 0 failed.
+- Windows test suite: 711 tests passed, 0 failed.
 - 200,000-sample AST fuzz campaign: 0 semantic divergences, 0 forward-reference IR divergences, 0 crashes.
 - Protected Roblox samples decompile and recompile, including `ANTI_DECOMPILE_GAMECORE`.
 
