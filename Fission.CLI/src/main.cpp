@@ -265,6 +265,30 @@ int main(int argc, char **argv) {
             std::cout << dr.astJson << "\n";
             return dr.resultCode == DecompileResult::Success ? 0 : 1;
         }
+        // Compile source to raw bytecode at --opt/--debug; decompile it with --vanilla-file.
+        if (arg == "--compile-to" && i + 2 < argc) {
+            std::ifstream cin_(argv[i + 1], std::ios::binary);
+            if (!cin_) {
+                std::fprintf(stderr, "open failed: %s\n", argv[i + 1]);
+                return 2;
+            }
+            std::stringstream css;
+            css << cin_.rdbuf();
+            for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+                if (strncmp(flag->name, "Luau", 4) == 0)
+                    flag->value = true;
+            Luau::CompileOptions copts{};
+            copts.optimizationLevel = testOptimizationLevel;
+            copts.debugLevel = testDebugLevel;
+            const std::string cbc = Luau::compile(css.str(), copts);
+            if (cbc.empty() || cbc[0] == '\0') {
+                std::fprintf(stderr, "[compile-to] compile failed\n");
+                return 1;
+            }
+            std::ofstream(argv[i + 2], std::ios::binary).write(cbc.data(), static_cast<std::streamsize>(cbc.size()));
+            std::fprintf(stderr, "[compile-to] %s -> %s (%zu bytes)\n", argv[i + 1], argv[i + 2], cbc.size());
+            return 0;
+        }
         // Compile and decompile source without generating a CFG graph.
         if (arg == "--decompile-test") {
             std::ifstream din(argv[i + 1], std::ios::binary);
