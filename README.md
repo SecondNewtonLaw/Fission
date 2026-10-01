@@ -1,6 +1,10 @@
 # Fission
 
-[![Fuzzing & Testing](check thttps://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml/badge.svg)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml)
+[![Tests](https://github.com/SecondNewtonLaw/Fission/actions/workflows/tests.yml/badge.svg?branch=dev)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/tests.yml)
+[![Fuzzing](https://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml/badge.svg?branch=dev)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/fuzz.yml)
+[![Memory Sanitizers](https://github.com/SecondNewtonLaw/Fission/actions/workflows/mem-sanitize.yml/badge.svg?branch=dev)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/mem-sanitize.yml)
+[![Decompiler Server](https://github.com/SecondNewtonLaw/Fission/actions/workflows/decompiler-server-test.yml/badge.svg?branch=dev)](https://github.com/SecondNewtonLaw/Fission/actions/workflows/decompiler-server-test.yml)
+[![Release](https://img.shields.io/github/v/release/SecondNewtonLaw/Fission?include_prereleases)](https://github.com/SecondNewtonLaw/Fission/releases/latest)
 
 ### Background Knowledge
 
