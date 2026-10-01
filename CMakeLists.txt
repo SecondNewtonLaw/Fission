@@ -145,6 +145,11 @@ set_target_properties(
         INTERFACE_SYSTEM ON
 )
 
+if (ENABLE_UBSAN AND CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
+    # Luau converts NaN/inf numbers to int by raw cast (luai_num2int), which the VM tolerates by design
+    target_compile_options(Luau.VM PRIVATE -fno-sanitize=float-cast-overflow)
+endif ()
+
 if (CMAKE_CXX_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     set(CXX_COMPILE_OPTIONS -Werror -Wall -Wextra -Wpedantic -pedantic -funroll-loops -fstack-protector-strong -fstack-protector-all)
     set(CXX_LINK_OPTIONS)
