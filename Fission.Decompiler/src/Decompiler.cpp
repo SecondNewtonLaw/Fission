@@ -1,6 +1,7 @@
 #include "Decompiler.hpp"
 
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 #include "Analysis/ConstantPropagation.hpp"
 #include "Analysis/RobloxTypeInferer.hpp"
 #include "Rewriters/AttributeRenamer.hpp"
@@ -10,6 +11,7 @@
 #include "Rewriters/DeadLocalEliminator.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
 #include "Rewriters/ExportDeclarationRewriter.hpp"
+#include "Rewriters/InlineRegionMarker.hpp"
 #include "Rewriters/GetterRenamer.hpp"
 #include "Rewriters/GlobalAssignmentRenamer.hpp"
 #include "Rewriters/IfChainSimplifier.hpp"
@@ -226,6 +228,8 @@ static std::string FormatDecompilerOptions(DecompilerFlags flags) {
         enabled.emplace_back("AutoNameVariables");
     if ((flags & DecompilerFlags::OmitFissionComments) == DecompilerFlags::OmitFissionComments)
         enabled.emplace_back("OmitFissionComments");
+    if ((flags & DecompilerFlags::RecoverInline) == DecompilerFlags::RecoverInline)
+        enabled.emplace_back("RecoverInline");
     if (enabled.empty())
         return "None";
 
@@ -326,70 +330,19 @@ static void CollectFunctionsFromExpression(const std::shared_ptr<Expression> &ex
             functions[fn->functionName].push_back(fn);
         if (fn->lpFunctionBody)
             CollectFunctionsFromStatements(fn->lpFunctionBody->body, functions);
-    } else if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-        CollectFunctionsFromExpression(call->callee, functions);
-        for (const auto &arg : call->arguments)
-            CollectFunctionsFromExpression(arg, functions);
-    } else if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-        CollectFunctionsFromExpression(nameCall->calledOn, functions);
-        CollectFunctionsFromExpression(nameCall->callWhat, functions);
-        for (const auto &arg : nameCall->arguments)
-            CollectFunctionsFromExpression(arg, functions);
-    } else if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-        CollectFunctionsFromExpression(binary->left, functions);
-        CollectFunctionsFromExpression(binary->right, functions);
-    } else if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-        CollectFunctionsFromExpression(unary->operand, functions);
-    } else if (auto table = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-        for (const auto &entry : table->expressions)
-            CollectFunctionsFromExpression(entry, functions);
+    } else if (expr) {
+        ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectFunctionsFromExpression(child, functions); });
     }
 }
 
 static void CollectFunctionsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, FunctionMap &functions) {
     for (const auto &stmt : stmts) {
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
-            if (!fn->functionName.empty())
-                functions[fn->functionName].push_back(fn);
-            if (fn->lpFunctionBody)
-                CollectFunctionsFromStatements(fn->lpFunctionBody->body, functions);
-        } else if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            CollectFunctionsFromExpression(decl->value, functions);
-        } else if (auto assign = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            CollectFunctionsFromExpression(assign->left, functions);
-            CollectFunctionsFromExpression(assign->right, functions);
-        } else if (auto exprStmt = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            CollectFunctionsFromExpression(exprStmt->expression, functions);
-        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &value : ret->returnValues)
-                CollectFunctionsFromExpression(value, functions);
-        } else if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            CollectFunctionsFromExpression(ifStmt->condition, functions);
-            if (ifStmt->thenBranch)
-                CollectFunctionsFromStatements(ifStmt->thenBranch->body, functions);
-            if (ifStmt->elseBranch)
-                CollectFunctionsFromStatements(ifStmt->elseBranch->body, functions);
-        } else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            CollectFunctionsFromExpression(whileStmt->condition, functions);
-            if (whileStmt->body)
-                CollectFunctionsFromStatements(whileStmt->body->body, functions);
-        } else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            CollectFunctionsFromExpression(repeatStmt->condition, functions);
-            if (repeatStmt->body)
-                CollectFunctionsFromStatements(repeatStmt->body->body, functions);
-        } else if (auto forNum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            CollectFunctionsFromExpression(forNum->startVariable, functions);
-            CollectFunctionsFromExpression(forNum->increaseBy, functions);
-            CollectFunctionsFromExpression(forNum->maxIncreased, functions);
-            if (forNum->lpLoopBody)
-                CollectFunctionsFromStatements(forNum->lpLoopBody->body, functions);
-        } else if (auto forGen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            CollectFunctionsFromExpression(forGen->generator, functions);
-            CollectFunctionsFromExpression(forGen->state, functions);
-            CollectFunctionsFromExpression(forGen->index, functions);
-            if (forGen->body)
-                CollectFunctionsFromStatements(forGen->body->body, functions);
+            CollectFunctionsFromExpression(fn, functions);
+            continue;
         }
+        ForEachStatementExpression(stmt, [&](const std::shared_ptr<Expression> &expr) { CollectFunctionsFromExpression(expr, functions); });
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) { CollectFunctionsFromStatements(body, functions); });
     }
 }
 
@@ -416,74 +369,33 @@ static void CollectBodyUseFactsFromExpression(const std::shared_ptr<Expression> 
             AddIdentifierUseFact(binary->left, argName, InferExpressionType(binary->right).value_or("unknown"), fact);
             AddIdentifierUseFact(binary->right, argName, InferExpressionType(binary->left).value_or("unknown"), fact);
         }
-        CollectBodyUseFactsFromExpression(binary->left, argName, fact);
-        CollectBodyUseFactsFromExpression(binary->right, argName, fact);
     } else if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
         if (unary->op == "not ")
             AddIdentifierUseFact(unary->operand, argName, "boolean", fact);
         else if (unary->op == "-" || unary->op == "#")
             AddIdentifierUseFact(unary->operand, argName, "number", fact);
-        CollectBodyUseFactsFromExpression(unary->operand, argName, fact);
     } else if (auto index = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
         AddIdentifierUseFact(index->left, argName, "table", fact);
-        CollectBodyUseFactsFromExpression(index->left, argName, fact);
-        CollectBodyUseFactsFromExpression(index->right, argName, fact);
     } else if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
         AddIdentifierUseFact(member->table, argName, "table", fact);
-        CollectBodyUseFactsFromExpression(member->table, argName, fact);
-        CollectBodyUseFactsFromExpression(member->key, argName, fact);
-    } else if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-        CollectBodyUseFactsFromExpression(call->callee, argName, fact);
-        for (const auto &arg : call->arguments)
-            CollectBodyUseFactsFromExpression(arg, argName, fact);
     } else if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
         AddIdentifierUseFact(nameCall->calledOn, argName, "table", fact);
-        CollectBodyUseFactsFromExpression(nameCall->calledOn, argName, fact);
-        CollectBodyUseFactsFromExpression(nameCall->callWhat, argName, fact);
-        for (const auto &arg : nameCall->arguments)
-            CollectBodyUseFactsFromExpression(arg, argName, fact);
-    } else if (auto table = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-        for (const auto &entry : table->expressions)
-            CollectBodyUseFactsFromExpression(entry, argName, fact);
     }
+    ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectBodyUseFactsFromExpression(child, argName, fact); });
 }
 
 static void CollectBodyUseFactsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, const std::string &argName, TypeFact &fact) {
     for (const auto &stmt : stmts) {
         if (std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt))
             continue;
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            CollectBodyUseFactsFromExpression(decl->value, argName, fact);
-        } else if (auto assign = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            CollectBodyUseFactsFromExpression(assign->left, argName, fact);
-            CollectBodyUseFactsFromExpression(assign->right, argName, fact);
-        } else if (auto exprStmt = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            CollectBodyUseFactsFromExpression(exprStmt->expression, argName, fact);
-        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &value : ret->returnValues)
-                CollectBodyUseFactsFromExpression(value, argName, fact);
-        } else if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
+        if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt))
             AddIdentifierUseFact(ifStmt->condition, argName, "boolean", fact);
-            CollectBodyUseFactsFromExpression(ifStmt->condition, argName, fact);
-            if (ifStmt->thenBranch)
-                CollectBodyUseFactsFromStatements(ifStmt->thenBranch->body, argName, fact);
-            if (ifStmt->elseBranch)
-                CollectBodyUseFactsFromStatements(ifStmt->elseBranch->body, argName, fact);
-        } else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
+        else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmt))
             AddIdentifierUseFact(whileStmt->condition, argName, "boolean", fact);
-            CollectBodyUseFactsFromExpression(whileStmt->condition, argName, fact);
-            if (whileStmt->body)
-                CollectBodyUseFactsFromStatements(whileStmt->body->body, argName, fact);
-        } else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
+        else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmt))
             AddIdentifierUseFact(repeatStmt->condition, argName, "boolean", fact);
-            CollectBodyUseFactsFromExpression(repeatStmt->condition, argName, fact);
-            if (repeatStmt->body)
-                CollectBodyUseFactsFromStatements(repeatStmt->body->body, argName, fact);
-        } else if (auto forNum = std::dynamic_pointer_cast<ForNumericNode>(stmt); forNum && forNum->lpLoopBody) {
-            CollectBodyUseFactsFromStatements(forNum->lpLoopBody->body, argName, fact);
-        } else if (auto forGen = std::dynamic_pointer_cast<ForGeneralNode>(stmt); forGen && forGen->body) {
-            CollectBodyUseFactsFromStatements(forGen->body->body, argName, fact);
-        }
+        ForEachStatementExpression(stmt, [&](const std::shared_ptr<Expression> &expr) { CollectBodyUseFactsFromExpression(expr, argName, fact); });
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) { CollectBodyUseFactsFromStatements(body, argName, fact); });
     }
 }
 
@@ -515,65 +427,21 @@ static void CollectCallFactsFromExpression(const std::shared_ptr<Expression> &ex
             for (size_t i = 0; i < call->arguments.size() && i < fnFacts.size(); ++i)
                 fnFacts[i].Add(InferExpressionType(call->arguments[i]));
         }
-        CollectCallFactsFromExpression(call->callee, functions, facts);
-        for (const auto &arg : call->arguments)
-            CollectCallFactsFromExpression(arg, functions, facts);
-        return;
     }
-
-    if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-        CollectCallFactsFromExpression(nameCall->calledOn, functions, facts);
-        CollectCallFactsFromExpression(nameCall->callWhat, functions, facts);
-        for (const auto &arg : nameCall->arguments)
-            CollectCallFactsFromExpression(arg, functions, facts);
-    } else if (auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-        CollectCallFactsFromExpression(binary->left, functions, facts);
-        CollectCallFactsFromExpression(binary->right, functions, facts);
-    } else if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-        CollectCallFactsFromExpression(unary->operand, functions, facts);
-    } else if (auto table = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-        for (const auto &entry : table->expressions)
-            CollectCallFactsFromExpression(entry, functions, facts);
-    } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr); fn && fn->lpFunctionBody) {
+    if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr); fn && fn->lpFunctionBody)
         CollectCallFactsFromStatements(fn->lpFunctionBody->body, functions, facts);
-    }
+    else
+        ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectCallFactsFromExpression(child, functions, facts); });
 }
 
 static void CollectCallFactsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, const FunctionMap &functions, InferenceFacts &facts) {
     for (const auto &stmt : stmts) {
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
-            if (fn->lpFunctionBody)
-                CollectCallFactsFromStatements(fn->lpFunctionBody->body, functions, facts);
-        } else if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            CollectCallFactsFromExpression(decl->value, functions, facts);
-        } else if (auto assign = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            CollectCallFactsFromExpression(assign->left, functions, facts);
-            CollectCallFactsFromExpression(assign->right, functions, facts);
-        } else if (auto exprStmt = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            CollectCallFactsFromExpression(exprStmt->expression, functions, facts);
-        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &value : ret->returnValues)
-                CollectCallFactsFromExpression(value, functions, facts);
-        } else if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            CollectCallFactsFromExpression(ifStmt->condition, functions, facts);
-            if (ifStmt->thenBranch)
-                CollectCallFactsFromStatements(ifStmt->thenBranch->body, functions, facts);
-            if (ifStmt->elseBranch)
-                CollectCallFactsFromStatements(ifStmt->elseBranch->body, functions, facts);
-        } else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            CollectCallFactsFromExpression(whileStmt->condition, functions, facts);
-            if (whileStmt->body)
-                CollectCallFactsFromStatements(whileStmt->body->body, functions, facts);
-        } else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            CollectCallFactsFromExpression(repeatStmt->condition, functions, facts);
-            if (repeatStmt->body)
-                CollectCallFactsFromStatements(repeatStmt->body->body, functions, facts);
-        } else if (auto forNum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            if (forNum->lpLoopBody)
-                CollectCallFactsFromStatements(forNum->lpLoopBody->body, functions, facts);
-        } else if (auto forGen = std::dynamic_pointer_cast<ForGeneralNode>(stmt); forGen && forGen->body) {
-            CollectCallFactsFromStatements(forGen->body->body, functions, facts);
+            CollectCallFactsFromExpression(fn, functions, facts);
+            continue;
         }
+        ForEachStatementExpression(stmt, [&](const std::shared_ptr<Expression> &expr) { CollectCallFactsFromExpression(expr, functions, facts); });
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) { CollectCallFactsFromStatements(body, functions, facts); });
     }
 }
 
@@ -585,19 +453,8 @@ static void AnnotateLocalDeclarations(std::vector<std::shared_ptr<Statement>> &s
                 decl->type = MakeTypeAnnotation(*type);
         } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt); fn && fn->lpFunctionBody) {
             AnnotateLocalDeclarations(fn->lpFunctionBody->body);
-        } else if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            if (ifStmt->thenBranch)
-                AnnotateLocalDeclarations(ifStmt->thenBranch->body);
-            if (ifStmt->elseBranch)
-                AnnotateLocalDeclarations(ifStmt->elseBranch->body);
-        } else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmt); whileStmt && whileStmt->body) {
-            AnnotateLocalDeclarations(whileStmt->body->body);
-        } else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmt); repeatStmt && repeatStmt->body) {
-            AnnotateLocalDeclarations(repeatStmt->body->body);
-        } else if (auto forNum = std::dynamic_pointer_cast<ForNumericNode>(stmt); forNum && forNum->lpLoopBody) {
-            AnnotateLocalDeclarations(forNum->lpLoopBody->body);
-        } else if (auto forGen = std::dynamic_pointer_cast<ForGeneralNode>(stmt); forGen && forGen->body) {
-            AnnotateLocalDeclarations(forGen->body->body);
+        } else {
+            ForEachChildBlock(stmt, AnnotateLocalDeclarations);
         }
     }
 }
@@ -642,12 +499,10 @@ static std::optional<bool> EvaluateBooleanConstant(const std::shared_ptr<Express
 
 static void OptimizeStatements(std::vector<std::shared_ptr<Statement>> &stmts) {
     for (size_t i = 0; i < stmts.size();) {
+        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmts[i]); fn && fn->lpFunctionBody)
+            OptimizeStatements(fn->lpFunctionBody->body);
+        ForEachChildBlock(stmts[i], OptimizeStatements);
         if (auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmts[i])) {
-            if (ifStmt->thenBranch)
-                OptimizeStatements(ifStmt->thenBranch->body);
-            if (ifStmt->elseBranch)
-                OptimizeStatements(ifStmt->elseBranch->body);
-
             auto cond = EvaluateBooleanConstant(ifStmt->condition);
             if (cond) {
                 std::vector<std::shared_ptr<Statement>> replacement;
@@ -661,25 +516,11 @@ static void OptimizeStatements(std::vector<std::shared_ptr<Statement>> &stmts) {
                 continue;
             }
         } else if (auto whileStmt = std::dynamic_pointer_cast<WhileStatementNode>(stmts[i])) {
-            if (whileStmt->body)
-                OptimizeStatements(whileStmt->body->body);
             auto cond = EvaluateBooleanConstant(whileStmt->condition);
             if (cond && !*cond) {
                 stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i));
                 continue;
             }
-        } else if (auto repeatStmt = std::dynamic_pointer_cast<RepeatStatementNode>(stmts[i])) {
-            if (repeatStmt->body)
-                OptimizeStatements(repeatStmt->body->body);
-        } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmts[i])) {
-            if (fn->lpFunctionBody)
-                OptimizeStatements(fn->lpFunctionBody->body);
-        } else if (auto forNum = std::dynamic_pointer_cast<ForNumericNode>(stmts[i])) {
-            if (forNum->lpLoopBody)
-                OptimizeStatements(forNum->lpLoopBody->body);
-        } else if (auto forGen = std::dynamic_pointer_cast<ForGeneralNode>(stmts[i])) {
-            if (forGen->body)
-                OptimizeStatements(forGen->body->body);
         }
         ++i;
     }
@@ -768,7 +609,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     }
 #endif
     const auto deserializeStart = std::chrono::steady_clock::now();
-    const auto deserializedBytecode = deserializer.Deserialize(bytecode);
+    auto deserializedBytecode = deserializer.Deserialize(bytecode);
     const auto deserializeEnd = std::chrono::steady_clock::now();
     if (!deserializedBytecode || deserializedBytecode->functions.empty()) {
         m_debugNotes.Add(FissionDebugStage::Pipeline, "deserializer produced no functions");
@@ -782,6 +623,8 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto bytecodeLiftEnd = std::chrono::steady_clock::now();
     m_debugNotes.Add(FissionDebugStage::Pipeline, "bytecode lift produced {} root instructions and {} nested functions", liftedBytecode.instructions.size(),
                      liftedBytecode.subfunctions.size());
+    const auto inlineSources = BuildInlineSourceMap(*deserializedBytecode, decoder, liftedBytecode);
+    AssignInlineOrigins(liftedBytecode, *inlineSources);
 
     const auto controlFlowAnalyzeStart = std::chrono::steady_clock::now();
     const auto basicBlockIdentificationStart = std::chrono::steady_clock::now();
@@ -818,10 +661,17 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
             ssaBuilder.Build(controlFlowAnalyzedFunction);
         }
     }
+    if ((flags & DecompilerFlags::RecoverInline) == DecompilerFlags::RecoverInline && RecoverInlinedCalls(controlFlowAnalyzedFunction, *inlineSources)) {
+        controlFlowAnalyzedFunction = controlFlowAnalyzer.DetermineBasicBlocks(&liftedBytecode);
+        controlFlowAnalyzer.OptimizeGraph(controlFlowAnalyzedFunction);
+        controlFlowAnalyzer.PruneUnreachable(controlFlowAnalyzedFunction);
+        controlFlowAnalyzer.IdentifyStructures(controlFlowAnalyzedFunction);
+        ssaBuilder.Build(controlFlowAnalyzedFunction);
+    }
     const auto irOptimizationEnd = std::chrono::steady_clock::now();
 
     const auto astStart = std::chrono::steady_clock::now();
-    astLifter.SetInlineSources(BuildInlineSourceMap(*deserializedBytecode, decoder));
+    astLifter.SetInlineSources(inlineSources);
     auto liftedAST = astLifter.Lift(controlFlowAnalyzedFunction);
     AddDecompilerOptionsToHeader(liftedAST, flags);
     const size_t statementsBeforeRewrite = liftedAST.statements.size();
@@ -834,6 +684,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         if ((flags & DecompilerFlags::PrintTimingBreakdown) == DecompilerFlags::PrintTimingBreakdown)
             rewriterTimings += std::format("\t\t{}: {}\n", name, std::chrono::duration<float>(std::chrono::steady_clock::now() - start));
     };
+    timeRewriter("Inline Region Marker", [&] { InlineRegionMarker{inlineSources}.Run(liftedAST.statements); });
     timeRewriter("Short-Circuit Chain Folder", [&] { ShortCircuitChainFolder{}.Run(liftedAST.statements); });
     // Hoisting must run while names still identify registers and before later passes reshape scopes.
     timeRewriter("Declaration Hoister 1", [&] { DeclarationHoister{}.Run(liftedAST.statements); });

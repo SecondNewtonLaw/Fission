@@ -353,6 +353,8 @@ int main(int argc, char **argv) {
             fuzz::optimizationLevel = std::clamp(std::atoi(argv[++i]), 0, 2);
         else if (a == "--debug" && i + 1 < argc)
             fuzz::debugLevel = std::clamp(std::atoi(argv[++i]), 0, 2);
+        else if (a == "--recover-inline")
+            fuzz::decompileFlags = fuzz::decompileFlags | DecompilerFlags::RecoverInline;
         else if (a == "--repro-mutate" && i + 2 < argc) {
             mutateFile = argv[++i];
             mutateSeed = static_cast<uint32_t>(std::strtoul(argv[++i], nullptr, 10));

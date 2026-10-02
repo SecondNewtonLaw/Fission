@@ -47,7 +47,9 @@ enum class DecompilerFlags : uint16_t {
     // Capture lifted AST as JSON.
     CaptureAST = 1 << 11,
     // Emit bounded reasoning notes for pipeline, CFA, SSA, and AST decisions.
-    FissionDebugNotes = 1 << 12
+    FissionDebugNotes = 1 << 12,
+    // Replace function bodies the compiler inlined (O2, needs line info) with a call when the arguments can be recovered.
+    RecoverInline = 1 << 13
 };
 
 constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {

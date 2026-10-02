@@ -96,32 +96,10 @@ class PropertyRenamer {
                 Bump(id->identifier->name, PropLeaf(asn->right), srcCount, srcInfo);
             return;
         }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            for (const auto &s : b->body)
+        // a FunctionDeclaration is a new scope, handled by the engine's recursion
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) {
+            for (const auto &s : body)
                 ScanSources(s, srcCount, srcInfo);
-            return;
-        }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            ScanSources(ifS->thenBranch, srcCount, srcInfo);
-            ScanSources(ifS->elseBranch, srcCount, srcInfo);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            ScanSources(w->body, srcCount, srcInfo);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            ScanSources(r->body, srcCount, srcInfo);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            ScanSources(fnum->lpLoopBody, srcCount, srcInfo);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            ScanSources(fgen->body, srcCount, srcInfo);
-            return;
-        }
-        // FunctionDeclaration: a new scope, handled by the engine's recursion.
+        });
     }
 };

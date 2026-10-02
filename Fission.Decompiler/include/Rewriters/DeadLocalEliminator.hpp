@@ -7,6 +7,7 @@
 #pragma once
 #include "Rewriters/ASTRewriter.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <memory>
@@ -180,121 +181,12 @@ class DeadLocalEliminator : public ASTRewriter {
         return false;
     }
 
-    static bool MentionsBlock(const std::shared_ptr<BlockStatementNode> &block, const std::string &name) {
-        if (!block)
-            return false;
-        for (const auto &s : block->body)
-            if (MentionsStatement(s, name))
-                return true;
-        return false;
+    bool MentionsExpression(const std::shared_ptr<Expression> &e, const std::string &name) {
+        std::unordered_set<std::string> names;
+        CollectExpression(e, names);
+        return names.contains(name);
     }
 
-    static bool MentionsExpression(const std::shared_ptr<Expression> &e, const std::string &name) {
-        if (!e)
-            return false;
-        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(e))
-            return MentionsExpression(conditional->condition, name) || MentionsExpression(conditional->thenExpr, name) ||
-                   MentionsExpression(conditional->elseExpr, name);
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e))
-            return id->identifier && id->identifier->name == name;
-        if (auto id = std::dynamic_pointer_cast<Identifier>(e))
-            return id->name == name;
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(e))
-            return MentionsExpression(bin->left, name) || MentionsExpression(bin->right, name);
-        // CompoundBinaryExpressionNode is not a BinaryExpressionNode subclass.
-        if (auto cbin = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(e))
-            return MentionsExpression(cbin->left, name) || MentionsExpression(cbin->right, name);
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(e))
-            return MentionsExpression(un->operand, name);
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(e))
-            return MentionsExpression(idx->left, name) || MentionsExpression(idx->right, name);
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(e))
-            return MentionsExpression(mem->table, name) || MentionsExpression(mem->key, name);
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(e)) {
-            if (MentionsExpression(call->callee, name))
-                return true;
-            for (const auto &a : call->arguments)
-                if (MentionsExpression(a, name))
-                    return true;
-            for (const auto &r : call->rets)
-                if (MentionsExpression(r, name))
-                    return true;
-            return false;
-        }
-        if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(e)) {
-            if (MentionsExpression(nc->calledOn, name) || MentionsExpression(nc->callWhat, name))
-                return true;
-            for (const auto &a : nc->arguments)
-                if (MentionsExpression(a, name))
-                    return true;
-            for (const auto &r : nc->rets)
-                if (MentionsExpression(r, name))
-                    return true;
-            return false;
-        }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(e)) {
-            for (const auto &entry : tbl->expressions)
-                if (MentionsExpression(entry, name))
-                    return true;
-            return false;
-        }
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(e))
-            return fn->lpFunctionBody && MentionsBlock(fn->lpFunctionBody, name);
-        return false;
-    }
-
-    static bool MentionsStatement(const std::shared_ptr<Statement> &s, const std::string &name) {
-        if (!s)
-            return false;
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s))
-            return MentionsExpression(decl->identifier, name) || MentionsExpression(decl->value, name) || (decl->type && MentionsExpression(*decl->type, name));
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s))
-            return MentionsExpression(asn->left, name) || MentionsExpression(asn->right, name);
-        if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(s))
-            return MentionsExpression(es->expression, name);
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(s)) {
-            for (const auto &v : ret->returnValues)
-                if (MentionsExpression(v, name))
-                    return true;
-            return false;
-        }
-        if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s))
-            return MentionsExpression(iff->condition, name) || MentionsBlock(iff->thenBranch, name) || MentionsBlock(iff->elseBranch, name);
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(s))
-            return MentionsExpression(w->condition, name) || MentionsBlock(w->body, name);
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s))
-            return MentionsExpression(r->condition, name) || MentionsBlock(r->body, name);
-        if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s))
-            return MentionsExpression(fn->loopVariable, name) || MentionsExpression(fn->startVariable, name) || MentionsExpression(fn->increaseBy, name) ||
-                   MentionsExpression(fn->maxIncreased, name) || MentionsBlock(fn->lpLoopBody, name);
-        if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s)) {
-            for (const auto &v : fg->loopVariables)
-                if (MentionsExpression(v, name))
-                    return true;
-            return MentionsExpression(fg->generator, name) || MentionsExpression(fg->state, name) || MentionsExpression(fg->index, name) ||
-                   MentionsBlock(fg->body, name);
-        }
-        if (auto fd = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
-            const size_t receiverEnd = fd->functionName.find_first_of(".:");
-            if (receiverEnd != std::string::npos && fd->functionName.substr(0, receiverEnd) == name)
-                return true;
-            return fd->lpFunctionBody && MentionsBlock(fd->lpFunctionBody, name);
-        }
-        if (auto cls = std::dynamic_pointer_cast<ClassDeclarationNode>(s)) {
-            if (MentionsExpression(cls->superclass, name))
-                return true;
-            for (const auto &method : cls->methods)
-                if (MentionsExpression(method, name))
-                    return true;
-        }
-        if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s))
-            return MentionsBlock(blk, name);
-        if (auto e = std::dynamic_pointer_cast<Expression>(s))
-            return MentionsExpression(e, name);
-        return false;
-    }
-
-    // Every name MentionsExpression / MentionsStatement would find.
     void CollectBlock(const std::shared_ptr<BlockStatementNode> &block, std::unordered_set<std::string> &out) {
         if (block)
             for (const auto &s : block->body)
@@ -302,49 +194,15 @@ class DeadLocalEliminator : public ASTRewriter {
     }
 
     void CollectExpression(const std::shared_ptr<Expression> &e, std::unordered_set<std::string> &out) {
-        if (!e)
-            return;
-        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(e)) {
-            CollectExpression(conditional->condition, out);
-            CollectExpression(conditional->thenExpr, out);
-            CollectExpression(conditional->elseExpr, out);
-        } else if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e)) {
+        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e)) {
             if (id->identifier)
                 out.insert(id->identifier->name);
         } else if (auto identifier = std::dynamic_pointer_cast<Identifier>(e)) {
             out.insert(identifier->name);
-        } else if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(e)) {
-            CollectExpression(bin->left, out);
-            CollectExpression(bin->right, out);
-        } else if (auto cbin = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(e)) {
-            CollectExpression(cbin->left, out);
-            CollectExpression(cbin->right, out);
-        } else if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(e)) {
-            CollectExpression(un->operand, out);
-        } else if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(e)) {
-            CollectExpression(idx->left, out);
-            CollectExpression(idx->right, out);
-        } else if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(e)) {
-            CollectExpression(mem->table, out);
-            CollectExpression(mem->key, out);
-        } else if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(e)) {
-            CollectExpression(call->callee, out);
-            for (const auto &a : call->arguments)
-                CollectExpression(a, out);
-            for (const auto &r : call->rets)
-                CollectExpression(r, out);
-        } else if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(e)) {
-            CollectExpression(nc->calledOn, out);
-            CollectExpression(nc->callWhat, out);
-            for (const auto &a : nc->arguments)
-                CollectExpression(a, out);
-            for (const auto &r : nc->rets)
-                CollectExpression(r, out);
-        } else if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(e)) {
-            for (const auto &entry : tbl->expressions)
-                CollectExpression(entry, out);
         } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(e)) {
             CollectBlock(fn->lpFunctionBody, out);
+        } else {
+            ForEachSubExpression(e, [&](const std::shared_ptr<Expression> &child) { CollectExpression(child, out); });
         }
     }
 
@@ -364,54 +222,31 @@ class DeadLocalEliminator : public ASTRewriter {
     void CollectStatementUncached(const std::shared_ptr<Statement> &s, std::unordered_set<std::string> &out) {
         if (!s)
             return;
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
-            CollectExpression(decl->identifier, out);
-            CollectExpression(decl->value, out);
-            if (decl->type)
-                CollectExpression(*decl->type, out);
-        } else if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s)) {
-            CollectExpression(asn->left, out);
-            CollectExpression(asn->right, out);
-        } else if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(s)) {
-            CollectExpression(es->expression, out);
-        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(s)) {
-            for (const auto &v : ret->returnValues)
-                CollectExpression(v, out);
-        } else if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
-            CollectExpression(iff->condition, out);
-            CollectBlock(iff->thenBranch, out);
-            CollectBlock(iff->elseBranch, out);
-        } else if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(s)) {
-            CollectExpression(w->condition, out);
-            CollectBlock(w->body, out);
-        } else if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s)) {
-            CollectExpression(r->condition, out);
-            CollectBlock(r->body, out);
-        } else if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s)) {
-            CollectExpression(fn->loopVariable, out);
-            CollectExpression(fn->startVariable, out);
-            CollectExpression(fn->increaseBy, out);
-            CollectExpression(fn->maxIncreased, out);
-            CollectBlock(fn->lpLoopBody, out);
-        } else if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s)) {
-            for (const auto &v : fg->loopVariables)
-                CollectExpression(v, out);
-            CollectExpression(fg->generator, out);
-            CollectExpression(fg->state, out);
-            CollectExpression(fg->index, out);
-            CollectBlock(fg->body, out);
-        } else if (auto fd = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
+        if (auto fd = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
             if (const size_t receiverEnd = fd->functionName.find_first_of(".:"); receiverEnd != std::string::npos)
                 out.insert(fd->functionName.substr(0, receiverEnd));
             CollectBlock(fd->lpFunctionBody, out);
-        } else if (auto cls = std::dynamic_pointer_cast<ClassDeclarationNode>(s)) {
+            return;
+        }
+        if (auto cls = std::dynamic_pointer_cast<ClassDeclarationNode>(s)) {
             CollectExpression(cls->superclass, out);
             for (const auto &method : cls->methods)
                 CollectExpression(method, out);
-        } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
-            CollectBlock(blk, out);
-        } else if (auto e = std::dynamic_pointer_cast<Expression>(s)) {
-            CollectExpression(e, out);
+            return;
         }
+        const auto collect = [&](const std::shared_ptr<Expression> &e) { CollectExpression(e, out); };
+        ForEachStatementExpression(s, collect);
+        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s); decl && decl->type)
+            collect(*decl->type);
+        else if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s))
+            collect(fn->loopVariable);
+        else if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s))
+            std::ranges::for_each(fg->loopVariables, collect);
+        else if (auto e = std::dynamic_pointer_cast<Expression>(s))
+            collect(e);
+        ForEachChildBlock(s, [&](const std::vector<std::shared_ptr<Statement>> &body) {
+            for (const auto &child : body)
+                CollectStatement(child, out);
+        });
     }
 };

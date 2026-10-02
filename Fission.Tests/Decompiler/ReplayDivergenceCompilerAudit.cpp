@@ -480,6 +480,57 @@ print(total, r))LUA";
     }
 }
 
+TEST_CASE("Compiler audit: RecoverInline turns inlined bodies back into calls", "[Decompiler][ReplayRegress][Semantics][Inlining]") {
+    const CompileLevels recover(fuzz::optimizationLevel, fuzz::debugLevel, DecompilerFlags::RecoverInline);
+    const auto dispatch = R"LUA(local function advance(value, by)
+    print(by)
+    return value + by
+end
+local function dispatch(selector)
+    local result = 16
+    if selector == 0 then
+        result = advance(result, 0)
+    else
+        result = advance(result, 3)
+    end
+    return result
+end
+print(dispatch(0), dispatch(1)))LUA";
+    // the inlined body ends the function, carries the caller's return, folds into a condition, loses its closure to a later use, or
+    // becomes a constructor that takes the caller's stores
+    const std::vector<std::string> shapes{
+        dispatch,
+        "local function make()\n    return {}\nend\ntostring(1)\nreturn make()",
+        "local function get()\n    return ({ x = 1 }).x\nend\nlocal a = get()\nif not get() then\n    print(a)\nend",
+        "local f = function(a)\n    print(a)\nend\nprint(0)\nf(1)\nprint(type(f))",
+        "local function make()\n    return {}\nend\nlocal t = make()\nt.a = print(1)\nprint(t.a)",
+    };
+    for (const auto &shape : shapes)
+        for (const int debug : {1, 2})
+            CheckSemanticParity(shape, 2, debug);
+
+    fuzz::EnableLuauFlags();
+    const CompileLevels levels(2, 1);
+    const auto output = fuzz::FullDecompile(dispatch).output;
+    INFO(output);
+    CHECK(output.find("-- Fission: INFO: call to 'advance' recovered from its inlined body\n        v1 = advance(v1, 0)\n") != std::string::npos);
+    CHECK(output.find("v1 = advance(v1, 3)\n") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: a recovered call stored by an unfolded constructor runs once", "[Decompiler][ReplayRegress][Semantics][Inlining]") {
+    const CompileLevels recover(fuzz::optimizationLevel, fuzz::debugLevel, DecompilerFlags::RecoverInline);
+    const auto source = "local get = function()\n    return ({ x = 1 }).x\nend\nlocal t = { { 1 }, get(), y = get == print }\nprint(t[2])";
+    for (const int debug : {1, 2})
+        CheckSemanticParity(source, 2, debug);
+
+    fuzz::EnableLuauFlags();
+    const CompileLevels levels(2, 1);
+    const auto output = fuzz::FullDecompile(source).output;
+    INFO(output);
+    CHECK(output.find("recovered from its inlined body") != std::string::npos);
+    CHECK(output.find("[2] = anon") == std::string::npos);
+}
+
 TEST_CASE("Compiler audit: a closing if keeps its source arm order without copied returns", "[Decompiler][ReplayRegress][Semantics]") {
     const auto source = R"LUA(local function f(x)
     if x ~= nil then

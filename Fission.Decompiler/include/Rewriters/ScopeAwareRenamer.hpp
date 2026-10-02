@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 
 #include <cctype>
 #include <functional>
@@ -78,6 +79,11 @@ class ScopeAwareRenamer {
                 out.insert(id->name);
         };
         WalkStmt(stmt, collect);
+    }
+
+    // Closures reachable from `stmt` without entering another closure; each is a scope of its own.
+    static void CollectNestedFunctions(const std::shared_ptr<Statement> &stmt, std::vector<std::shared_ptr<FunctionDeclarationNode>> &out) {
+        ForEachPart(stmt, [&](const auto &s) { CollectNestedFunctions(s, out); }, [&](const auto &e) { CollectNestedFunctionsExpr(e, out); });
     }
 
   private:
@@ -177,106 +183,44 @@ class ScopeAwareRenamer {
                 ProcessScope(fn->lpFunctionBody->body, root, detect, usedNames, usedReady, includeParams, fn);
     }
 
-    static void CollectNestedFunctions(const std::shared_ptr<Statement> &stmt, std::vector<std::shared_ptr<FunctionDeclarationNode>> &out) {
+    static void ForEachLoopBinding(const std::shared_ptr<Statement> &stmt, const std::function<void(const std::shared_ptr<Expression> &)> &visit) {
+        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt))
+            visit(fnum->loopVariable);
+        else if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt))
+            for (const auto &lv : fgen->loopVariables)
+                visit(lv);
+    }
+
+    // Visits every expression `stmt` owns, loop bindings included, then each statement nested in its blocks.
+    template <class OnStatement, class OnExpression>
+    static void ForEachPart(const std::shared_ptr<Statement> &stmt, OnStatement &&onStatement, OnExpression &&onExpression) {
         if (!stmt)
             return;
         if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            CollectNestedFunctionsExpr(es->expression, out);
+            onExpression(es->expression);
             return;
         }
         if (auto e = std::dynamic_pointer_cast<Expression>(stmt)) {
-            CollectNestedFunctionsExpr(e, out);
+            onExpression(e);
             return;
         }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            for (const auto &s : b->body)
-                CollectNestedFunctions(s, out);
+        if (auto fa = std::dynamic_pointer_cast<FunctionArgumentExpression>(stmt)) {
+            onExpression(fa->argumentName);
             return;
         }
-        if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            CollectNestedFunctionsExpr(vd->value, out);
-            return;
-        }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            CollectNestedFunctionsExpr(asn->right, out);
-            return;
-        }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            CollectNestedFunctions(ifS->thenBranch, out);
-            CollectNestedFunctions(ifS->elseBranch, out);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            CollectNestedFunctions(w->body, out);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            CollectNestedFunctions(r->body, out);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            CollectNestedFunctions(fnum->lpLoopBody, out);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            CollectNestedFunctionsExpr(fgen->generator, out);
-            CollectNestedFunctions(fgen->body, out);
-            return;
-        }
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &v : ret->returnValues)
-                CollectNestedFunctionsExpr(v, out);
-            return;
-        }
+        ForEachLoopBinding(stmt, onExpression);
+        ForEachStatementExpression(stmt, onExpression);
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) {
+            for (const auto &s : body)
+                onStatement(s);
+        });
     }
 
     static void CollectNestedFunctionsExpr(const std::shared_ptr<Expression> &expr, std::vector<std::shared_ptr<FunctionDeclarationNode>> &out) {
-        if (!expr)
-            return;
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr))
             out.push_back(fn); // a new scope; do NOT descend (recursion handles it)
-            return;
-        }
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(call->callee, out);
-            for (const auto &a : call->arguments)
-                CollectNestedFunctionsExpr(a, out);
-            return;
-        }
-        if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(nc->calledOn, out);
-            for (const auto &a : nc->arguments)
-                CollectNestedFunctionsExpr(a, out);
-            return;
-        }
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(mem->table, out);
-            return;
-        }
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(idx->left, out);
-            CollectNestedFunctionsExpr(idx->right, out);
-            return;
-        }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(bin->left, out);
-            CollectNestedFunctionsExpr(bin->right, out);
-            return;
-        }
-        if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(cmp->left, out);
-            CollectNestedFunctionsExpr(cmp->right, out);
-            return;
-        }
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            CollectNestedFunctionsExpr(un->operand, out);
-            return;
-        }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (const auto &e : tbl->expressions)
-                CollectNestedFunctionsExpr(e, out);
-            return;
-        }
+        else if (expr)
+            ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectNestedFunctionsExpr(child, out); });
     }
 
     static void CountScopeDecls(const std::shared_ptr<Statement> &stmt, std::unordered_map<std::string, int> &out) {
@@ -295,35 +239,11 @@ class ScopeAwareRenamer {
                 out[fn->functionName]++;
             return; // do NOT descend into the function body
         }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            for (const auto &s : b->body)
+        ForEachLoopBinding(stmt, [&](const std::shared_ptr<Expression> &binding) { CountDeclName(binding, out); });
+        ForEachChildBlock(stmt, [&](const std::vector<std::shared_ptr<Statement>> &body) {
+            for (const auto &s : body)
                 CountScopeDecls(s, out);
-            return;
-        }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            CountScopeDecls(ifS->thenBranch, out);
-            CountScopeDecls(ifS->elseBranch, out);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            CountScopeDecls(w->body, out);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            CountScopeDecls(r->body, out);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            CountDeclName(fnum->loopVariable, out);
-            CountScopeDecls(fnum->lpLoopBody, out);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            for (const auto &lv : fgen->loopVariables)
-                CountDeclName(lv, out);
-            CountScopeDecls(fgen->body, out);
-            return;
-        }
+        });
     }
 
     static void CountDeclExpr(const std::shared_ptr<Expression> &expr, std::unordered_map<std::string, int> &out) {
@@ -362,73 +282,7 @@ class ScopeAwareRenamer {
     static void RenameStmt(
         const std::shared_ptr<Statement> &stmt, const std::unordered_map<std::string, std::string> &rename, const std::unordered_set<std::string> &shadowed
     ) {
-        if (!stmt)
-            return;
-        if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            RenameExpr(es->expression, rename, shadowed);
-            return;
-        }
-        if (auto e = std::dynamic_pointer_cast<Expression>(stmt)) {
-            RenameExpr(e, rename, shadowed);
-            return;
-        }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            for (const auto &s : b->body)
-                RenameStmt(s, rename, shadowed);
-            return;
-        }
-        if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            RenameExpr(vd->identifier, rename, shadowed);
-            RenameExpr(vd->value, rename, shadowed);
-            return;
-        }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            RenameExpr(asn->left, rename, shadowed);
-            RenameExpr(asn->right, rename, shadowed);
-            return;
-        }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            RenameExpr(ifS->condition, rename, shadowed);
-            RenameStmt(ifS->thenBranch, rename, shadowed);
-            RenameStmt(ifS->elseBranch, rename, shadowed);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            RenameExpr(w->condition, rename, shadowed);
-            RenameStmt(w->body, rename, shadowed);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            RenameExpr(r->condition, rename, shadowed);
-            RenameStmt(r->body, rename, shadowed);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            RenameExpr(fnum->loopVariable, rename, shadowed);
-            RenameExpr(fnum->startVariable, rename, shadowed);
-            RenameExpr(fnum->increaseBy, rename, shadowed);
-            RenameExpr(fnum->maxIncreased, rename, shadowed);
-            RenameStmt(fnum->lpLoopBody, rename, shadowed);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            for (const auto &lv : fgen->loopVariables)
-                RenameExpr(lv, rename, shadowed);
-            RenameExpr(fgen->generator, rename, shadowed);
-            RenameExpr(fgen->state, rename, shadowed);
-            RenameExpr(fgen->index, rename, shadowed);
-            RenameStmt(fgen->body, rename, shadowed);
-            return;
-        }
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &v : ret->returnValues)
-                RenameExpr(v, rename, shadowed);
-            return;
-        }
-        if (auto fa = std::dynamic_pointer_cast<FunctionArgumentExpression>(stmt)) {
-            RenameExpr(fa->argumentName, rename, shadowed);
-            return;
-        }
+        ForEachPart(stmt, [&](const auto &s) { RenameStmt(s, rename, shadowed); }, [&](const auto &e) { RenameExpr(e, rename, shadowed); });
     }
 
     static void RenameExpr(
@@ -472,137 +326,16 @@ class ScopeAwareRenamer {
             RenameStmt(fn->lpFunctionBody, rename, *use);
             return;
         }
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            RenameExpr(call->callee, rename, shadowed);
-            for (const auto &a : call->arguments)
-                RenameExpr(a, rename, shadowed);
-            for (const auto &r : call->rets)
-                RenameExpr(r, rename, shadowed);
-            return;
-        }
-        if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            RenameExpr(nc->calledOn, rename, shadowed);
-            for (const auto &a : nc->arguments)
-                RenameExpr(a, rename, shadowed);
-            for (const auto &r : nc->rets)
-                RenameExpr(r, rename, shadowed);
-            return;
-        }
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            RenameExpr(mem->table, rename, shadowed);
-            RenameExpr(mem->key, rename, shadowed);
-            return;
-        }
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            RenameExpr(idx->left, rename, shadowed);
-            RenameExpr(idx->right, rename, shadowed);
-            return;
-        }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-            RenameExpr(bin->left, rename, shadowed);
-            RenameExpr(bin->right, rename, shadowed);
-            return;
-        }
-        if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
-            RenameExpr(cmp->left, rename, shadowed);
-            RenameExpr(cmp->right, rename, shadowed);
-            return;
-        }
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            RenameExpr(un->operand, rename, shadowed);
-            return;
-        }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (const auto &e : tbl->expressions)
-                RenameExpr(e, rename, shadowed);
-            return;
-        }
-        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
-            RenameExpr(conditional->condition, rename, shadowed);
-            RenameExpr(conditional->thenExpr, rename, shadowed);
-            RenameExpr(conditional->elseExpr, rename, shadowed);
-        }
+        ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { RenameExpr(child, rename, shadowed); });
     }
 
     template <class F> static void WalkStmt(const std::shared_ptr<Statement> &stmt, F &f) {
-        if (!stmt)
-            return;
-        if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            WalkExpr(es->expression, f);
-            return;
-        }
-        if (auto e = std::dynamic_pointer_cast<Expression>(stmt)) {
-            WalkExpr(e, f);
-            return;
-        }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            for (const auto &s : b->body)
-                WalkStmt(s, f);
-            return;
-        }
-        if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            WalkExpr(vd->identifier, f);
-            WalkExpr(vd->value, f);
-            return;
-        }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            WalkExpr(asn->left, f);
-            WalkExpr(asn->right, f);
-            return;
-        }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            WalkExpr(ifS->condition, f);
-            WalkStmt(ifS->thenBranch, f);
-            WalkStmt(ifS->elseBranch, f);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            WalkExpr(w->condition, f);
-            WalkStmt(w->body, f);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            WalkExpr(r->condition, f);
-            WalkStmt(r->body, f);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            WalkExpr(fnum->loopVariable, f);
-            WalkExpr(fnum->startVariable, f);
-            WalkExpr(fnum->increaseBy, f);
-            WalkExpr(fnum->maxIncreased, f);
-            WalkStmt(fnum->lpLoopBody, f);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            for (const auto &lv : fgen->loopVariables)
-                WalkExpr(lv, f);
-            WalkExpr(fgen->generator, f);
-            WalkExpr(fgen->state, f);
-            WalkExpr(fgen->index, f);
-            WalkStmt(fgen->body, f);
-            return;
-        }
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &v : ret->returnValues)
-                WalkExpr(v, f);
-            return;
-        }
-        if (auto fa = std::dynamic_pointer_cast<FunctionArgumentExpression>(stmt)) {
-            WalkExpr(fa->argumentName, f);
-            return;
-        }
+        ForEachPart(stmt, [&](const auto &s) { WalkStmt(s, f); }, [&](const auto &e) { WalkExpr(e, f); });
     }
 
     template <class F> static void WalkExpr(const std::shared_ptr<Expression> &expr, F &f) {
         if (!expr)
             return;
-        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
-            WalkExpr(conditional->condition, f);
-            WalkExpr(conditional->thenExpr, f);
-            WalkExpr(conditional->elseExpr, f);
-            return;
-        }
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr)) {
             f(id->identifier);
             return;
@@ -614,51 +347,7 @@ class ScopeAwareRenamer {
             WalkStmt(fn->lpFunctionBody, f);
             return;
         }
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            WalkExpr(call->callee, f);
-            for (const auto &a : call->arguments)
-                WalkExpr(a, f);
-            for (const auto &r : call->rets)
-                WalkExpr(r, f);
-            return;
-        }
-        if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            WalkExpr(nc->calledOn, f);
-            for (const auto &a : nc->arguments)
-                WalkExpr(a, f);
-            for (const auto &r : nc->rets)
-                WalkExpr(r, f);
-            return;
-        }
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            WalkExpr(mem->table, f);
-            WalkExpr(mem->key, f);
-            return;
-        }
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            WalkExpr(idx->left, f);
-            WalkExpr(idx->right, f);
-            return;
-        }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-            WalkExpr(bin->left, f);
-            WalkExpr(bin->right, f);
-            return;
-        }
-        if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
-            WalkExpr(cmp->left, f);
-            WalkExpr(cmp->right, f);
-            return;
-        }
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            WalkExpr(un->operand, f);
-            return;
-        }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (const auto &e : tbl->expressions)
-                WalkExpr(e, f);
-            return;
-        }
+        ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { WalkExpr(child, f); });
     }
 
     static bool IsValidIdentifierKey(const std::string &s) {

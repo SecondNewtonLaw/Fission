@@ -637,6 +637,264 @@ end
 print(v0))LUA");
 }
 
+TEST_CASE("Replay: closures capturing one variable at different versions share its name", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local x = function() end\nif ... then\n    repeat\n        x = tostring\n        if function() return x end then break end\n"
+                               "    until ...\nelse\n    local function f4() x(f4) end\nend\nx += 1";
+    replay_divergence::CheckSemanticParity(source, 2, 2);
+    const replay_divergence::CompileLevels levels(2, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("x_2") == std::string::npos);
+    CHECK(result.output.find("x += 1") != std::string::npos);
+}
+
+TEST_CASE("Replay: a nested loop that never ends is not the exit of a shared-header wrap", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local v0 = ...\nrepeat\n    while type(v0) == \"table\" and v0.y do\n        print(0)\n    end\n"
+                               "    for k, v in pairs({}) do\n        while v() do\n            print(1)\n        end\n"
+                               "        repeat\n            print(2)\n        until false\n    end\nuntil type(v0) ~= \"table\" or v0.x\nreturn 1";
+    replay_divergence::CheckSemanticParity(source, 2, 1);
+    const replay_divergence::CompileLevels levels(2, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.ends_with("        return 1\n    end\nend\n"));
+}
+
+TEST_CASE("Replay: varargs and repeat-header arguments keep declarations in place", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a, b = ...\nif type(a) ~= \"table\" then\n    return\nend\nrepeat\n    while a.y do\n        repeat\n"
+                               "            print(true, 99)\n        until ...\n    end\n    for i = a.f or 1, 2 do\n        print(i)\n    end\n"
+                               "until a.x ~= 1\nreturn a[b]";
+    replay_divergence::CheckSemanticParity(source, 2, 1);
+    const replay_divergence::CompileLevels levels(2, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("local v0, v1 = ...") != std::string::npos);
+    CHECK(result.output.find("print(true, 99)") != std::string::npos);
+}
+
+TEST_CASE("Replay: multiple results bind as one multi-target assignment", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function z(f, n)
+    local x = 0
+    for i = 1, n do
+        if i > 2 then
+            local q = i * 2
+            print(q)
+        else
+            local p
+            x, p = f(i)
+            print(p + x)
+        end
+    end
+    return x
+end
+local t = {}
+t.x, t.y = ...
+local b, c = select(2, ...)
+print(z(function(i) return i, i + 1 end, 4), t.x, t.y, b, c))LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        for (int debug = 1; debug <= 2; ++debug)
+            replay_divergence::CheckSemanticParity(source, opt, debug);
+    const replay_divergence::CompileLevels levels(1, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("x, p = f(i)") != std::string::npos);
+    CHECK(result.output.find("t.x, t.y = ...") != std::string::npos);
+    CHECK(result.output.find("local b, c = select(2, ...)") != std::string::npos);
+    CHECK(result.output.find("({ ... })") == std::string::npos);
+}
+
+TEST_CASE("Replay: a negation leading a constructor's list evaluates its operand once", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a = -(if nil then 1 else \"x\")\nlocal t = ({ not a, 1 })[nil]\nlocal b = {}\nprint(t, b)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+    const replay_divergence::CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("not -\"x\"") == result.output.rfind("not -\"x\""));
+}
+
+TEST_CASE("Replay: a closure key folds into the constructor", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local t = { g, [function() end] = function() end, 2 }\nprint(#t)";
+    replay_divergence::CheckSemanticParity(source, 1, 1);
+    const replay_divergence::CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("[function()") != std::string::npos);
+    CHECK(result.output.find("v0[2] = 2") == std::string::npos);
+}
+
+TEST_CASE("Replay: a long tail after an arm that continues into a compound until runs on both paths", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n = 0\nrepeat\n  n += 1\n  if n % 2 == 0 then\n    print(n)\n  else\n    print(-n)\n    if n == 3 then continue end\n  end\n"
+                               "  for i = 1, 2 do\n    for j = 1, 2 do print(i, j) end\n  end\nuntil n > 5 and n < 100";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: the code after an arm whose loop never exits stays after the if", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n = 0\nif n > 1 then\n  repeat\n    for i = 1, 2 do print(i) end\n  until nil\nelse\n  n = -n\nend\nprint(n)\n"
+                               "for i = 1, 2 do print(i) end\nwhile n < 3 do n += 1 end\nrepeat n -= 1 until n < 0\nif n then print(n) end\nreturn n";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+}
+
+TEST_CASE("Replay: an inlined call's result read by a later compound assignment is not scoped away", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n = select(\"#\", ...) + 2\nlocal function f()\n  print(1)\n  return \"a\"\nend\nfor _ = 1, n do\n  local s = f()\n"
+                               "  for i = 1, n do\n    s ..= tostring(i)\n  end\n  print(s)\nend";
+    replay_divergence::CheckSemanticParity(source, 2, 1);
+    const replay_divergence::CompileLevels levels(2, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("..=") != std::string::npos);
+}
+
+TEST_CASE("Replay: a nested if-expression inside a condition stays one condition", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a, b, c = ...\nif a and (if (if b then nil else true) then 1 else c[1]) then\n  print(1)\nelse\n  print(2)\nend\nprint(3)\nreturn 4";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+    const replay_divergence::CompileLevels levels(0, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("(if (if b then nil else true) then 1 else c[1])") != std::string::npos);
+}
+
+TEST_CASE("Replay: an inner repeat sharing its header still lets the outer until exit", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n, m = 0, 0\nrepeat\n  repeat\n    for _ in pairs({}) do end\n    n += 1\n  until n % 2 == 0 and (if m then true else false)\n"
+                               "  m += 1\nuntil (if m > 3 then 1 else nil)\nprint(n, m)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+    const replay_divergence::CompileLevels levels(0, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("continue") == std::string::npos);
+}
+
+TEST_CASE("Replay: a break out of a repeat sharing its header with an inner while runs the tail once", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n = 0\nrepeat\n  while function() end do\n    break\n  end\n  local v0 = n\n"
+                               "  if n == 2 and function() v0 = 1 end then\n    break\n  end\n  n += 1\nuntil n > 10\n"
+                               "local f = function() return 1 end\nfor i = 1, 3, f() do\n  n += i\nend\nprint(n, (if n > 3 then \"big\" else \"small\"))";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+    const replay_divergence::CompileLevels levels(2, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    const auto first = result.output.find("for i");
+    REQUIRE(first != std::string::npos);
+    CHECK(result.output.find("for i", first + 1) == std::string::npos);
+}
+
+TEST_CASE("Replay: inlined parameters sharing a debug name stay apart while both values live", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local function f0(p1, p2)\n  print(\"x\")\n  return\nend\nlocal function f1(p2, p3, p4)\n  print(p2.y, p3, p4)\nend\n"
+                               "f1({ y = f0(\"\", print) }, (if {} then {} else 1))";
+    replay_divergence::CheckSemanticParity(source, 2, 2);
+}
+
+TEST_CASE("Replay: a loop-body local read after the loop binds to the hoisted declaration", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local v0, v1 = nil, (if pairs then math[false] else -math.pi)\nrepeat\n  v1 = \"s\"\n"
+                               "  local v3, v4 = next, v1:upper()\nuntil {}\nprint(v1)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: an until test after an always-breaking for keeps its operands", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local n = 0\nrepeat\n  n += 1\n  for i = 1, n do\n    print(i)\n    break\n  end\n  if 345 then\n    continue\n  end\n"
+                               "until ({ 1, 2, 3 })[(if n > 2 then 2 else 5)]\nprint(n)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: an elseif reached from every term of an and-chain runs when an early term fails", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a, b = tonumber(\"1\"), tonumber(\"x\")\n"
+                               "local v0 = if a and b and function() end then 1 elseif (if a then true else b) then 2 else 3\nprint(v0)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: an else region shared by an and-chain stays conditional when the then arm returns past it", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local v0, a, b = { field = false }, tonumber(\"1\"), nil\nif tostring and (if a then { x = 1 } else b) then\n  print(1)\nelse\n"
+                               "  print(2)\n  if not v0.field then\n    for g in pairs({ 7 }) do\n      print(g)\n    end\n  end\n  print(3)\nend";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+}
+
+TEST_CASE("Replay: closures capturing one local on both arms of an if share its name", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local v0 = { method = function() return 1 end }
+local v1 = 2
+v1, v0 = (if tostring then true else nil), v0
+if print then
+    v0, v1 = v0:method(v1), { 3 }
+    v1, v1 = ..., function()
+        return v1
+    end
+else
+    local v3 = function()
+        return v1
+    end
+end
+local v2, v3 = type(v1), function()
+    return v1
+end
+print(v2, type(v3()))
+)LUA";
+    replay_divergence::CheckSemanticParity(source, 0, 2);
+    const replay_divergence::CompileLevels levels(0, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("v1_") == std::string::npos);
+}
+
+TEST_CASE("Replay: an empty if after a repeat sharing its header with an inner while stays out of the loop", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a, b, c, d, e = tonumber(\"x\"), tostring, tonumber(\"2\"), { field = 1 }, tonumber(\"1\")\nrepeat\n  while a do\n    if b then\n      break\n    end\n  end\n"
+                               "until c\nif d.field then\nelse\nend\nif e then\n  print(1)\nelse\n  print(2)\nend\nreturn 1";
+    for (int opt = 0; opt <= 2; ++opt) {
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+        const replay_divergence::CompileLevels levels(opt, 1);
+        fuzz::EnableLuauFlags();
+        const auto result = fuzz::FullDecompile(source);
+        REQUIRE(result.code == DecompileResult::Success);
+        INFO(result.output);
+        CHECK(result.output.find("while true") == std::string::npos);
+        CHECK(result.output.find("until ") != std::string::npos);
+    }
+}
+
+TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item","[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local o = { field = 1, method = function() return 2 end }\nresult = { o.field, [function() end] = { y = 160 }, o:method(), [\"k\"] = 3 }\nprint(#result, result.k)";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: a named closure keyed between list items folds into the constructor","[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local a = ...\nlocal f = function()\n    return 1\nend\nprint(#{ a, [\"\\n\"] = f, nil, true })";
+    replay_divergence::CheckSemanticParity(source, 1, 1);
+    const replay_divergence::CompileLevels levels(1, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("[2] = nil") == std::string::npos);
+}
+
 TEST_CASE("Replay: a closure before an if-loop remains visible after it", "[Decompiler][ReplayRegress][Semantics]") {
     const std::string source = R"LUA(t({ nil })
 local v0 = function(p0)
@@ -685,4 +943,45 @@ until table[""].field.field)LUA";
     REQUIRE(original.status == fuzz::SemTrace::Status::Error);
     CHECK(reconstructed.status == original.status);
     CHECK(reconstructed.trace == original.trace);
+}
+
+TEST_CASE("Replay: values and effects keep their evaluation count and order", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::vector<std::string> sources{
+        // a duplicated loop tail keeps the generic-for's iterator call inside its header
+        "local n = 0\nwhile n < 2 do\n    n += 1\n    if n == 1 then\n    else\n        print(1)\n        if n > 5 then\n            continue\n        end\n    end\n"
+        "    for a, b in pairs({ n }) do\n        print(a, b)\n    end\nend",
+        // a value read before a loop is read once, not on every iteration
+        "local b = t.field\nlocal n = 0\nrepeat\n    b(n)\n    n += 1\nuntil n > 2",
+        // a constructor field stays behind an earlier store of the same key
+        "local t = { data = nil, data = print(1), x = 220, field = print(2) }\nprint(t)",
+        // a local an inlined body declares is still read by the repeat's `until`
+        "local function get(t)\n    print(t[1])\n    return t[1]\nend\nlocal n = 0\nrepeat\n    n += 1\n    local v = get({ n })\n    local w = print(n)\n"
+        "until v >= 3\nprint(n)",
+        // an inlined argument named like the caller's parameter does not hide it
+        "local function f0(p1, p2)\n    p1(1)\n    return p2\nend\nlocal function f1(p2)\n    f0(print, ipairs)\n    p2(2)\nend\nf1(print)",
+        // a call inlined into its own argument reads the outer argument before redeclaring it
+        "local function f0(p1)\n    p1(1)\n    return print\nend\nlocal n = 0\nrepeat\n    f0(f0(print))\n    n += 1\n    f0(print)\nuntil n > 1",
+    };
+    for (const auto &source : sources)
+        for (const int optimization : {1, 2})
+            for (const int debug : {1, 2})
+                replay_divergence::CheckSemanticParity(source, optimization, debug);
+
+    // an effect skipped for a later store stays ahead when that store does not fold; every fixture raises, after the trace
+    const std::string carried = "local v0 = { tostring }\nlocal v1 = game.value\nv0[-pairs(1)] = \"h\"\ntostring[(19i).field] = 22\n"
+                                "local v3 = string(print())\nv0[451] = v3(v1)";
+    const replay_divergence::CompileLevels levels(2, 2);
+    const Luau::CompileOptions options{2, 2};
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(carried);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    for (size_t i = 0; i < fuzz::kSemPreludeCount; ++i) {
+        INFO("fixture " << i);
+        const auto prelude = Luau::compile(fuzz::kSemPreludes[i], options);
+        const auto original = fuzz::RunLuauTrace(Luau::compile(carried, options), prelude);
+        const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.output, options), prelude);
+        CHECK(reconstructed.status == original.status);
+        CHECK(reconstructed.trace == original.trace);
+    }
 }

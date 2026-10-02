@@ -83,13 +83,13 @@ void ASTLifter::ConsumeInlinedDefs(const LiftedOperand &operand) {
     if (operand.type != LiftedOperandType::Register)
         return;
     auto *def = m_currentFunction->GetDefinition(operand);
-    if (!def || def->operation == LiftedOperation::PHI || m_foldConsumedDefs.contains(def->instructionIndex))
+    if (!def || def->operation == LiftedOperation::PHI || m_emission.FoldConsumed(def->instructionIndex))
         return;
     // a method setup is part of the call expression that consumes it
     const bool callSetup = def->operation == LiftedOperation::NAMECALL || def->operation == LiftedOperation::NAMECALLUDATA;
     if (!callSetup && !ShouldInline(def))
         return;
-    m_foldConsumedDefs.insert(def->instructionIndex);
+    m_emission.MarkFoldConsumed(def->instructionIndex);
     ConsumeInlinedInputs(*def);
 }
 
@@ -303,48 +303,79 @@ bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
 bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     if (!inst || inst->operands.size() < 1)
         return false;
-
     if (inst->operation == LiftedOperation::GETVARARGS && inst->operands.size() > 1 && inst->operands[1].value.imm.n > 2)
         return false;
-
     if (m_compoundInlined.contains(inst))
         return true;
+    if (MustMaterialize(inst))
+        return false;
+    if (const auto constructor = InlinesConstructor(inst))
+        return *constructor;
+    switch (inst->operation) {
+    case LiftedOperation::CALL:
+    case LiftedOperation::CALLFB:
+    case LiftedOperation::NAMECALL:
+        return InlinesCall(inst);
+    case LiftedOperation::MOVE:
+        return InlinesCopy(inst);
+    default:
+        return InlinesValue(inst);
+    }
+}
 
+bool ASTLifter::SingleUse(const LiftedInstruction *inst) const {
+    if (inst->operands[0].type != LiftedOperandType::Register)
+        return false;
+    const auto *user = SoleUser({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion});
+    return m_currentFunction->IsSingleUse(inst->operands[0]) || (user && user->operation == LiftedOperation::SETLIST);
+}
+
+bool ASTLifter::MustMaterialize(const LiftedInstruction *inst) {
     for (size_t i = 1; i < inst->operands.size(); ++i)
         if (IsDiamondBoolLoad(inst->operands[i]))
-            return false;
-
-    const auto onlyUser = [&](const SSARef &ref) -> const LiftedInstruction * {
-        const auto *user = SoleUser(ref);
-        if (!user || m_currentFunction->users.at(ref).size() == 1)
-            return user;
-        if (user->operation != LiftedOperation::SETLIST)
-            return nullptr;
-        return std::ranges::any_of(SetListElements(*user), [&](const LiftedOperand &element) { return IsDiamondBoolLoad(element); }) ? user : nullptr;
-    };
-    bool singleUse = false;
-    if (inst->operands[0].type == LiftedOperandType::Register) {
-        const auto *user = SoleUser({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion});
-        singleUse = m_currentFunction->IsSingleUse(inst->operands[0]) || (user && user->operation == LiftedOperation::SETLIST);
-    }
+            return true;
 
     // loop-cond consumer from another block: inlining would move this call into the loop
     if (m_forcedMaterialization.contains(inst))
-        return false;
+        return true;
+
+    // a use inside a loop the def is outside of would run the def on every iteration
+    if (inst->operation != LiftedOperation::LOAD && inst->operands[0].type == LiftedOperandType::Register)
+        if (const auto users = m_currentFunction->users.find({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion});
+            users != m_currentFunction->users.end())
+            for (const auto *user : users->second) {
+                if (user->operation == LiftedOperation::FORNPREP || user->operation == LiftedOperation::FORNLOOP ||
+                    user->operation == LiftedOperation::FORGPREP || user->operation == LiftedOperation::FORGPREP_NEXT ||
+                    user->operation == LiftedOperation::FORGPREP_INEXT || user->operation == LiftedOperation::FORGLOOP)
+                    continue;
+                const int32_t defBlock = BlockOf(inst), useBlock = BlockOf(user);
+                if (defBlock < 0 || useBlock < 0)
+                    continue;
+                // a copy of a local the loop never writes reads the same value on every iteration
+                const bool invariantCopy =
+                    inst->operation == LiftedOperation::MOVE && inst->operands.size() > 1 && inst->operands[1].type == LiftedOperandType::Register;
+                if (std::ranges::none_of(m_loopsOfBlock[useBlock], [&](uint32_t index) {
+                        const auto &loop = m_loops[index];
+                        return !loop.blocks[defBlock] && !(invariantCopy && !loop.writes.test(inst->operands[1].value.reg));
+                    }))
+                    continue;
+                ExplainKeep(inst, "its use repeats with a loop the definition is outside of", user);
+                return true;
+            }
 
     // a multi-value call's consumer follows it directly and must receive every value
     const bool multiValueCall = (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) && inst->operands.size() > 2 &&
                                 inst->operands[2].value.imm.n == 0;
     if (!multiValueCall && ReadLocationChanged(inst)) {
         ExplainKeep(inst, "the location it reads may be written before a use");
-        return false;
+        return true;
     }
 
     if (CanOperationRaise(inst->operation) && IsConstructorElement(inst) && inst->operands[0].type == LiftedOperandType::Register) {
         if (const auto *user = SoleUser({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion})) {
             if (BlockOf(inst) != BlockOf(user)) {
                 ExplainKeep(inst, "constructor consumer is in another CFG block", user);
-                return false;
+                return true;
             }
 
             const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
@@ -359,7 +390,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                         if (namedOperand(inst->operands[i]) &&
                             std::ranges::any_of(defs->second, [&](const SSARef &defined) { return defined.regIndex == inst->operands[i].value.reg; })) {
                             ExplainKeep(inst, "constructor operand register is overwritten before population", user, &instructions[k]);
-                            return false;
+                            return true;
                         }
 
             if (user->operation == LiftedOperation::SETLIST)
@@ -367,7 +398,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                     const auto *def = m_currentFunction->GetDefinition(element);
                     if (def && def->instructionIndex > inst->instructionIndex && def->instructionIndex < user->instructionIndex && !ShouldInline(def)) {
                         ExplainKeep(inst, "later constructor element must stay materialized", user, def);
-                        return false;
+                        return true;
                     }
                 }
         }
@@ -377,11 +408,11 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     if (inst->operands[0].type == LiftedOperandType::Register) {
         const SSARef defRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
         if (m_referenceCapturedValues.contains(defRef))
-            return false;
+            return true;
         if (auto it = m_currentFunction->users.find(defRef); it != m_currentFunction->users.end())
             for (const auto *user : it->second)
                 if (user && user->operation == LiftedOperation::CAPTURE && user->operands.size() >= 1 && user->operands[0].value.imm.n <= 1)
-                    return false;
+                    return true;
     }
 
     switch (inst->operation) {
@@ -394,17 +425,16 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     case LiftedOperation::SETLIST:
     case LiftedOperation::NEWCLASSMEMBER:
     case LiftedOperation::NEWCLASS:
-        return false;
+        return true;
     default:
         break;
     }
 
-    if (inst->operands[0].type == LiftedOperandType::Register && inst->operation != LiftedOperation::MOVE) {
-        SSARef defRef{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
-        if (m_phiConsumers.contains(defRef))
-            return false;
-    }
+    return inst->operands[0].type == LiftedOperandType::Register && inst->operation != LiftedOperation::MOVE &&
+           m_phiConsumers.contains({inst->operands[0].value.reg, inst->operands[0].ssaVersion});
+}
 
+std::optional<bool> ASTLifter::InlinesConstructor(const LiftedInstruction *inst) {
     // a constructor nothing else reads is still built once; inlined into its own stores it would render twice
     if ((inst->operation == LiftedOperation::NEWTABLE || inst->operation == LiftedOperation::DUPTABLE) &&
         inst->operands[0].type == LiftedOperandType::Register) {
@@ -451,10 +481,9 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
                     ExplainKeep(inst, "constructor list item is a merged value", user);
                     return false;
                 }
-            std::vector<int32_t> folded;
-            LiftTableLiteral(*inst, &folded);
+            const auto plan = PlanTableLiteral(*inst, true);
             for (const auto *user : users->second)
-                if (ownStore(user) && !std::ranges::contains(folded, user->instructionIndex)) {
+                if (ownStore(user) && (!plan || std::ranges::none_of(plan->stores, [&](const auto &store) { return store.index == user->instructionIndex; }))) {
                     ExplainKeep(inst, "a population store does not fold into the constructor", user);
                     return false;
                 }
@@ -509,87 +538,100 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
             return !InliningReordersEffect(inst, *realUsers.begin());
         }
     }
+    return std::nullopt;
+}
 
-    if (inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB || inst->operation == LiftedOperation::NAMECALL) {
-        if ((inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) && inst->operands[2].value.imm.n == 0)
-            return true;
+bool ASTLifter::InlinesCall(const LiftedInstruction *inst) {
+    if ((inst->operation == LiftedOperation::CALL || inst->operation == LiftedOperation::CALLFB) && inst->operands[2].value.imm.n == 0)
+        return true;
 
-        if (inst->operation == LiftedOperation::NAMECALL) {
-            const int regA = inst->operands[0].value.reg;
-            if (const auto defsIt = m_defsByInstruction.find(inst); defsIt != m_defsByInstruction.end())
-                for (const auto &ref : defsIt->second) {
-                    if (ref.regIndex != regA)
-                        continue;
-                    const auto &users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
-                    return users.size() == 1 && EvaluatesInlinedCall(users[0]->operation, false) && !InliningReordersEffect(inst, users[0]);
-                }
-            return false;
-        }
-
-        int usedDefs = 0;
-        SSARef usedRef;
+    if (inst->operation == LiftedOperation::NAMECALL) {
+        const int regA = inst->operands[0].value.reg;
         if (const auto defsIt = m_defsByInstruction.find(inst); defsIt != m_defsByInstruction.end())
             for (const auto &ref : defsIt->second) {
-                if (m_currentFunction->useCounts[ref] > 0) {
-                    usedDefs++;
-                    usedRef = ref;
-                }
+                if (ref.regIndex != regA)
+                    continue;
+                const auto &users = m_currentFunction->users[{static_cast<uint8_t>(regA), ref.version}];
+                return users.size() == 1 && EvaluatesInlinedCall(users[0]->operation, false) && !InliningReordersEffect(inst, users[0]);
             }
-
-        if (usedDefs > 1) {
-            ExplainKeep(inst, "multiple call results have consumers");
-            return false;
-        }
-        if (usedDefs == 0)
-            return false;
-
-        // a SETLIST records its base register twice; count distinct user instructions
-        const auto &rawUsers = m_currentFunction->users[usedRef];
-        std::unordered_set<const LiftedInstruction *> users(rawUsers.begin(), rawUsers.end());
-        if (users.size() == 1 && rawUsers.size() > 1 && (*users.begin())->operation != LiftedOperation::SETLIST) {
-            ExplainKeep(inst, "call result is read more than once by its consumer", *users.begin());
-            return false;
-        }
-        if (users.size() == 1) {
-            // `x = f()` into an existing local lands in a temporary and moves down into the local's register
-            const auto *user = *users.begin();
-            if (BeginsDebugLocal(*inst, usedRef.regIndex) && IsTableStore(*user) && user->operands.size() > 1 &&
-                StoredTable(*user).value.reg == usedRef.regIndex && StoredTable(*user).ssaVersion == usedRef.version)
-                return false;
-            const bool assignsLocal = user->operation == LiftedOperation::MOVE && user->operands.size() > 1 &&
-                                      user->operands[1].type == LiftedOperandType::Register && user->operands[0].value.reg < user->operands[1].value.reg;
-            if (EvaluatesInlinedCall(user->operation, true) || assignsLocal)
-                return !InliningReordersEffect(inst, *users.begin());
-            ExplainKeep(inst, "call consumer is not an inlineable operation", *users.begin());
-        } else {
-            ExplainKeep(inst, "call result has multiple distinct consumers");
-        }
         return false;
     }
 
-    if (inst->operation == LiftedOperation::MOVE) {
-        if (!singleUse || m_currentFunction->IsConsumedByPhi(inst->operands[0]))
-            return false;
-        // registers are allocated as a stack, so a copy into a lower register writes a live local: `x = value`
-        if (inst->operands.size() > 1 && inst->operands[1].type == LiftedOperandType::Register && inst->operands[0].value.reg < inst->operands[1].value.reg)
-            return false;
+    int usedDefs = 0;
+    SSARef usedRef;
+    if (const auto defsIt = m_defsByInstruction.find(inst); defsIt != m_defsByInstruction.end())
+        for (const auto &ref : defsIt->second) {
+            if (m_currentFunction->useCounts[ref] > 0) {
+                usedDefs++;
+                usedRef = ref;
+            }
+        }
 
-        const SSARef defRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
-        const auto usersIt = m_currentFunction->users.find(defRef);
-        if (inst->operands.size() < 2 || inst->operands[1].type != LiftedOperandType::Register || usersIt == m_currentFunction->users.end() ||
-            usersIt->second.size() != 1)
-            return true;
-
-        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
-        const int sourceReg = inst->operands[1].value.reg;
-        for (int32_t k = inst->instructionIndex + 1; k < usersIt->second.front()->instructionIndex; ++k)
-            if (const auto defsIt = m_defsByInstruction.find(&instructions[k]); defsIt != m_defsByInstruction.end())
-                for (const auto &ref : defsIt->second)
-                    if (ref.regIndex == sourceReg)
-                        return false;
-        return true;
+    if (usedDefs > 1) {
+        ExplainKeep(inst, "multiple call results have consumers");
+        return false;
     }
+    if (usedDefs == 0)
+        return false;
 
+    // a SETLIST records its base register twice; count distinct user instructions
+    const auto &rawUsers = m_currentFunction->users[usedRef];
+    std::unordered_set<const LiftedInstruction *> users(rawUsers.begin(), rawUsers.end());
+    if (users.size() == 1 && rawUsers.size() > 1 && (*users.begin())->operation != LiftedOperation::SETLIST) {
+        ExplainKeep(inst, "call result is read more than once by its consumer", *users.begin());
+        return false;
+    }
+    if (users.size() == 1) {
+        // `x = f()` into an existing local lands in a temporary and moves down into the local's register
+        const auto *user = *users.begin();
+        if (BeginsDebugLocal(*inst, usedRef.regIndex) && IsTableStore(*user) && user->operands.size() > 1 &&
+            StoredTable(*user).value.reg == usedRef.regIndex && StoredTable(*user).ssaVersion == usedRef.version)
+            return false;
+        const bool assignsLocal = user->operation == LiftedOperation::MOVE && user->operands.size() > 1 &&
+                                  user->operands[1].type == LiftedOperandType::Register && user->operands[0].value.reg < user->operands[1].value.reg;
+        if (EvaluatesInlinedCall(user->operation, true) || assignsLocal)
+            return !InliningReordersEffect(inst, *users.begin());
+        ExplainKeep(inst, "call consumer is not an inlineable operation", *users.begin());
+    } else {
+        ExplainKeep(inst, "call result has multiple distinct consumers");
+    }
+    return false;
+}
+
+bool ASTLifter::InlinesCopy(const LiftedInstruction *inst) {
+    if (!SingleUse(inst) || m_currentFunction->IsConsumedByPhi(inst->operands[0]))
+        return false;
+    // registers are allocated as a stack, so a copy into a lower register writes a live local: `x = value`
+    if (inst->operands.size() > 1 && inst->operands[1].type == LiftedOperandType::Register && inst->operands[0].value.reg < inst->operands[1].value.reg)
+        return false;
+
+    const SSARef defRef{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
+    const auto usersIt = m_currentFunction->users.find(defRef);
+    if (inst->operands.size() < 2 || inst->operands[1].type != LiftedOperandType::Register || usersIt == m_currentFunction->users.end() ||
+        usersIt->second.size() != 1)
+        return true;
+
+    const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+    const int sourceReg = inst->operands[1].value.reg;
+    for (int32_t k = inst->instructionIndex + 1; k < usersIt->second.front()->instructionIndex; ++k)
+        if (const auto defsIt = m_defsByInstruction.find(&instructions[k]); defsIt != m_defsByInstruction.end())
+            for (const auto &ref : defsIt->second)
+                if (ref.regIndex == sourceReg)
+                    return false;
+    return true;
+}
+
+const LiftedInstruction *ASTLifter::OnlyUser(const SSARef &ref) const {
+    const auto *user = SoleUser(ref);
+    if (!user || m_currentFunction->users.at(ref).size() == 1)
+        return user;
+    if (user->operation != LiftedOperation::SETLIST)
+        return nullptr;
+    return std::ranges::any_of(SetListElements(*user), [&](const LiftedOperand &element) { return IsDiamondBoolLoad(element); }) ? user : nullptr;
+}
+
+bool ASTLifter::InlinesValue(const LiftedInstruction *inst) {
+    const bool singleUse = SingleUse(inst);
     // Keep raising operations at their original position so error order matches bytecode evaluation.
     const auto inlineTreeCanRaise = [&](auto &&self, const LiftedInstruction *node, int depth) -> bool {
         if (!node)
@@ -625,7 +667,10 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
     const bool raisesWhenInlined = CanOperationRaise(inst->operation) || mayMoveRaisingInput;
     const bool defCanRaise = raisesWhenInlined;
     if (defCanRaise && inst->operands[0].type == LiftedOperandType::Register && singleUse) {
-        const auto *user = onlyUser({static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion});
+        const SSARef ref{static_cast<uint8_t>(inst->operands[0].value.reg), inst->operands[0].ssaVersion};
+        const auto *user = OnlyUser(ref);
+        if (const auto *setList = SoleUser(ref); !user && setList && setList->operation == LiftedOperation::SETLIST)
+            user = setList;
         if (!user) {
             ExplainKeep(inst, "raising expression has no unique terminal consumer");
             return false;
@@ -677,7 +722,7 @@ bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
         if (inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE)
             return false;
         const SSARef ref{inst->operands[0].value.reg, inst->operands[0].ssaVersion};
-        const auto *user = onlyUser(ref);
+        const auto *user = OnlyUser(ref);
         // a raising value already passed InliningReordersEffect above
         if (user && !defCanRaise && InputRebound(inst, user, -1, false))
             return false;
@@ -958,6 +1003,60 @@ bool ASTLifter::InputRebound(const LiftedInstruction *def, const LiftedInstructi
     return rebound;
 }
 
+bool ASTLifter::ReachAvoiding(std::vector<uint32_t> pending, bool forward, int32_t avoid, boost::unordered_flat_set<uint32_t> &seen) const {
+    constexpr size_t kMaxBlocks = 512;
+    const auto &blocks = m_currentFunction->basicBlocks;
+    while (!pending.empty()) {
+        const uint32_t id = pending.back();
+        pending.pop_back();
+        if (static_cast<int32_t>(id) == avoid || id >= blocks.size() || !seen.insert(id).second)
+            continue;
+        if (seen.size() > kMaxBlocks)
+            return false;
+        for (const uint32_t next : forward ? blocks[id].successors : blocks[id].predecessors)
+            pending.push_back(next);
+    }
+    return true;
+}
+
+void ASTLifter::ComputeLoopBodies() {
+    const auto &blocks = m_currentFunction->basicBlocks;
+    m_loopsOfBlock.assign(blocks.size(), {});
+    boost::unordered_flat_map<uint32_t, size_t> byHeader;
+    for (const auto &latch : blocks) {
+        if (latch.bType != BlockType::LoopLatch || !latch.loopHeader || *latch.loopHeader >= blocks.size())
+            continue;
+        const uint32_t header = *latch.loopHeader;
+        const auto [it, fresh] = byHeader.try_emplace(header, m_loops.size());
+        if (fresh)
+            m_loops.push_back({std::vector<bool>(blocks.size(), false), {}});
+        auto &loop = m_loops[it->second];
+        loop.blocks[header] = true;
+        std::vector<uint32_t> pending{latch.dwBlockId};
+        while (!pending.empty()) {
+            const uint32_t id = pending.back();
+            pending.pop_back();
+            if (id >= blocks.size() || loop.blocks[id])
+                continue;
+            loop.blocks[id] = true;
+            for (const uint32_t previous : blocks[id].predecessors)
+                pending.push_back(previous);
+        }
+    }
+    for (size_t index = 0; index < m_loops.size(); ++index) {
+        auto &loop = m_loops[index];
+        for (uint32_t id = 0; id < blocks.size(); ++id) {
+            if (!loop.blocks[id])
+                continue;
+            m_loopsOfBlock[id].push_back(static_cast<uint32_t>(index));
+            for (const auto *instruction = blocks[id].lpHead; instruction && instruction <= blocks[id].lpTail; ++instruction)
+                if (const auto defs = m_defsByInstruction.find(instruction); defs != m_defsByInstruction.end())
+                    for (const auto &ref : defs->second)
+                        loop.writes.set(ref.regIndex);
+        }
+    }
+}
+
 bool ASTLifter::ChangedOnPath(const LiftedInstruction *def, const LiftedInstruction *use, const std::function<bool(const LiftedInstruction &)> &changes) {
     const auto &blocks = m_currentFunction->basicBlocks;
     const int32_t defId = BlockOf(def), useId = BlockOf(use);
@@ -974,22 +1073,8 @@ bool ASTLifter::ChangedOnPath(const LiftedInstruction *def, const LiftedInstruct
     if (scan(def + 1, blocks[defId].lpTail + 1))
         return true;
 
-    constexpr size_t kMaxBlocks = 512;
-    const auto walk = [&](std::vector<uint32_t> pending, bool forward, boost::unordered_flat_set<uint32_t> &seen) {
-        while (!pending.empty()) {
-            const uint32_t id = pending.back();
-            pending.pop_back();
-            if (id == static_cast<uint32_t>(defId) || id >= blocks.size() || !seen.insert(id).second)
-                continue;
-            if (seen.size() > kMaxBlocks)
-                return false;
-            for (const uint32_t next : forward ? blocks[id].successors : blocks[id].predecessors)
-                pending.push_back(next);
-        }
-        return true;
-    };
     boost::unordered_flat_set<uint32_t> after, before;
-    if (!walk(blocks[defId].successors, true, after) || !walk({static_cast<uint32_t>(useId)}, false, before))
+    if (!ReachAvoiding(blocks[defId].successors, true, defId, after) || !ReachAvoiding({static_cast<uint32_t>(useId)}, false, defId, before))
         return true;
     for (const uint32_t id : after)
         if (id != static_cast<uint32_t>(useId) && before.contains(id) && blocks[id].lpHead && scan(blocks[id].lpHead, blocks[id].lpTail + 1))

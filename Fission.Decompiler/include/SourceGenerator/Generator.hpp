@@ -425,6 +425,11 @@ class SourceGenerator : public Visitor {
                 }
                 buffer << " = ";
             }
+            if (lpNode->bSpreadsVarArgs) {
+                buffer << "...";
+                this->NextLine();
+                return;
+            }
             EmitPrefix(lpNode->callee);
             buffer << "(";
             for (size_t i = 0; i < lpNode->arguments.size(); i++) {

@@ -116,8 +116,8 @@ std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterializ
     m_definedRegisters.insert(reg);
 
     // Consume both boolean loads so block lifting does not re-emit them.
-    m_processedInstructions.insert(fLoad->instructionIndex);
-    m_processedInstructions.insert(tLoad->instructionIndex);
+    m_emission.MarkEmitted(fLoad->instructionIndex);
+    m_emission.MarkEmitted(tLoad->instructionIndex);
 
     return BoolMaterialization{assignment, mIdx};
 }
@@ -797,7 +797,25 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         const int32_t join = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse);
         if (join < 0 || static_cast<uint32_t>(join) <= entryId)
             return std::nullopt;
-        const auto testId = static_cast<uint32_t>(join);
+        auto testId = static_cast<uint32_t>(join);
+        // a value tested only to pick an enclosing value (`if (if b then x else y) then 1 else 2`) belongs to that outer term
+        for (int depth = 0; depth < 8; ++depth) {
+            const auto &inner = blocks[testId];
+            if (inner.bType != BlockType::IfHeader || !inner.ifStatementTrue || !inner.ifStatementFalse || inner.phiNodes.size() != 1)
+                break;
+            const auto &out = inner.phiNodes.front().operands[0];
+            const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(out.value.reg), out.ssaVersion});
+            if (users == m_currentFunction->users.end() ||
+                !std::ranges::all_of(users->second, [&](const LiftedInstruction *user) { return user == inner.lpTail; }))
+                break;
+            const int32_t outer = FindMergeBlock(*inner.ifStatementTrue, *inner.ifStatementFalse);
+            if (outer <= static_cast<int32_t>(testId) || static_cast<size_t>(outer) >= blocks.size())
+                break;
+            const auto &candidate = blocks[outer];
+            if (candidate.bType != BlockType::IfHeader || candidate.phiNodes.size() != 1 || candidate.bTerminator != BlockTerminator::Conditional)
+                break;
+            testId = static_cast<uint32_t>(outer);
+        }
         const auto &test = blocks[testId];
         if (test.bType != BlockType::IfHeader || !test.ifStatementTrue || !test.ifStatementFalse || test.phiNodes.size() != 1 || !test.lpTail ||
             test.bTerminator != BlockTerminator::Conditional)
@@ -814,8 +832,15 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             if (id < entryId || id > testId || term.region.size() >= 16)
                 return std::nullopt;
             const auto &block = blocks[id];
+            // a nested value joins in its own block, read only by that block's test
+            const auto innerJoin = [&] {
+                const auto &out = block.phiNodes.front().operands[0];
+                const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(out.value.reg), out.ssaVersion});
+                return block.bTerminator == BlockTerminator::Conditional && users != m_currentFunction->users.end() &&
+                       std::ranges::all_of(users->second, [&](const LiftedInstruction *user) { return user == block.lpTail; });
+            };
             if (!block.lpHead || block.successors.empty() || block.phiNodes.size() > 1 ||
-                (block.phiNodes.size() == 1 && block.phiNodes.front().operands[0].value.reg != valueReg))
+                (block.phiNodes.size() == 1 && block.phiNodes.front().operands[0].value.reg != valueReg && !innerJoin()))
                 return std::nullopt;
             for (const uint32_t successor : block.successors) {
                 if (successor <= id)
@@ -836,21 +861,21 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         // the joined value is read only by the test
         if (const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(valueReg), phiOut.ssaVersion}); users != m_currentFunction->users.end())
             for (const auto *user : users->second)
-                if (BlockOf(user) != join)
+                if (BlockOf(user) != static_cast<int32_t>(testId))
                     return std::nullopt;
         // every write of the value register is a value the expression reads; everything else inlines into it
-        std::set<int32_t> readVersions;
+        std::set<std::pair<int32_t, int32_t>> readVersions;
         for (const uint32_t id : term.region) {
             for (const auto &phi : blocks[id].phiNodes)
                 for (size_t i = 1; i < phi.operands.size(); ++i)
-                    readVersions.insert(phi.operands[i].ssaVersion);
+                    readVersions.insert({phi.operands[0].value.reg, phi.operands[i].ssaVersion});
             const auto *tail = blocks[id].lpTail;
             if ((tail->operation == LiftedOperation::JUMPIF || tail->operation == LiftedOperation::JUMPIFNOT) && !tail->operands.empty() &&
                 tail->operands[0].type == LiftedOperandType::Register && tail->operands[0].value.reg == valueReg)
-                readVersions.insert(tail->operands[0].ssaVersion);
+                readVersions.insert({valueReg, tail->operands[0].ssaVersion});
         }
         for (size_t i = 1; i < test.phiNodes.front().operands.size(); ++i)
-            readVersions.insert(test.phiNodes.front().operands[i].ssaVersion);
+            readVersions.insert({valueReg, test.phiNodes.front().operands[i].ssaVersion});
         std::vector<uint32_t> checked(term.region.begin(), term.region.end());
         checked.push_back(testId);
         for (const uint32_t id : checked) {
@@ -860,10 +885,11 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
                     continue;
                 if (inst == block.lpTail && (block.bTerminator == BlockTerminator::Conditional || inst->operation == LiftedOperation::JUMP))
                     continue;
-                if (!inst->operands.empty() && inst->operands[0].type == LiftedOperandType::Register && inst->operands[0].value.reg == valueReg && id != testId) {
-                    if (!readVersions.contains(inst->operands[0].ssaVersion))
+                if (!inst->operands.empty() && inst->operands[0].type == LiftedOperandType::Register && id != testId) {
+                    if (readVersions.contains({inst->operands[0].value.reg, inst->operands[0].ssaVersion}))
+                        continue;
+                    if (inst->operands[0].value.reg == valueReg)
                         return std::nullopt;
-                    continue;
                 }
                 if (!RendersInline(inst))
                     return std::nullopt;

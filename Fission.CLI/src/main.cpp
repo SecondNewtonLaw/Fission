@@ -101,6 +101,8 @@ int main(int argc, char **argv) {
         outputFlags |= DecompilerFlags::OptimizeIR;
     if (debugNotes)
         outputFlags |= DecompilerFlags::FissionDebugNotes;
+    if (std::any_of(argv + 1, argv + argc, [](const char *arg) { return std::strcmp(arg, "--recover-inline") == 0; }))
+        outputFlags |= DecompilerFlags::RecoverInline;
     int testOptimizationLevel = 1, testDebugLevel = 2;
     for (int i = 1; i + 1 < argc; ++i)
         if (std::strcmp(argv[i], "--opt") == 0)

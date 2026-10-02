@@ -132,6 +132,12 @@ struct LiftedFunction {
     DeserializedFunction *lpDeserialized;
     // CLOSEUPVALS lifts to NOP; (instruction index, lowest closed register) marks where captured locals end
     std::vector<std::pair<int32_t, uint8_t>> upvalueCloses{};
+    // per instruction: the InlineSourceMap source whose body the compiler inlined there, or -1
+    std::vector<int32_t> inlineOrigin{};
+    // per instruction: index into recoveredCalls of the call rebuilt from an inlined body, or -1
+    std::vector<int32_t> recoveredCallAt{};
+    // InlineSourceMap source of each rebuilt call
+    std::vector<int32_t> recoveredCalls{};
 };
 
 class BytecodeLifter {

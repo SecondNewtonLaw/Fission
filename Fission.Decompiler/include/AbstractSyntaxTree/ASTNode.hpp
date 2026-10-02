@@ -164,6 +164,8 @@ class Statement : public ASTNode {
   public:
     // instruction index the lifter emitted this statement for, or -1
     int32_t originPc = -1;
+    // InlineSourceMap source whose inlined body the statement came from; -1 for the function's own code, -2 when unknown
+    int32_t inlineSource = -2;
 };
 class Expression : public Statement {
   public:
@@ -510,6 +512,8 @@ class CallExpressionNode : public Expression {
     bool bIsLocalDeclaration = true;
     // Parentheses truncate a fixed-result call in a spread position.
     bool bAdjustToOne = false;
+    // `local a, b = ...`: `rets` bind the varargs; callee and arguments are unused
+    bool bSpreadsVarArgs = false;
 
     CallExpressionNode(
         std::shared_ptr<Expression> func, std::vector<std::shared_ptr<Expression>> args, std::vector<std::shared_ptr<Expression>> rets, bool bIsVariadicCall,

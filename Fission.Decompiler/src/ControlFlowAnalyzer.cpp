@@ -47,35 +47,21 @@ bool ControlFlowAnalyzer::IsTerminator(LiftedOperation operation) {
     }
 }
 
-int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstruction) {
-    if (lpInstruction->operation == LiftedOperation::NOP)
-        return 1;
-    ASSERT(!lpInstruction->operands.empty(), "no operands available, cannot calculate jump offset.");
-
-    switch (lpInstruction->operation) {
+std::optional<std::pair<size_t, int32_t>> ControlFlowAnalyzer::JumpOperand(LiftedOperation operation) {
+    switch (operation) {
     case LiftedOperation::JUMP:
-        return lpInstruction->operands[0].value.imm.n;
-
+        return std::pair<size_t, int32_t>{0, 0};
     case LiftedOperation::LOADNJUMP:
-        return lpInstruction->operands[2].value.imm.n;
-
+        return std::pair<size_t, int32_t>{2, 0};
     case LiftedOperation::FORNPREP:
-        return lpInstruction->operands[1].value.imm.n;
+    case LiftedOperation::FORNLOOP:
+    case LiftedOperation::FORGLOOP:
+    case LiftedOperation::JUMPXEQK:
+    case LiftedOperation::CMPPROTO:
+        return std::pair<size_t, int32_t>{1, 0};
     case LiftedOperation::FORGPREP:
     case LiftedOperation::FORGPREP_INEXT:
     case LiftedOperation::FORGPREP_NEXT:
-        return lpInstruction->operands[1].value.imm.n + 1;
-
-    case LiftedOperation::FORNLOOP:
-    case LiftedOperation::FORGLOOP:
-        return lpInstruction->operands[1].value.imm.n;
-
-    case LiftedOperation::JUMPXEQK:
-        return lpInstruction->operands[1].value.imm.n;
-
-    case LiftedOperation::CMPPROTO:
-        return lpInstruction->operands[1].value.imm.n;
-
     case LiftedOperation::JUMPIF:
     case LiftedOperation::JUMPIFNOT:
     case LiftedOperation::JUMPIFEQ:
@@ -84,11 +70,18 @@ int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstructio
     case LiftedOperation::JUMPIFNOTLE:
     case LiftedOperation::JUMPIFLT:
     case LiftedOperation::JUMPIFNOTLT:
-        return lpInstruction->operands[1].value.imm.n + 1;
-
+        return std::pair<size_t, int32_t>{1, 1};
     default:
-        return 0;
+        return std::nullopt;
     }
+}
+
+int32_t ControlFlowAnalyzer::GetJumpOffset(const LiftedInstruction *lpInstruction) {
+    if (lpInstruction->operation == LiftedOperation::NOP)
+        return 1;
+    ASSERT(!lpInstruction->operands.empty(), "no operands available, cannot calculate jump offset.");
+    const auto jump = JumpOperand(lpInstruction->operation);
+    return jump ? lpInstruction->operands[jump->first].value.imm.n + jump->second : 0;
 }
 
 int32_t ControlFlowAnalyzer::GetBlockIdAtInstruction(const LiftedInstruction *lpTargetInstruction, const std::map<LiftedInstruction *, int32_t> &leaderMap) {
@@ -1293,10 +1286,33 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             return false;
         };
 
+        // a value arm jumping over its sibling into an `until` test: both arms of one diamond meet in the latch
+        const auto armOverSibling = [&] {
+            const auto &latch = blocks[innermostLatch];
+            if (targetId != innermostLatch || latch.bTerminator != BlockTerminator::Conditional)
+                return false;
+            const BasicBlock *arm = &blk;
+            for (int hops = 0; hops < 8 && arm->predecessors.size() == 1; ++hops) {
+                const auto &previous = blocks[arm->predecessors.front()];
+                if (previous.bTerminator == BlockTerminator::Conditional || previous.successors.size() != 1)
+                    break;
+                arm = &previous;
+            }
+            if (arm->predecessors.size() != 1)
+                return false;
+            const auto &test = blocks[arm->predecessors.front()];
+            if (test.bTerminator != BlockTerminator::Conditional || test.successors.size() != 2)
+                return false;
+            const uint32_t siblingId = test.successors.front() == arm->dwBlockId ? test.successors.back() : test.successors.front();
+            const auto &sibling = blocks[siblingId];
+            return sibling.predecessors.size() == 1 && sibling.successors.size() == 1 && sibling.successors.front() == static_cast<uint32_t>(targetId) &&
+                   sibling.lpTail + 1 == latch.lpHead && blk.lpTail < sibling.lpHead;
+        };
+
         if (innermostExit >= 0 && targetId == innermostExit) {
             blk.bType = BlockType::Break;
             Explain(blk, "structure: forward JUMP targets innermost loop exit B{}; classify break", targetId);
-        } else if (dominates(innermostHeader, targetId) && reachesLatchDirectly(targetId)) {
+        } else if (dominates(innermostHeader, targetId) && reachesLatchDirectly(targetId) && !armOverSibling()) {
             blk.bType = BlockType::Continue;
             Explain(blk, "structure: forward JUMP reaches loop latch B{} of header B{}; classify continue", innermostLatch, innermostHeader);
         }
@@ -1493,6 +1509,19 @@ bool ControlFlowAnalyzer::FoldConditionValues(AnalyzedFunction &func) {
             continue;
         }
         const auto &taken = blocks[*header.ifStatementTrue], &fallthrough = blocks[*header.ifStatementFalse];
+        // `if x then else end`: a truthiness test whose arms are empty decides nothing
+        if ((branch->operation == LiftedOperation::JUMPIF || branch->operation == LiftedOperation::JUMPIFNOT) && taken.lpHead > branch) {
+            auto *cursor = branch + 1;
+            while (cursor < taken.lpHead && cursor->operation == LiftedOperation::NOP)
+                ++cursor;
+            if (cursor == taken.lpHead) {
+                branch->operation = LiftedOperation::NOP;
+                branch->operands.clear();
+                Explain(header, "optimize: both arms of a truthiness test are empty; branch dropped");
+                changed = true;
+                continue;
+            }
+        }
         auto *falseLoad = realInstruction(fallthrough);
         auto *trueLoad = realInstruction(taken);
         if (!boolLoad(falseLoad, LiftedOperation::LOADNJUMP) || !boolLoad(trueLoad, LiftedOperation::LOAD) ||

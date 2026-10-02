@@ -2,6 +2,7 @@
 
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
 
 #include <algorithm>
@@ -295,86 +296,21 @@ class IfExpressionFolder {
     }
 
     void FoldChildren(const std::shared_ptr<Statement> &s) {
-        if (!s)
-            return;
-        if (auto iff = std::dynamic_pointer_cast<IfStatementNode>(s)) {
-            FoldExpression(iff->condition);
-            if (iff->thenBranch)
-                Fold(iff->thenBranch->body);
-            if (iff->elseBranch)
-                Fold(iff->elseBranch->body);
-        } else if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(s)) {
-            FoldExpression(w->condition);
-            if (w->body)
-                Fold(w->body->body);
-        } else if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(s)) {
-            FoldExpression(r->condition);
-            if (r->body)
-                Fold(r->body->body);
-        } else if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(s)) {
-            FoldExpression(fn->startVariable);
-            FoldExpression(fn->increaseBy);
-            FoldExpression(fn->maxIncreased);
-            if (fn->lpLoopBody)
-                Fold(fn->lpLoopBody->body);
-        } else if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(s)) {
-            FoldExpression(fg->generator);
-            FoldExpression(fg->state);
-            FoldExpression(fg->index);
-            if (fg->body)
-                Fold(fg->body->body);
-        } else if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
+        if (auto fdn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s)) {
             if (fdn->lpFunctionBody)
                 FoldFunction(fdn->lpFunctionBody->body);
-        } else if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(s)) {
-            Fold(blk->body);
-        } else if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(s)) {
-            FoldExpression(asn->left);
-            FoldExpression(asn->right);
-        } else if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
-            FoldExpression(decl->value);
-        } else if (auto expr = std::dynamic_pointer_cast<ExpressionStatementNode>(s)) {
-            FoldExpression(expr->expression);
-        } else if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(s)) {
-            for (auto &value : ret->returnValues)
-                FoldExpression(value);
+            return;
         }
+        ForEachStatementExpression(s, [&](const std::shared_ptr<Expression> &expr) { FoldExpression(expr); });
+        ForEachChildBlock(s, [&](std::vector<std::shared_ptr<Statement>> &body) { Fold(body); });
     }
 
     void FoldExpression(const std::shared_ptr<Expression> &expr) {
         if (!expr)
             return;
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr); fn && fn->lpFunctionBody) {
+        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr); fn && fn->lpFunctionBody)
             FoldFunction(fn->lpFunctionBody->body);
-        } else if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            FoldExpression(call->callee);
-            for (auto &arg : call->arguments)
-                FoldExpression(arg);
-        } else if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            FoldExpression(nameCall->calledOn);
-            for (auto &arg : nameCall->arguments)
-                FoldExpression(arg);
-        } else if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-            FoldExpression(bin->left);
-            FoldExpression(bin->right);
-        } else if (auto bin = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
-            FoldExpression(bin->left);
-            FoldExpression(bin->right);
-        } else if (auto index = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            FoldExpression(index->left);
-            FoldExpression(index->right);
-        } else if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            FoldExpression(member->table);
-            FoldExpression(member->key);
-        } else if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            FoldExpression(un->operand);
-        } else if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (auto &value : tbl->expressions)
-                FoldExpression(value);
-        } else if (auto iff = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
-            FoldExpression(iff->condition);
-            FoldExpression(iff->thenExpr);
-            FoldExpression(iff->elseExpr);
-        }
+        else
+            ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { FoldExpression(child); });
     }
 };

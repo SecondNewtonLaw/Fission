@@ -536,6 +536,9 @@ class ControlFlowAnalyzer {
 
     void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
 
+    // operand holding a jump's relative offset and the bias GetJumpOffset adds to it
+    static std::optional<std::pair<size_t, int32_t>> JumpOperand(LiftedOperation operation);
+
     AnalyzedFunction DetermineBasicBlocks(LiftedFunction *lpLiftedFunction);
 
     void OptimizeGraph(AnalyzedFunction &func);

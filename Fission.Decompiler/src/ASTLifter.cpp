@@ -5,7 +5,9 @@
 #include "ASTLifter.hpp"
 #include "ASTLifterShared.hpp"
 
+#include "AbstractSyntaxTree/Clone.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
 #include "SSABuilder.hpp"
 #include "SafetyGuard.hpp"
@@ -309,25 +311,12 @@ static void ScanBinding(const std::vector<std::shared_ptr<Statement>> &statement
                 scanRets(call->rets, call->bIsLocalDeclaration);
             else if (const auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression))
                 scanRets(nameCall->rets, nameCall->bIsLocalDeclaration);
-        } else if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(statement)) {
-            for (const auto &arm : {branch->thenBranch, branch->elseBranch})
-                if (arm)
-                    ScanBinding(arm->body, name, declared, assigned);
-        } else if (const auto loop = std::dynamic_pointer_cast<WhileStatementNode>(statement); loop && loop->body) {
-            ScanBinding(loop->body->body, name, declared, assigned);
-        } else if (const auto repeat = std::dynamic_pointer_cast<RepeatStatementNode>(statement); repeat && repeat->body) {
-            ScanBinding(repeat->body->body, name, declared, assigned);
         } else if (const auto numeric = std::dynamic_pointer_cast<ForNumericNode>(statement)) {
             declared |= named(numeric->loopVariable);
-            if (numeric->lpLoopBody)
-                ScanBinding(numeric->lpLoopBody->body, name, declared, assigned);
         } else if (const auto generic = std::dynamic_pointer_cast<ForGeneralNode>(statement)) {
             declared |= std::ranges::any_of(generic->loopVariables, named);
-            if (generic->body)
-                ScanBinding(generic->body->body, name, declared, assigned);
-        } else if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(statement)) {
-            ScanBinding(block->body, name, declared, assigned);
         }
+        ForEachChildBlock(statement, [&](const std::vector<std::shared_ptr<Statement>> &body) { ScanBinding(body, name, declared, assigned); });
     }
 }
 
@@ -343,210 +332,8 @@ struct OriginStamp {
     }
 };
 
-static std::optional<int32_t> SourceLine(const DeserializedFunction &function, int32_t pc) {
-    if (function.lineinfo.empty() || pc < 0 || static_cast<size_t>(pc) >= function.instructions.size())
-        return std::nullopt;
-    const size_t offset = function.abslineinfoOffset + (static_cast<size_t>(pc) >> function.linegaplog2) * sizeof(int);
-    if (offset + sizeof(int) > function.lineinfo.size())
-        return std::nullopt;
-    int base = 0;
-    std::memcpy(&base, function.lineinfo.data() + offset, sizeof(int));
-    return base + function.lineinfo[pc];
-}
-
-std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder) {
-    auto map = std::make_shared<InlineSourceMap>();
-    const auto &functions = bytecode.functions;
-    map->sources.reserve(functions.size());
-    for (const auto &function : functions) {
-        int32_t lastLine = -1;
-        if (!function.lineinfo.empty() && !function.instructions.empty()) {
-            map->hasLineInfo = true;
-            // the implicit `return` sits on the closing `end`, which the caller's next statement may share
-            auto end = static_cast<int32_t>(function.instructions.size());
-            const LuauInstruction tail{decoder ? decoder->DecodeInstruction(function.instructions.back().instruction) : function.instructions.back().instruction};
-            if (tail.GetOpCode() == LOP_RETURN && tail.GetABCOperand(LuauInstruction::LuauOperand::B) == 1)
-                --end;
-            for (int32_t pc = 0; pc < end; ++pc)
-                if (const auto line = SourceLine(function, pc))
-                    lastLine = (std::max)(lastLine, *line);
-        }
-        map->sources.push_back({&function, -1, static_cast<int32_t>(function.lineDefined), lastLine});
-    }
-    for (size_t index = 0; index < functions.size(); ++index)
-        for (const auto *child : functions[index].subfunctions)
-            if (child >= functions.data() && child < functions.data() + functions.size())
-                map->sources[child - functions.data()].parent = static_cast<int32_t>(index);
-
-    // a body owns the lines after its header up to its last statement; spans nest, so painting widest first leaves the innermost
-    constexpr int32_t kMaxTrackedLine = 1 << 22;
-    std::vector<int32_t> order;
-    for (int32_t index = 0; index < static_cast<int32_t>(map->sources.size()); ++index) {
-        const auto &source = map->sources[index];
-        if (!source.function->isvararg && source.firstLine >= 0 && source.lastLine > source.firstLine && source.lastLine < kMaxTrackedLine)
-            order.push_back(index);
-    }
-    std::ranges::sort(order, [&](int32_t a, int32_t b) {
-        const auto &left = map->sources[a], &right = map->sources[b];
-        return left.lastLine - left.firstLine > right.lastLine - right.firstLine;
-    });
-    for (const int32_t index : order) {
-        const auto &source = map->sources[index];
-        if (static_cast<size_t>(source.lastLine) >= map->innermostByLine.size())
-            map->innermostByLine.resize(source.lastLine + 1, -1);
-        std::fill(map->innermostByLine.begin() + source.firstLine + 1, map->innermostByLine.begin() + source.lastLine + 1, index);
-    }
-    return map;
-}
-
-void ASTLifter::ComputeInlineOrigins() {
-    const auto &lifted = *m_currentFunction->lpLiftedFunction;
-    m_inlineOrigin.assign(lifted.instructions.size(), -1);
-    if (!m_inlineSources || !m_inlineSources->hasLineInfo || !lifted.lpDeserialized)
-        return;
-    const auto &sources = m_inlineSources->sources;
-    std::vector<bool> enclosing(sources.size(), false);
-    for (int32_t index = 0; index < static_cast<int32_t>(sources.size()); ++index)
-        if (sources[index].function == lifted.lpDeserialized)
-            for (int32_t at = index; at >= 0; at = sources[at].parent)
-                enclosing[at] = true;
-    const auto &byLine = m_inlineSources->innermostByLine;
-    std::string inlined;
-    for (const auto &instruction : lifted.instructions) {
-        const auto line = SourceLine(*lifted.lpDeserialized, instruction.instructionIndex);
-        if (!line || *line < 0 || static_cast<size_t>(*line) >= byLine.size() || instruction.instructionIndex < 0 ||
-            static_cast<size_t>(instruction.instructionIndex) >= m_inlineOrigin.size())
-            continue;
-        if (const int32_t source = byLine[*line]; source >= 0 && !enclosing[source]) {
-            m_inlineOrigin[instruction.instructionIndex] = source;
-            if (m_debugNotes && m_debugNotes->Enabled())
-                inlined += std::format(" {}@L{}<F{}", instruction.instructionIndex, *line, sources[source].function->bytecodeId);
-        }
-    }
-    if (!inlined.empty())
-        Explain("function {}: inlined instructions (pc@line<function):{}", m_debugFunction, inlined);
-}
-
-static std::vector<std::vector<std::shared_ptr<Statement>> *> ChildBodies(const std::shared_ptr<Statement> &statement) {
-    std::vector<std::vector<std::shared_ptr<Statement>> *> bodies;
-    if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(statement)) {
-        for (const auto &arm : {branch->thenBranch, branch->elseBranch})
-            if (arm)
-                bodies.push_back(&arm->body);
-    } else if (const auto loop = std::dynamic_pointer_cast<WhileStatementNode>(statement); loop && loop->body) {
-        bodies.push_back(&loop->body->body);
-    } else if (const auto repeat = std::dynamic_pointer_cast<RepeatStatementNode>(statement); repeat && repeat->body) {
-        bodies.push_back(&repeat->body->body);
-    } else if (const auto numeric = std::dynamic_pointer_cast<ForNumericNode>(statement); numeric && numeric->lpLoopBody) {
-        bodies.push_back(&numeric->lpLoopBody->body);
-    } else if (const auto generic = std::dynamic_pointer_cast<ForGeneralNode>(statement); generic && generic->body) {
-        bodies.push_back(&generic->body->body);
-    } else if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(statement)) {
-        bodies.push_back(&block->body);
-    }
-    return bodies;
-}
-
-void ASTLifter::MarkInlinedRegions(std::vector<std::shared_ptr<Statement>> &statements, int32_t enclosing) {
-    constexpr int32_t kCaller = -1, kUnknown = -2;
-    const auto originOf = [&](const std::shared_ptr<Statement> &statement) {
-        if (!statement || statement->originPc < 0 || static_cast<size_t>(statement->originPc) >= m_inlineOrigin.size())
-            return kUnknown;
-        return m_inlineOrigin[statement->originPc];
-    };
-    const std::function<bool(const std::shared_ptr<Statement> &)> holdsCallerCode = [&](const std::shared_ptr<Statement> &statement) {
-        for (const auto *body : ChildBodies(statement))
-            for (const auto &child : *body)
-                if (originOf(child) == kCaller || holdsCallerCode(child))
-                    return true;
-        return false;
-    };
-    std::vector<int32_t> origins(statements.size());
-    for (size_t i = 0; i < statements.size(); ++i) {
-        origins[i] = originOf(statements[i]);
-        // a test the compiler merged with an inlined return still guards caller code
-        if (origins[i] >= 0 && holdsCallerCode(statements[i]))
-            origins[i] = kCaller;
-        const int32_t inner = origins[i] >= 0 ? origins[i] : enclosing;
-        for (auto *body : ChildBodies(statements[i]))
-            MarkInlinedRegions(*body, inner);
-    }
-
-    std::vector<std::shared_ptr<Statement>> rebuilt;
-    rebuilt.reserve(statements.size());
-    for (size_t i = 0; i < statements.size();) {
-        const int32_t origin = origins[i];
-        if (origin < 0 || origin == enclosing) {
-            rebuilt.push_back(std::move(statements[i++]));
-            continue;
-        }
-        const auto &source = m_inlineSources->sources[origin];
-        auto region = std::make_shared<BlockStatementNode>();
-        region->bEmitAsDoBlock = true;
-        region->body.push_back(std::make_shared<CommentNode>(
-            std::format(
-                "Fission: INFO: inlined call to {} (defined at line {}, bytecode ID {})",
-                source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function"), source.firstLine,
-                source.function->bytecodeId
-            ),
-            true, true
-        ));
-        const size_t start = i;
-        while (i < statements.size() && origins[i] == origin)
-            ++i;
-        // a local the region declares and the rest of this block reads must outlive the `do`
-        const auto usedAfter = [&](const std::string &name) {
-            return std::any_of(statements.begin() + static_cast<std::ptrdiff_t>(i), statements.end(), [&](const auto &later) {
-                return DeclarationHoister::Mentions(later, name);
-            });
-        };
-        const auto nameOf = [](const std::shared_ptr<Expression> &target) {
-            const auto identifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(target);
-            return identifier && identifier->identifier ? identifier->identifier->name : std::string{};
-        };
-        const auto hoistAll = [&](const std::vector<std::string> &names) {
-            if (std::ranges::none_of(names, [&](const std::string &name) { return !name.empty() && usedAfter(name); }))
-                return false;
-            for (const auto &name : names)
-                if (!name.empty())
-                    rebuilt.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
-            return true;
-        };
-        const auto hoist = [&](const std::shared_ptr<Expression> &target) { return hoistAll({nameOf(target)}); };
-        for (size_t k = start; k < i; ++k) {
-            auto &statement = statements[k];
-            if (const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statement)) {
-                if (hoist(declaration->identifier)) {
-                    if (!declaration->value)
-                        continue;
-                    statement = std::make_shared<AssignmentStatementNode>(declaration->identifier, declaration->value);
-                }
-            } else if (const auto function = std::dynamic_pointer_cast<FunctionDeclarationNode>(statement); function && function->bIsLocalDeclaration) {
-                if (hoist(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(function->functionName))))
-                    function->bIsLocalDeclaration = false;
-            } else if (const auto expression = std::dynamic_pointer_cast<ExpressionStatementNode>(statement)) {
-                const auto hoistRets = [&](auto &call) {
-                    if (!call || !call->bIsLocalDeclaration)
-                        return;
-                    std::vector<std::string> names;
-                    for (const auto &ret : call->rets)
-                        names.push_back(nameOf(ret));
-                    if (hoistAll(names))
-                        call->bIsLocalDeclaration = false;
-                };
-                auto call = std::dynamic_pointer_cast<CallExpressionNode>(expression->expression);
-                hoistRets(call);
-                auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression);
-                hoistRets(nameCall);
-            }
-            region->body.push_back(std::move(statement));
-        }
-        rebuilt.push_back(std::move(region));
-    }
-    statements = std::move(rebuilt);
-}
-
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
+    static_cast<ASTLifterFunctionState &>(*this) = {};
     this->m_currentFunction = &analyzedFunction;
     if (m_debugNotes && m_debugNotes->Enabled())
         m_debugFunction = std::format(
@@ -555,20 +342,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             analyzedFunction.lpLiftedFunction->name
         );
     Explain("function {}: lifting {} CFG blocks", m_debugFunction, analyzedFunction.basicBlocks.size());
-    ComputeInlineOrigins();
-    this->m_definedRegisters.clear();
-    this->m_globalNames.clear();
-    this->m_pinnedRegisters.clear();
-    this->m_capturedRegisters.clear();
-    this->m_referenceCapturedValues.clear();
-    this->m_valueCapturedValues.clear();
-    this->m_assignedRegisters.clear();
     for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions)
         if (const int32_t local = AssignedLocal(instruction); local >= 0)
             this->m_assignedRegisters.insert(local);
-    this->m_hoistedRegisters.clear();
-    this->m_sharedClosures.clear();
-    this->m_valueTermOverrides.clear();
     const auto &closureInstructions = analyzedFunction.lpLiftedFunction->instructions;
     for (size_t index = 0; index < closureInstructions.size(); ++index)
         if (const auto &instruction = closureInstructions[index]; instruction.operation == LiftedOperation::DUPCLOSURE && instruction.operands.size() > 1) {
@@ -587,24 +363,6 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             else if (shared.captures != captures)
                 shared.sameCaptures = false;
         }
-    this->m_capturedVariableWrites.clear();
-    this->m_processedInstructions.clear();
-    this->m_earlyForExits.clear();
-    this->m_setListKeySnapshots.clear();
-    this->m_inlineConsumedDefs.clear();
-    this->m_foldConsumedDefs.clear();
-    this->m_pendingClasses.clear();
-    this->m_closureSlots.clear();
-    this->m_phiConsumers.clear();
-    this->m_deferToConditionInline.clear();
-    this->m_shouldInlineMemo.clear(); // keyed by this function's instructions
-    this->m_inlineBinaryDepth.clear();
-    this->m_constructorElementMemo.clear();
-    this->m_shouldInlineActive.clear();
-    this->m_mergeCache.clear(); // keyed by this function's block ids
-    this->m_forwardReach.clear();
-    this->m_dominators.reset();
-    this->m_valueArmDuplications = 0;
 
     // Registers that hold a control-flow-materialised boolean (a comparison lowered to a LOADB
     // diamond: `LOAD Rd,bT` in one arm, `LOADNJUMP Rd,bF` in the other). The diamond is collapsed to
@@ -613,7 +371,6 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     // `{ ... }` literal and drop the comparison. Recording the LOADNJUMP-bool targets here lets the
     // fold decline and fall back to sound sequential `t.field = <cond>` stores.
     // Only the diamond's own two loads count; another bool load into a reused register is an ordinary value.
-    this->m_diamondBoolLoads.clear();
     const auto &liftedInstructions = analyzedFunction.lpLiftedFunction->instructions;
     for (size_t index = 0; index < liftedInstructions.size(); ++index) {
         const auto &i = liftedInstructions[index];
@@ -630,7 +387,6 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     }
 
     // reverse-index definitionMap once: instruction -> its SSARefs. avoids per-instruction full scans (O(N^2)).
-    this->m_defsByInstruction.clear();
     for (const auto &[ref, defInst] : analyzedFunction.definitionMap)
         this->m_defsByInstruction[defInst].push_back(ref);
 
@@ -640,6 +396,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         if (block.lpHead)
             for (const auto *inst = block.lpHead; inst <= block.lpTail; ++inst)
                 this->m_blockOfInstruction[inst - instructions.data()] = static_cast<int32_t>(block.dwBlockId);
+    ComputeLoopBodies();
     CollectCompoundAssignments();
 
     for (const auto &block : analyzedFunction.basicBlocks) {
@@ -656,7 +413,6 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     // pre-pass: a loop condition re-evaluates every iteration. A side-effectful def (CALL family)
     // defined OUTSIDE the condition's block must not inline into it; that would move the call
     // into the loop. Marked before lifting so the def's own statement still emits at its site.
-    this->m_forcedMaterialization.clear();
     for (const auto &[definition, refs] : m_defsByInstruction) {
         if (!definition || (definition->operation != LiftedOperation::CALL && definition->operation != LiftedOperation::CALLFB &&
                             definition->operation != LiftedOperation::NAMECALL))
@@ -764,6 +520,14 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     for (int32_t arg = 0; arg < analyzedFunction.lpLiftedFunction->lpDeserialized->numparams; ++arg)
         m_definedRegisters.insert(arg);
 
+    // one variable is every version its merges join (a value diamond's arms, a loop's carried value)
+    for (const auto &block : analyzedFunction.basicBlocks)
+        for (const auto &phi : block.phiNodes)
+            for (size_t i = 1; i < phi.operands.size(); ++i)
+                if (phi.operands[i].type == LiftedOperandType::Register && phi.operands[i].value.reg == phi.operands[0].value.reg && phi.operands[i].ssaVersion >= 0)
+                    m_variableParent[VariableOf({static_cast<uint8_t>(phi.operands[i].value.reg), phi.operands[i].ssaVersion})] =
+                        VariableOf({static_cast<uint8_t>(phi.operands[0].value.reg), phi.operands[0].ssaVersion});
+
     // pre-pass: a VAL/REF closure capture aliases an upvalue to its source local's name. Set that
     // override BEFORE lifting any statement, so the source local's declaration AND every use are emitted
     // under the upvalue's debug name; consistent with the closure's reference. The closure handler sets
@@ -801,6 +565,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             return renamed;
         };
         std::unordered_map<std::string, SSARef> captureNameOwners;
+        // a by-reference capture owns every value its local takes, not only the captured one
+        std::unordered_map<std::string, std::unordered_set<SSARef>> captureNameRoots;
         std::unordered_map<SSARef, std::string> referenceCaptureNames;
         std::optional<std::array<int, 256>> definitionCountsCache;
         const auto definitionCounts = [&]() -> const std::array<int, 256> & {
@@ -895,10 +661,14 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                             name = existing->second;
                         else {
                             const std::string base = name;
-                            for (int suffix = 2; captureNameOwners.contains(name) && !(captureNameOwners.at(name) == ref); ++suffix)
+                            for (int suffix = 2; captureNameOwners.contains(name) && !captureNameRoots[name].contains(VariableOf(ref)); ++suffix)
                                 name = std::format("{}_{}", base, suffix);
                         }
                         captureNameOwners.try_emplace(name, ref);
+                        captureNameRoots[name].insert(VariableOf(ref));
+                        if (mode == 1)
+                            for (const int32_t version : capturedVersions)
+                                captureNameRoots[name].insert(VariableOf(SSARef{reg, version}));
                         analyzedFunction.ssaOverrides[ref] = name;
                         if (mode == 1)
                             for (const int32_t version : capturedVersions)
@@ -966,6 +736,18 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         std::vector<size_t> openOrder(locals.size());
         std::iota(openOrder.begin(), openOrder.end(), size_t{0});
         std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
+        std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
+        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+            if (definition && definition->operation != LiftedOperation::PHI)
+                writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
+        // the named value lives from its initializer, which can precede the local's open by a whole inlined call
+        const auto liveFrom = [&](const LuauLocalVar &local) {
+            int32_t from = -1;
+            for (const int32_t write : writesByRegister[static_cast<uint8_t>(local.reg)])
+                if (write < local.startpc)
+                    from = std::max(from, write);
+            return from < 0 ? local.startpc : from;
+        };
         for (const size_t i : openOrder) {
             const auto &local = locals[i];
             if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
@@ -978,19 +760,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             const std::string baseName = analyzedFunction.DebugLocalName(local.varname);
             std::string name = localName(baseName, static_cast<uint8_t>(local.reg));
             const auto shadows = [&](const std::string &candidate) {
-                for (size_t j = 0; j < locals.size(); ++j)
-                    if (debugNames[j] == candidate && locals[j].reg != local.reg && locals[j].startpc < local.endpc && local.startpc < locals[j].endpc)
+                for (size_t j = 0; j < locals.size(); ++j) {
+                    // parameters are named apart from this pass, yet a same-named local still hides one
+                    const bool named = debugNames[j] == candidate || (locals[j].reg < analyzedFunction.lpLiftedFunction->numparams &&
+                                                                      analyzedFunction.DebugLocalName(locals[j].varname) == candidate);
+                    if (named && locals[j].reg != local.reg && liveFrom(locals[j]) < local.endpc && liveFrom(local) < locals[j].endpc)
                         return true;
+                }
                 return false;
             };
             for (int suffix = 2; shadows(name); ++suffix)
                 name = std::format("{}_{}", baseName, suffix);
             debugNames[i] = name;
         }
-        std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
-        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
-            if (definition && definition->operation != LiftedOperation::PHI)
-                writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
         // `local a, b = f(), g()` opens both locals after the last initializer, so a write counts when it is the register's last before the open
         const auto initializes = [&](const LuauLocalVar &local, int32_t index) {
             if (index >= local.startpc - 1)
@@ -1054,21 +836,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             }
             return found;
         };
-        // one variable is every version its merges join (a value diamond's arms, a loop's carried value)
-        std::unordered_map<SSARef, SSARef> parent;
-        const std::function<SSARef(const SSARef &)> root = [&](const SSARef &ref) -> SSARef {
-            const auto found = parent.find(ref);
-            if (found == parent.end() || found->second == ref)
-                return ref;
-            return found->second = root(found->second);
-        };
-        for (const auto &block : analyzedFunction.basicBlocks)
-            for (const auto &phi : block.phiNodes)
-                for (size_t i = 1; i < phi.operands.size(); ++i)
-                    if (phi.operands[i].type == LiftedOperandType::Register && phi.operands[i].value.reg == phi.operands[0].value.reg &&
-                        phi.operands[i].ssaVersion >= 0)
-                        parent[root({static_cast<uint8_t>(phi.operands[i].value.reg), phi.operands[i].ssaVersion})] =
-                            root({static_cast<uint8_t>(phi.operands[0].value.reg), phi.operands[0].ssaVersion});
+        const auto root = [&](const SSARef &ref) { return VariableOf(ref); };
         std::unordered_map<SSARef, std::optional<size_t>> componentLocals; // nullopt: two different locals share it
         for (const auto &[ref, definition] : analyzedFunction.definitionMap)
             if (definition && definition->operation != LiftedOperation::PHI && ref.regIndex >= analyzedFunction.lpLiftedFunction->numparams)
@@ -1222,7 +990,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                         def = entry < 0 ? nullptr : lookupDef(r, entry);
                     }
                     if (def && def->operation == LiftedOperation::LOAD)
-                        m_processedInstructions.insert(def->instructionIndex);
+                        m_emission.MarkEmitted(def->instructionIndex);
                 };
                 markLoopValue(baseReg, limitVer);
                 markLoopValue(baseReg + 1, stepVer);
@@ -1260,17 +1028,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             if (genDef && stateDef && indexDef && genDef == stateDef && stateDef == indexDef &&
                 (genDef->operation == LiftedOperation::CALL || genDef->operation == LiftedOperation::CALLFB ||
                  genDef->operation == LiftedOperation::NAMECALL)) {
-                m_processedInstructions.insert(genDef->instructionIndex);
+                m_emission.MarkEmitted(genDef->instructionIndex);
                 int32_t callInfoIdx = (genDef->operation == LiftedOperation::NAMECALL) ? genDef->instructionIndex + 2 : genDef->instructionIndex;
                 if (callInfoIdx < static_cast<int32_t>(analyzedFunction.lpLiftedFunction->instructions.size()))
-                    m_processedInstructions.insert(callInfoIdx);
+                    m_emission.MarkEmitted(callInfoIdx);
             }
         }
 
         KeepOrderedCompoundAssignments();
+        m_emission.FreezePrelift();
         boost::unordered_flat_set<uint32_t> visited;
         ast.statements = LiftControlFlow(0, InvalidBlockId, visited).Run();
-        MarkInlinedRegions(ast.statements);
+        SpliceLatchCopies(ast.statements);
+        StampInlineSources(ast.statements);
         std::vector<std::shared_ptr<Statement>> sharedDeclarations;
         std::unordered_set<int32_t> insertedShared;
         for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions)
@@ -1614,11 +1384,30 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         return latch.bType == BlockType::LoopLatch && std::ranges::find(latch.successors, m_loopExitStack.back()) != latch.successors.end();
     };
 
+    std::shared_ptr<BlockLift> previousLift;
+
     // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
     // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
     while (true) {
         if (currentBlockId == InvalidBlockId || currentBlockId >= m_currentFunction->basicBlocks.size())
             break;
+        const size_t iterationStart = nodes.size();
+        const auto recordTrailer = [&] {
+            if (previousLift)
+                previousLift->trailer.insert(previousLift->trailer.end(), nodes.begin() + static_cast<std::ptrdiff_t>(iterationStart), nodes.end());
+        };
+        const auto appendLiftedWalk = [&] {
+            auto copy = CloneLiftedWalk(currentBlockId, stopBlockId);
+            if (!copy)
+                return false;
+            nodes.insert(nodes.end(), copy->first.begin(), copy->first.end());
+            if (copy->second) {
+                markEarlyForExit(m_loopExitStack.back());
+                nodes.push_back(std::make_shared<BreakStatementNode>());
+            }
+            recordTrailer();
+            return true;
+        };
 
         if (m_loopExitStack.empty() && currentBlockId != stopBlockId && !visited.contains(currentBlockId)) {
             const auto &entry = m_currentFunction->basicBlocks[currentBlockId];
@@ -1650,6 +1439,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
                             auto body = co_await LiftControlFlow(currentBlockId, static_cast<uint32_t>(exitId), visited);
                             m_loopExitStack.pop_back();
+                            // a walk lifted inside this wrapper breaks out of it, so a copy taken outside it must re-lift instead
+                            for (uint32_t id = currentBlockId; id < static_cast<uint32_t>(exitId); ++id)
+                                m_blockLifts.erase(id);
                             if (!body.empty() && body.back()->nodeKind == ASTNodeKind::BreakStatement)
                                 body.pop_back();
                             const auto guard = std::ranges::find_if(body, [](const std::shared_ptr<Statement> &stmt) {
@@ -1667,6 +1459,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             repeat->body = CreateBlock(body);
                             repeat->condition = std::make_shared<BooleanLiteralNode>(true);
                             nodes.push_back(repeat);
+                            previousLift = nullptr;
                             currentBlockId = static_cast<uint32_t>(exitId);
                             continue;
                         }
@@ -1680,23 +1473,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         if (!m_loopExitStack.empty() && currentBlockId == m_loopExitStack.back()) {
             markEarlyForExit(currentBlockId);
             nodes.push_back(std::make_shared<BreakStatementNode>());
+            recordTrailer();
             break;
         }
         // reaching the latch before this region ends skips the rest of the iteration
         if (currentBlockId != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(currentBlockId)) {
             // `continue` skips what the source places before the loop test, so the latch's own statements run here too
-            const auto &latchBlock = m_currentFunction->basicBlocks[currentBlockId];
-            const auto definedBefore = m_definedRegisters;
-            const auto processedBefore = m_processedInstructions;
-            const auto inlineConsumedBefore = m_inlineConsumedDefs;
-            const auto foldConsumedBefore = m_foldConsumedDefs;
-            auto latchStmts = LiftBlockInstructions(latchBlock);
-            m_definedRegisters = definedBefore;
-            m_processedInstructions = processedBefore;
-            m_inlineConsumedDefs = inlineConsumedBefore;
-            m_foldConsumedDefs = foldConsumedBefore;
-            nodes.insert(nodes.end(), latchStmts.begin(), latchStmts.end());
+            nodes.push_back(LatchCopy(currentBlockId));
             nodes.push_back(std::make_shared<ContinueStatementNode>());
+            recordTrailer();
             break;
         }
 
@@ -1713,11 +1498,42 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // fuck you luauc.
         if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
             if (visited.contains(currentBlockId)) {
+                if (const auto repeated = m_repeatedTails.find(currentBlockId); repeated != m_repeatedTails.end()) {
+                    if (appendLiftedWalk())
+                        break;
+                    if (const auto region = SharedTailRegion(
+                            currentBlockId, repeated->second, m_currentFunction->lpLiftedFunction->instructions.size(), m_currentFunction->basicBlocks.size()
+                        )) {
+                        auto regionVisited = visited;
+                        for (const uint32_t id : *region) {
+                            regionVisited.erase(id);
+                            const auto &tail = m_currentFunction->basicBlocks[id];
+                            for (const LiftedInstruction *instruction = tail.lpHead; instruction && instruction <= tail.lpTail; ++instruction)
+                                m_emission.Reopen(instruction->instructionIndex);
+                        }
+                        auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
+                        nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
+                        recordTrailer();
+                        break;
+                    }
+                }
                 // Re-lift a visited pure value region when exclusive branches share it.
                 constexpr uint32_t kMaxValueArmDuplications = 8192;
                 const bool canDup = atEntryBlock && m_valueArmDuplications < kMaxValueArmDuplications;
                 // a sibling arm lifted this forward-entered block: it is a tail shared by exclusive paths, not a convergence
                 const auto &visitedBlock = m_currentFunction->basicBlocks[currentBlockId];
+                // a long tail is copied only when it rejoins this region's stop, never when it runs on to a return or out of a loop
+                const auto closedTailRegion = [&]() -> std::optional<std::vector<uint32_t>> {
+                    auto region = SharedTailRegion(currentBlockId, stopBlockId, 4096, 256);
+                    if (region && std::ranges::all_of(*region, [&](uint32_t id) {
+                            const auto &block = m_currentFunction->basicBlocks[id];
+                            return block.bType != BlockType::Return && std::ranges::all_of(block.successors, [&](uint32_t successor) {
+                                       return successor == stopBlockId || std::ranges::find(*region, successor) != region->end();
+                                   });
+                        }))
+                        return region;
+                    return std::nullopt;
+                };
                 const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && m_valueArmDuplications < kMaxValueArmDuplications &&
                                          std::ranges::all_of(visitedBlock.predecessors, [&](uint32_t p) { return p < currentBlockId; });
                 if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
@@ -1735,9 +1551,13 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     boost::unordered_flat_set<uint32_t> regionVisited;
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
+                    recordTrailer();
                     break;
                 } else if (
-                    auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId) : std::nullopt;
+                    // a sibling arm owns the only other copy, so skipping it here drops the tail from this path
+                    auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId)
+                                                        .or_else([&] { return closedTailRegion(); })
+                                                        : std::nullopt;
                     // a pure tail reached through pure tests folds back into one short-circuit value
                     region && (canDup || std::ranges::any_of(*region, blockHasEffect) || std::ranges::any_of(walked, blockHasEffect))
                 ) {
@@ -1745,16 +1565,19 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     // so emitting it in both branches keeps every effect single. clear its processed marks
                     // (as for shared return blocks) so the second copy is complete.
                     ++m_valueArmDuplications;
+                    if (appendLiftedWalk())
+                        break;
                     // blocks outside the region stay visited so flow leaving it (a loop's exit) is not lifted again
                     auto regionVisited = visited;
                     for (const uint32_t id : *region) {
                         regionVisited.erase(id);
                         const auto &regionBlock = m_currentFunction->basicBlocks[id];
                         for (const LiftedInstruction *instruction = regionBlock.lpHead; instruction && instruction <= regionBlock.lpTail; ++instruction)
-                            m_processedInstructions.erase(instruction->instructionIndex);
+                            m_emission.Reopen(instruction->instructionIndex);
                     }
                     auto regionNodes = co_await LiftControlFlow(currentBlockId, stopBlockId, regionVisited);
                     nodes.insert(nodes.end(), regionNodes.begin(), regionNodes.end());
+                    recordTrailer();
                     break;
                 } else {
                     break;
@@ -1762,6 +1585,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             }
         }
 
+        if (const auto &entered = m_currentFunction->basicBlocks[currentBlockId];
+            entered.bType == BlockType::Return && entered.predecessors.size() > 1 && currentBlockId != stopBlockId && appendLiftedWalk())
+            break;
         if (!visited.contains(currentBlockId))
             visited.insert(currentBlockId); // prevent double insertion product of block above.
         walked.insert(currentBlockId);
@@ -1777,9 +1603,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
         if (block.bType == BlockType::Return && block.predecessors.size() > 1 && currentBlockId != stopBlockId)
             for (auto *instruction = block.lpHead; instruction && instruction <= block.lpTail; ++instruction)
-                if (instruction->operation == LiftedOperation::CALL || instruction->operation == LiftedOperation::CALLFB ||
-                    instruction->operation == LiftedOperation::NAMECALL || instruction->operation == LiftedOperation::NAMECALLUDATA)
-                    m_processedInstructions.erase(instruction->instructionIndex);
+                if ((instruction->operation == LiftedOperation::CALL || instruction->operation == LiftedOperation::CALLFB ||
+                     instruction->operation == LiftedOperation::NAMECALL || instruction->operation == LiftedOperation::NAMECALLUDATA))
+                    m_emission.Reopen(instruction->instructionIndex);
 
         // repeat-until headers are lifted inside the repeat path itself; pre-lifting here is
         // discarded there but still poisons m_definedRegisters, turning the re-lifted body decls
@@ -1800,6 +1626,24 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
         // Linear continuation for the next iteration; -1 terminates the loop.
         uint32_t nextBlockId = InvalidBlockId;
+        struct LiftRecord {
+            std::unordered_map<uint32_t, std::shared_ptr<BlockLift>> &lifts;
+            std::shared_ptr<BlockLift> &previous;
+            const std::vector<std::shared_ptr<Statement>> &nodes;
+            const uint32_t &next;
+            size_t from;
+            uint32_t block;
+            ~LiftRecord() {
+                auto lift = std::make_shared<BlockLift>(
+                    block, next, std::vector<std::shared_ptr<Statement>>(nodes.begin() + static_cast<std::ptrdiff_t>(std::min(from, nodes.size())), nodes.end())
+                );
+                if (previous)
+                    previous->successor = lift;
+                previous = lift;
+                lifts.try_emplace(block, std::move(lift));
+            }
+        };
+        const LiftRecord liftRecord{m_blockLifts, previousLift, nodes, nextBlockId, iterationStart, currentBlockId};
 
         switch (block.bType) {
         case BlockType::IfHeader: {
@@ -1866,7 +1710,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                          CanReach(static_cast<uint32_t>(join), stopBlockId, currentBlockId, {currentBlockId})) &&
                         // an `elseif` chain's arms jump to their shared return too; its only other join sits inside one arm
                         (loopJumpMerge || (CanReach(trueIdx, static_cast<uint32_t>(join), currentBlockId, {currentBlockId}) &&
-                                           CanReach(falseIdx, static_cast<uint32_t>(join), currentBlockId, {currentBlockId})))) {
+                                           CanReach(falseIdx, static_cast<uint32_t>(join), currentBlockId, {currentBlockId}) &&
+                                           // an arm one test's failure falls into is a short-circuit target, not where both arms meet
+                                           static_cast<uint32_t>(join) != trueIdx && static_cast<uint32_t>(join) != falseIdx))) {
                         mergeIdx = static_cast<uint32_t>(join);
                         joinSkipsLoopJumps = true;
                     }
@@ -2184,8 +2030,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     if (predId == *block.loopLatch || predId >= m_currentFunction->basicBlocks.size())
                         continue;
                     const auto &bridge = m_currentFunction->basicBlocks[predId];
-                    if (bridge.bType != BlockType::LoopLatch || bridge.bTerminator != BlockTerminator::Unconditional || bridge.loopHeader != currentBlockId ||
-                        bridge.predecessors.size() != 1)
+                    // an outer test whose own block is typed the latch leaves the back-jump typed Continue
+                    if ((bridge.bType != BlockType::LoopLatch && bridge.bType != BlockType::Continue) || bridge.bTerminator != BlockTerminator::Unconditional ||
+                        (bridge.bType == BlockType::LoopLatch && bridge.loopHeader != currentBlockId) || bridge.successors.size() != 1 ||
+                        bridge.successors.front() != currentBlockId || bridge.predecessors.size() != 1)
                         continue;
                     const uint32_t conditionId = bridge.predecessors.front();
                     if (conditionId >= m_currentFunction->basicBlocks.size())
@@ -2316,8 +2164,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (predId == latchIdx || predId >= m_currentFunction->basicBlocks.size())
                                 continue;
                             const auto &pred = m_currentFunction->basicBlocks[predId];
+                            // an enclosing loop jumps back after this repeat's `until`; an earlier back-edge closes an inner loop
                             if (pred.bType != BlockType::LoopLatch || pred.bTerminator != BlockTerminator::Unconditional ||
-                                (pred.dwBlockFlags & LoopBlockFlags::WhileLoop) != LoopBlockFlags::WhileLoop || pred.loopHeader != currentBlockId)
+                                (pred.dwBlockFlags & LoopBlockFlags::WhileLoop) != LoopBlockFlags::WhileLoop || pred.loopHeader != currentBlockId ||
+                                pred.lpTail->instructionIndex < latch.lpTail->instructionIndex)
                                 continue;
 
                             uint32_t testId = InvalidBlockId;
@@ -2635,7 +2485,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         }
                     if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(InvalidBlockId))
                         exitIdx = block.loopExit.value();
-                    else if (block.loopLatch.has_value()) {
+                    else if (block.loopLatch.has_value() && *block.loopLatch < m_currentFunction->basicBlocks.size() &&
+                             !m_currentFunction->basicBlocks[*block.loopLatch].predecessors.empty()) {
                         uint32_t resolved = ResolveLoopExitFromLatch(m_currentFunction->basicBlocks, *block.loopLatch, block.dwBlockId);
                         boost::unordered_flat_set<uint32_t> exitChain;
                         while (resolved < m_currentFunction->basicBlocks.size()) {
@@ -2651,6 +2502,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         }
                         if (resolved != InvalidBlockId)
                             exitIdx = resolved;
+                    } else {
+                        // a body that always breaks leaves FORNLOOP unreachable; the prep's skip target is then the only exit
+                        for (const auto succ : block.successors)
+                            if (succ != bodyIdx)
+                                exitIdx = succ;
                     }
 
                     auto forNode = std::make_shared<ForNumericNode>();
@@ -2734,7 +2590,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                     effectiveVer = entry;
                             auto *effDef = m_currentFunction->GetDefinition(makeKey(reg, effectiveVer));
                             if (effDef && effDef->operation == LiftedOperation::LOAD) {
-                                m_processedInstructions.insert(effDef->instructionIndex);
+                                m_emission.MarkEmitted(effDef->instructionIndex);
                                 auto &valOp = effDef->operands[1];
                                 if (valOp.type == LiftedOperandType::ImmediateInteger)
                                     return std::make_shared<NumberLiteralNode>(valOp.value.imm.n);
@@ -2813,7 +2669,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                         }
                                 }
                                 if (safe)
-                                    m_processedInstructions.insert(rootDef->instructionIndex);
+                                    m_emission.MarkEmitted(rootDef->instructionIndex);
                             }
                             // Same hazard for a NON-call computed bound (index/arith/`not <read>`): when its def
                             // lives in an already-lifted pre-header block it is emitted THERE as `local vN = <expr>`,
@@ -2845,7 +2701,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 else
                                     safe = false;
                                 if (safe)
-                                    m_processedInstructions.insert(rootDef->instructionIndex);
+                                    m_emission.MarkEmitted(rootDef->instructionIndex);
                             }
                             return LiftExpression(lop);
                         };
@@ -2927,6 +2783,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         boost::unordered_flat_set<uint32_t> bodyVisited = visited;
                         bodyVisited.erase(currentBlockId);
                         bodyVisited.insert(latchIdx);
+                        std::vector<uint32_t> repeatedTails;
                         if (deferredExit) {
                             for (const uint32_t successor : headerBlock.successors) {
                                 if (successor == *block.loopExit || !bodyVisited.contains(successor) ||
@@ -2936,13 +2793,19 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 if (const auto region = SharedTailRegion(
                                         successor, *block.loopExit, m_currentFunction->lpLiftedFunction->instructions.size(),
                                         m_currentFunction->basicBlocks.size()
-                                    ))
+                                    )) {
+                                    if (m_blockLifts.contains(successor)) {
+                                        if (m_repeatedTails.try_emplace(successor, *block.loopExit).second)
+                                            repeatedTails.push_back(successor);
+                                        continue;
+                                    }
                                     for (const uint32_t id : *region) {
                                         bodyVisited.erase(id);
                                         const auto &tail = m_currentFunction->basicBlocks[id];
                                         for (const LiftedInstruction *instruction = tail.lpHead; instruction && instruction <= tail.lpTail; ++instruction)
-                                            m_processedInstructions.erase(instruction->instructionIndex);
+                                            m_emission.Reopen(instruction->instructionIndex);
                                     }
+                                }
                             }
                             bodyVisited.insert(*block.loopExit);
                             m_loopExitStack.push_back(*block.loopExit);
@@ -2967,6 +2830,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             }
                         }
                         auto bodyStmts = co_await LiftControlFlow(currentBlockId, latchIdx, bodyVisited);
+                        for (const uint32_t id : repeatedTails)
+                            m_repeatedTails.erase(id);
                         if (deferredExit) {
                             m_loopExitStack.pop_back();
                             exitIdx = *block.loopExit;
@@ -3378,7 +3243,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     while (!pending.empty() && wrapExit == InvalidBlockId && seen.size() < 256) {
                         const uint32_t id = pending.back();
                         pending.pop_back();
-                        for (const uint32_t succ : m_currentFunction->basicBlocks[id].successors) {
+                        // a nested loop's body cannot leave the wrap except through the nested loop's exit
+                        const auto &expanded = m_currentFunction->basicBlocks[id];
+                        const std::vector<uint32_t> nestedExit{expanded.loopExit.value_or(InvalidBlockId)};
+                        const bool nestedHeader = expanded.bType == BlockType::LoopHeader && expanded.loopExit && id != currentBlockId;
+                        for (const uint32_t succ : nestedHeader ? nestedExit : expanded.successors) {
                             if (succ == *infiniteWhileLatch || succ == currentBlockId || succ >= m_currentFunction->basicBlocks.size() ||
                                 !seen.insert(succ).second)
                                 continue;
@@ -3391,6 +3260,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             }
                             pending.push_back(succ);
                         }
+                    }
+                    // a `break` lifts as a lone jump into the code after the wrap; that code, not the jump, is the exit
+                    for (int hops = 0; wrapExit != InvalidBlockId && hops < 8; ++hops) {
+                        const auto &bridge = m_currentFunction->basicBlocks[wrapExit];
+                        if (bridge.bTerminator != BlockTerminator::Unconditional || bridge.successors.size() != 1 || bridge.lpHead != bridge.lpTail ||
+                            !bridge.lpTail || bridge.lpTail->operation != LiftedOperation::JUMP || bridge.successors.front() >= m_currentFunction->basicBlocks.size())
+                            break;
+                        wrapExit = bridge.successors.front();
                     }
                     if (wrapExit != InvalidBlockId)
                         m_loopExitStack.push_back(wrapExit);
@@ -3449,7 +3326,142 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     co_return nodes;
 }
 
+std::shared_ptr<BlockStatementNode> ASTLifter::LatchCopy(uint32_t latchId) {
+    auto copy = std::make_shared<BlockStatementNode>();
+    m_latchCopyNodes.insert(copy.get());
+    auto &copies = m_latchCopies[static_cast<int32_t>(latchId)];
+    if (copies.lifted)
+        for (const auto &statement : *copies.lifted)
+            copy->body.push_back(CloneStatement(statement));
+    else
+        copies.pending.push_back(copy);
+    return copy;
+}
+
+std::optional<std::pair<std::vector<std::shared_ptr<Statement>>, bool>> ASTLifter::CloneLiftedWalk(uint32_t fromBlockId, uint32_t stopBlockId) const {
+    const auto found = m_blockLifts.find(fromBlockId);
+    if (found == m_blockLifts.end())
+        return std::nullopt;
+    const uint32_t exitBlockId = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
+    std::vector<std::shared_ptr<Statement>> statements;
+    for (const BlockLift *lift = found->second.get();; lift = lift->successor.get()) {
+        for (const auto &statement : lift->statements)
+            statements.push_back(CloneStatement(statement));
+        if (lift->next == exitBlockId && exitBlockId != InvalidBlockId)
+            return std::pair{std::move(statements), true};
+        if (lift->successor) {
+            if (lift->successor->block == stopBlockId)
+                return std::pair{std::move(statements), false};
+            continue;
+        }
+        if (lift->next != stopBlockId && lift->next != InvalidBlockId && lift->trailer.empty())
+            return std::nullopt;
+        for (const auto &statement : lift->trailer)
+            statements.push_back(CloneStatement(statement));
+        return std::pair{std::move(statements), false};
+    }
+}
+
+void ASTLifter::SpliceLatchCopies(std::vector<std::shared_ptr<Statement>> &statements) {
+    // a latch read only as a loop condition never lifts its statements on the walk
+    std::vector<int32_t> unlifted;
+    for (const auto &[latchId, copies] : m_latchCopies)
+        if (!copies.pending.empty())
+            unlifted.push_back(latchId);
+    for (const int32_t latchId : unlifted)
+        LiftBlockInstructions(m_currentFunction->basicBlocks[latchId]);
+    const auto splice = [&](this auto &self, std::vector<std::shared_ptr<Statement>> &body) -> void {
+        std::vector<std::shared_ptr<Statement>> flattened;
+        flattened.reserve(body.size());
+        for (auto &statement : body) {
+            ForEachChildBlock(statement, self);
+            if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(statement); block && m_latchCopyNodes.contains(block.get())) {
+                self(block->body);
+                flattened.insert(flattened.end(), block->body.begin(), block->body.end());
+            } else {
+                flattened.push_back(std::move(statement));
+            }
+        }
+        body = std::move(flattened);
+    };
+    if (!m_latchCopyNodes.empty())
+        splice(statements);
+}
+
 std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const BasicBlock &block, bool forceDefinitions) {
+    auto statements = EmitBlockInstructions(block, forceDefinitions);
+    if (block.bType != BlockType::LoopLatch || !block.lpHead)
+        return statements;
+    auto &copies = m_latchCopies[BlockOf(block.lpHead)];
+    if (copies.lifted)
+        return statements;
+    copies.lifted = statements;
+    for (const auto &copy : copies.pending)
+        for (const auto &statement : statements)
+            copy->body.push_back(CloneStatement(statement));
+    copies.pending.clear();
+    return statements;
+}
+
+std::vector<std::shared_ptr<Expression>> ASTLifter::FoldMultiAssignment(
+    const LiftedInstruction &def, const std::vector<SSARef> &defs, std::vector<std::shared_ptr<Statement>> &statements, bool &declares
+) {
+    declares = false;
+    if (defs.size() < 2)
+        return {};
+    const int32_t index = def.instructionIndex;
+    const auto isTemp = [&](const LiftedOperand &operand) {
+        return operand.type == LiftedOperandType::Register &&
+               std::ranges::any_of(defs, [&](const SSARef &ref) { return ref.regIndex == operand.value.reg && ref.version == operand.ssaVersion; });
+    };
+    std::vector<const LiftedInstruction *> assigns;
+    int32_t windowEnd = index;
+    for (const auto &ref : defs) {
+        const auto users = m_currentFunction->users.find(ref);
+        const auto *assign = users != m_currentFunction->users.end() && users->second.size() == 1 ? users->second.front() : nullptr;
+        if (!assign || assign->instructionIndex <= index || assign->operands.size() < 2)
+            return {};
+        const bool local = assign->operation == LiftedOperation::MOVE && assign->operands[0].value.reg < ref.regIndex &&
+                           std::ranges::none_of(assigns, [&](const LiftedInstruction *other) {
+                               return other->operation == LiftedOperation::MOVE && other->operands[0].value.reg == assign->operands[0].value.reg;
+                           });
+        const bool store = (assign->operation == LiftedOperation::SETTABLE || assign->operation == LiftedOperation::SETTABLEKS ||
+                            assign->operation == LiftedOperation::SETTABLEN || assign->operation == LiftedOperation::SETGLOBAL ||
+                            assign->operation == LiftedOperation::SETUPVAL) &&
+                           isTemp(assign->operands[0]) && std::ranges::none_of(assign->operands | std::views::drop(1), isTemp);
+        if (!local && !store)
+            return {};
+        assigns.push_back(assign);
+        windowEnd = std::max(windowEnd, assign->instructionIndex);
+    }
+    const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+    if (windowEnd - index > 2 * static_cast<int32_t>(defs.size()) || BlockOf(&instructions[windowEnd]) != BlockOf(&def) ||
+        !std::ranges::all_of(std::views::iota(index + 1, windowEnd + 1), [&](int32_t k) {
+            return instructions[k].operation == LiftedOperation::NOP || std::ranges::find(assigns, &instructions[k]) != assigns.end();
+        }))
+        return {};
+
+    const auto declared = [&](const LiftedInstruction *move) {
+        return m_definedRegisters.contains(move->operands[0].value.reg) && !DeclaresLocal(*move, move->operands[0]);
+    };
+    declares = std::ranges::all_of(assigns, [&](const LiftedInstruction *assign) { return assign->operation == LiftedOperation::MOVE && !declared(assign); });
+    std::vector<std::shared_ptr<Expression>> targets;
+    for (const auto *assign : assigns) {
+        m_emission.MarkEmitted(assign->instructionIndex);
+        if (assign->operation != LiftedOperation::MOVE) {
+            targets.push_back(LiftStoreTarget(*assign));
+            continue;
+        }
+        const bool bare = !declares && !declared(assign);
+        auto name = std::make_shared<Identifier>(ResolveVariableName(assign->operands[0]));
+        if (bare)
+            statements.push_back(std::make_shared<VariableDeclarationNode>(name));
+        targets.push_back(std::make_shared<IdentifierExpressionNode>(name));
+    }
+    return targets;
+}
+
+std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const BasicBlock &block, bool forceDefinitions) {
     std::vector<std::shared_ptr<Statement>> statements;
     if (!block.lpHead)
         return statements;
@@ -3597,7 +3609,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
     };
 
     for (int i = block.lpHead->instructionIndex; i <= block.lpTail->instructionIndex; ++i) {
-        if (m_processedInstructions.contains(i))
+        if (m_emission.Emitted(i))
             continue;
 
         const OriginStamp stamp{statements, statements.size(), i};
@@ -3608,7 +3620,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (const auto className = HoistedClassName(*m_currentFunction, ref)) {
                 // the later `class` statement binds the name for the whole block
                 m_currentFunction->SetVariableName(ref.regIndex, ref.version, *className);
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 continue;
             }
         }
@@ -3629,7 +3641,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (!shape.className.empty())
                 m_currentFunction->SetVariableName(classRef.regIndex, classRef.version, shape.className);
             statements.push_back(classNode);
-            m_processedInstructions.insert(i);
+            m_emission.MarkEmitted(i);
             continue;
         }
 
@@ -3650,7 +3662,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     m_currentFunction->SetVariableName(classRef.regIndex, classRef.version, shape.className);
 
                 statements.push_back(classNode);
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 continue;
             }
         }
@@ -3664,10 +3676,25 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
         // an effectful `repeat until f()` twice.
         const bool openCall = (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) && inst.operands.size() > 2 &&
                               inst.operands[2].value.imm.n == 0;
+        // forcing exists for values leaving the header; one consumed by a statement of the header renders there
+        const auto consumedInHeader = [&] {
+            const auto defs = m_defsByInstruction.find(&inst);
+            if (defs == m_defsByInstruction.end() || defs->second.empty())
+                return false;
+            for (const auto &ref : defs->second) {
+                const auto users = m_currentFunction->users.find(ref);
+                if (users == m_currentFunction->users.end() || users->second.empty())
+                    return false;
+                for (const auto *user : users->second)
+                    if (user == block.lpTail || BlockOf(user) != BlockOf(&inst))
+                        return false;
+            }
+            return true;
+        };
         if (ShouldInline(&inst) && (!forceDefinitions || m_deferToConditionInline.contains(&inst) || openCall ||
-                                    inst.operation == LiftedOperation::GETVARARGS || m_compoundInlined.contains(&inst)))
+                                    inst.operation == LiftedOperation::GETVARARGS || m_compoundInlined.contains(&inst) || consumedInHeader()))
             continue;
-        if (forceDefinitions && m_foldConsumedDefs.contains(inst.instructionIndex))
+        if (forceDefinitions && m_emission.FoldConsumed(inst.instructionIndex))
             continue; // already rendered inside a folded table constructor
 
         if (const auto compound = m_compoundAssignments.find(&inst); compound != m_compoundAssignments.end()) {
@@ -3683,6 +3710,37 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             auto defs = m_defsByInstruction[&inst];
             std::ranges::sort(defs, {}, &SSARef::regIndex);
             const int32_t baseReg = inst.operands[0].value.reg;
+            bool declares = false;
+            if (auto targets = FoldMultiAssignment(inst, defs, statements, declares); !targets.empty()) {
+                auto spread = std::make_shared<CallExpressionNode>(std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false);
+                spread->bSpreadsVarArgs = true;
+                spread->bIsLocalDeclaration = declares;
+                statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
+                m_emission.MarkEmitted(inst.instructionIndex);
+                break;
+            }
+            // results bind by position, so unread leading ones still take a slot
+            int32_t lastUsed = -1;
+            for (const auto &ref : defs)
+                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(inst, ref.regIndex))
+                    lastUsed = ref.regIndex;
+            std::erase_if(defs, [&](const SSARef &ref) { return ref.regIndex > lastUsed; });
+            const auto defined = std::ranges::count_if(defs, [&](const SSARef &ref) { return m_definedRegisters.contains(ref.regIndex); });
+            if (defs.size() > 1 && (defined == 0 || defined == static_cast<std::ptrdiff_t>(defs.size()))) {
+                std::vector<std::shared_ptr<Expression>> targets;
+                for (const auto &ref : defs)
+                    targets.push_back(
+                        std::make_shared<IdentifierExpressionNode>(
+                            std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
+                        )
+                    );
+                auto spread = std::make_shared<CallExpressionNode>(std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false);
+                spread->bSpreadsVarArgs = true;
+                spread->bIsLocalDeclaration = defined == 0;
+                statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
+                m_emission.MarkEmitted(inst.instructionIndex);
+                break;
+            }
             for (const auto &ref : defs) {
                 LiftedOperand output{};
                 output.type = LiftedOperandType::Register;
@@ -3702,7 +3760,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 else
                     statements.push_back(std::make_shared<VariableDeclarationNode>(target, value));
             }
-            m_processedInstructions.insert(inst.instructionIndex);
+            m_emission.MarkEmitted(inst.instructionIndex);
             break;
         }
         case LiftedOperation::SETGLOBAL:
@@ -3828,7 +3886,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     first.type = LiftedOperandType::Register;
                     first.value.reg = inst.operands[1].value.reg;
                     first.ssaVersion = versions.front();
-                    if (const auto *firstDef = m_currentFunction->GetDefinition(first); firstDef && m_inlineConsumedDefs.contains(firstDef->instructionIndex))
+                    if (const auto *firstDef = m_currentFunction->GetDefinition(first); firstDef && m_emission.InlineConsumed(firstDef->instructionIndex))
                         continue;
                 }
                 auto elem = LiftSetListElement(inst, k, false);
@@ -3919,8 +3977,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(resultInst, ref.regIndex))
                     lastUsed = ref.regIndex;
 
-            for (const auto &ref : defs)
-                if (ref.regIndex <= lastUsed)
+            std::erase_if(defs, [&](const SSARef &ref) { return ref.regIndex > lastUsed; });
+            bool declares = true;
+            lhs = FoldMultiAssignment(resultInst, defs, statements, declares);
+            const bool folded = !lhs.empty();
+            if (!folded)
+                for (const auto &ref : defs)
                     lhs.push_back(
                         std::make_shared<IdentifierExpressionNode>(
                             std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
@@ -3930,19 +3992,23 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
             if (!lhs.empty()) {
                 if (auto callNode = std::dynamic_pointer_cast<CallExpressionNode>(callExpr)) {
                     callNode->rets = lhs;
+                    if (folded)
+                        callNode->bIsLocalDeclaration = declares;
                 } else if (auto nameCallNode = std::dynamic_pointer_cast<NameCallExpressionNode>(callExpr)) {
                     nameCallNode->rets = lhs;
+                    if (folded)
+                        nameCallNode->bIsLocalDeclaration = declares;
                 }
             }
 
             statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
 
-            m_processedInstructions.insert(resultInst.instructionIndex);
+            m_emission.MarkEmitted(resultInst.instructionIndex);
 
             if (inst.operation == LiftedOperation::NAMECALL) {
-                m_processedInstructions.insert(i);
-                m_processedInstructions.insert(i + 1);
-                m_processedInstructions.insert(i + 2);
+                m_emission.MarkEmitted(i);
+                m_emission.MarkEmitted(i + 1);
+                m_emission.MarkEmitted(i + 2);
             }
             break;
         }
@@ -4027,7 +4093,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), action.upName);
 
                 captureActions.push_back(action);
-                m_processedInstructions.insert(i + 1 + capIdx);
+                m_emission.MarkEmitted(i + 1 + capIdx);
                 ++capIdx;
             }
 
@@ -4142,7 +4208,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                             std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name))
                         )
                     );
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 break;
             }
             if (duplicatedFunction->nups > 0 && shared.count > 1 && shared.sameCaptures) {
@@ -4160,7 +4226,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                             std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output))), cache
                         )
                     );
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 break;
             }
             if (RenderClosureInPlace(inst, fnDecl, !duplicatedFunction->debugName.has_value()))
@@ -4171,7 +4237,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 break;
             }
 
@@ -4245,7 +4311,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                         }
 
                         // instruction is consumed, else we will emit ghost definitions after the declaration.
-                        this->m_processedInstructions.insert(user->instructionIndex);
+                        m_emission.MarkEmitted(user->instructionIndex);
                     }
                 }
             }
@@ -4341,7 +4407,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                     targetFunc->SetUpvalueNameOverride(static_cast<int32_t>(capIdx), action.upName);
 
                 captureActions.push_back(action);
-                m_processedInstructions.insert(i + 1 + capIdx);
+                m_emission.MarkEmitted(i + 1 + capIdx);
                 ++capIdx;
             }
 
@@ -4431,7 +4497,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
                 m_inlineableClosures[SSARef{static_cast<uint8_t>(saveWhere.value.reg), saveWhere.ssaVersion}] = fnDecl;
-                m_processedInstructions.insert(i);
+                m_emission.MarkEmitted(i);
                 break;
             }
 
@@ -4503,7 +4569,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                         }
 
                         // instruction is consumed, else we will emit ghost definitions after the declaration.
-                        this->m_processedInstructions.insert(user->instructionIndex);
+                        m_emission.MarkEmitted(user->instructionIndex);
                     }
                 }
             }
@@ -4553,7 +4619,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                                    m_currentFunction->users.at(SSARef{inst.operands[0].value.reg, inst.operands[0].ssaVersion}),
                                    [&](const LiftedInstruction *user) { return user->instructionIndex < setList->instructionIndex; }
                                )) {
-                    m_processedInstructions.insert(inst.instructionIndex);
+                    m_emission.MarkEmitted(inst.instructionIndex);
                     break;
                 }
 
@@ -4613,7 +4679,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::LiftBlockInstructions(const B
                                 );
                             }
                 if (forceDefinitions || inst.operation == LiftedOperation::NEWTABLE || inst.operation == LiftedOperation::DUPTABLE)
-                    m_processedInstructions.insert(inst.instructionIndex);
+                    m_emission.MarkEmitted(inst.instructionIndex);
             }
             break;
         }

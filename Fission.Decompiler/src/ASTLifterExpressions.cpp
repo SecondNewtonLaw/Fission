@@ -74,7 +74,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         const auto *moveDef = m_currentFunction->GetDefinition(operand);
         if (!moveDef || moveDef->operation != LiftedOperation::MOVE)
             break;
-        if (m_processedInstructions.contains(moveDef->instructionIndex))
+        if (m_emission.Emitted(moveDef->instructionIndex))
             break;
         if (!forceExpression && !ShouldInline(moveDef) && !m_deferToConditionInline.contains(moveDef))
             break;
@@ -109,10 +109,10 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
 
     const auto *def = m_currentFunction->GetDefinition(operand);
 
-    if (def && m_processedInstructions.contains(def->instructionIndex)) {
+    if (def && m_emission.Emitted(def->instructionIndex)) {
         // a processed def was either declared (reference its name) or consumed by an inline; a tail-duplicated
         // region lifts it again, and only pure reads may be materialized twice
-        const bool consumedByInline = m_inlineConsumedDefs.contains(def->instructionIndex) &&
+        const bool consumedByInline = m_emission.InlineConsumed(def->instructionIndex) &&
                                       (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::GETIMPORT ||
                                        def->operation == LiftedOperation::GETGLOBAL || def->operation == LiftedOperation::GETUPVAL);
         if (!consumedByInline)
@@ -176,7 +176,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
                 !m_inlineableClosures.contains({static_cast<uint8_t>(operand.value.reg), operand.ssaVersion})) {
                 inner = m_currentFunction->GetDefinition(operand);
                 if (inner &&
-                    (inner->instructionIndex >= parent->instructionIndex || m_processedInstructions.contains(inner->instructionIndex) || !ShouldInline(inner) ||
+                    (inner->instructionIndex >= parent->instructionIndex || m_emission.Emitted(inner->instructionIndex) || !ShouldInline(inner) ||
                      (!BinaryOperatorSymbol(inner->operation) && !unary(inner->operation) && !tableRead(inner->operation) && !callCallee(inner))))
                     inner = nullptr;
             }
@@ -418,7 +418,7 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
             if (site->operands.size() <= sourceIndex || site->operands[sourceIndex].type != LiftedOperandType::Register)
                 break;
             const auto *source = m_currentFunction->GetDefinition(site->operands[sourceIndex]);
-            if (!source || source->instructionIndex >= call->instructionIndex || m_processedInstructions.contains(source->instructionIndex) ||
+            if (!source || source->instructionIndex >= call->instructionIndex || m_emission.Emitted(source->instructionIndex) ||
                 !ShouldInline(source) ||
                 (source->operation != LiftedOperation::CALL && source->operation != LiftedOperation::CALLFB && source->operation != LiftedOperation::NAMECALL))
                 break;
@@ -470,23 +470,23 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
             op.ssaVersion = argVersions[k];
 
             auto def = m_currentFunction->GetDefinition(op);
-            if (def && !m_processedInstructions.contains(def->instructionIndex) &&
+            if (def && !m_emission.Emitted(def->instructionIndex) &&
                 (def->operation == LiftedOperation::CALL || def->operation == LiftedOperation::CALLFB || def->operation == LiftedOperation::NAMECALL)) {
                 int32_t actualCallIdx = (def->operation == LiftedOperation::NAMECALL) ? def->instructionIndex + 2 : def->instructionIndex;
                 const auto &defInstrs = m_currentFunction->lpLiftedFunction->instructions;
                 if (actualCallIdx >= 0 && static_cast<size_t>(actualCallIdx) < defInstrs.size() && defInstrs[actualCallIdx].operands.size() > 2 &&
                     defInstrs[actualCallIdx].operands[2].value.imm.n == 0) {
-                    m_processedInstructions.insert(def->instructionIndex);
+                    m_emission.MarkEmitted(def->instructionIndex);
                     if (def->operation == LiftedOperation::NAMECALL) {
-                        m_processedInstructions.insert(def->instructionIndex + 1);
-                        m_processedInstructions.insert(def->instructionIndex + 2);
+                        m_emission.MarkEmitted(def->instructionIndex + 1);
+                        m_emission.MarkEmitted(def->instructionIndex + 2);
                     }
                     args.push_back(LiftCall(*def, def->instructionIndex, true));
                     adjustArgCallDef = nullptr; // spread tail
                     break;
                 }
             }
-            if (def && def->operation == LiftedOperation::GETVARARGS && !m_processedInstructions.contains(def->instructionIndex)) {
+            if (def && def->operation == LiftedOperation::GETVARARGS && !m_emission.Emitted(def->instructionIndex)) {
                 isVararg = true;
                 auto vararg = std::make_shared<VarArgExpression>();
                 vararg->bAdjustToOne = def->operands.size() > 1 && def->operands[1].value.imm.n == 2 && k + 1 == argVersions.size();
@@ -508,8 +508,8 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
         const auto &prevInst = m_currentFunction->lpLiftedFunction->instructions[prevIdx];
         if ((prevInst.operation == LiftedOperation::CALL || prevInst.operation == LiftedOperation::CALLFB) && prevInst.operands.size() > 2 &&
             prevInst.operands[2].value.imm.n == 0) {
-            if (!m_processedInstructions.contains(prevIdx)) {
-                m_processedInstructions.insert(prevIdx);
+            if (!m_emission.Emitted(prevIdx)) {
+                m_emission.MarkEmitted(prevIdx);
                 args.push_back(LiftCall(prevInst, prevIdx, true));
                 adjustArgCallDef = nullptr; // spread tail appended after the arg loop
             }
@@ -574,12 +574,12 @@ std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstructio
     if (auto lpDef = m_currentFunction->GetDefinition(itemOp)) {
         if (lpDef->operation == LiftedOperation::LOAD) {
             expr = LiftExpression(itemOp, true);
-            this->m_processedInstructions.insert(lpDef->instructionIndex);
-            this->m_inlineConsumedDefs.insert(lpDef->instructionIndex);
+            m_emission.MarkInlineConsumed(lpDef->instructionIndex);
+        } else if (lpDef->operation == LiftedOperation::MOVE && !forceComputed && !ShouldInline(lpDef)) {
+            expr = LiftExpression(itemOp, false);
         } else if (lpDef->operation == LiftedOperation::MOVE) {
             expr = LiftExpression(lpDef->operands[1], false);
-            this->m_processedInstructions.insert(lpDef->instructionIndex);
-            this->m_inlineConsumedDefs.insert(lpDef->instructionIndex);
+            m_emission.MarkInlineConsumed(lpDef->instructionIndex);
         } else {
             // SETLIST counts its first element twice (operand + implicit use); an otherwise unused computed element
             // is force-inlined so it cannot leak as a local declared after the constructor
@@ -594,8 +594,7 @@ std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstructio
                 ExplainKeep(lpDef, "constructor must reuse the materialized local", &setList);
             if ((singleUse && (canForce || ShouldInline(lpDef))) || inlineTable) {
                 expr = LiftExpression(itemOp, true);
-                this->m_processedInstructions.insert(lpDef->instructionIndex);
-                this->m_inlineConsumedDefs.insert(lpDef->instructionIndex);
+                m_emission.MarkInlineConsumed(lpDef->instructionIndex);
                 ConsumeInlinedInputs(*lpDef);
             } else {
                 expr = LiftExpression(itemOp, false);
@@ -691,14 +690,8 @@ std::shared_ptr<Expression> ASTLifter::LiftStoreTarget(const LiftedInstruction &
     }
 }
 
-std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst, std::vector<int32_t> *plan) {
-    const bool dryRun = plan != nullptr;
-    std::vector<std::shared_ptr<Expression>> elements;
-    std::vector<int32_t> candidatesIndexes;
-    int32_t tableReg = inst.operands[0].value.reg;
-    // a store to the same register at another version targets a different table
-    int32_t tableVersion = inst.operands[0].ssaVersion;
-    if (!dryRun && inst.operation == LiftedOperation::NEWTABLE) {
+std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstruction &inst) {
+    if (inst.operation == LiftedOperation::NEWTABLE) {
         std::vector<std::pair<const LiftedInstruction *, const LiftedInstruction *>> chain;
         const LiftedInstruction *current = &inst;
         bool complete = false;
@@ -741,16 +734,37 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
             std::shared_ptr<Expression> value = LiftSetListElement(*chain.back().second, 0, true);
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                 value = std::make_shared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
-                m_processedInstructions.insert(it->second->instructionIndex);
+                m_emission.MarkEmitted(it->second->instructionIndex);
                 if (it->first != &inst) {
-                    m_processedInstructions.insert(it->first->instructionIndex);
-                    m_inlineConsumedDefs.insert(it->first->instructionIndex);
+                    m_emission.MarkInlineConsumed(it->first->instructionIndex);
                     ConsumeInlinedInputs(*it->first);
                 }
             }
             return std::static_pointer_cast<TableLiteralNode>(value);
         }
     }
+    const auto plan = PlanTableLiteral(inst, false);
+    return plan ? RenderTableLiteral(inst, *plan) : std::make_shared<TableLiteralNode>();
+}
+
+static std::unordered_set<std::string> TemplateKeys(const LiftedInstruction &inst, const std::vector<LuauConstant> &constants) {
+    std::unordered_set<std::string> keys;
+    if (inst.operation == LiftedOperation::DUPTABLE && inst.operands[1].value.imm.k >= 0 && static_cast<size_t>(inst.operands[1].value.imm.k) < constants.size())
+        if (const auto &constant = constants[inst.operands[1].value.imm.k]; constant.kType == LUA_TTABLE) {
+            const auto &shape = constant.GetValue<LuauTable>();
+            keys.insert(shape.keys.begin(), shape.keys.end());
+        }
+    return keys;
+}
+
+std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const LiftedInstruction &inst, bool assumeInlined) {
+    const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
+    if (inst.operation == LiftedOperation::DUPTABLE && (inst.operands[1].value.imm.k < 0 || static_cast<size_t>(inst.operands[1].value.imm.k) >= constants.size()))
+        return std::nullopt;
+    TableLiteralPlan plan;
+    const int32_t tableReg = inst.operands[0].value.reg;
+    // a store to the same register at another version targets a different table
+    const int32_t tableVersion = inst.operands[0].ssaVersion;
     const int tableBlock = BlockOf(&inst);
     size_t scanEnd = static_cast<size_t>(inst.instructionIndex) + 1;
     if (const auto users = m_currentFunction->users.find({static_cast<uint8_t>(tableReg), tableVersion}); users != m_currentFunction->users.end())
@@ -763,32 +777,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 continue;
             scanEnd = (std::max)(scanEnd, static_cast<size_t>(user->instructionIndex) + 1);
         }
-    bool bFoundSetList = false;
-
-    // a template holding constant values lists every record field in source order; the others arrive as stores
-    std::unordered_map<std::string, std::shared_ptr<BinaryExpressionNode>> templateSlots;
-    if (inst.operation == LiftedOperation::DUPTABLE) {
-        int constantIdx = inst.operands[1].value.imm.k;
-        const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
-        if (constantIdx < 0 || static_cast<size_t>(constantIdx) >= constants.size())
-            return dryRun ? nullptr : std::make_shared<TableLiteralNode>();
-
-        const auto &constant = constants[constantIdx];
-        if (constant.kType == LUA_TTABLE) {
-            const auto &tableData = constant.GetValue<LuauTable>();
-            for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
-                const auto valIdx = tableData.valueConstantIndices[i];
-                const bool hasValue = valIdx >= 0 && static_cast<size_t>(valIdx) < constants.size();
-                auto entry = std::make_shared<BinaryExpressionNode>(
-                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
-                );
-                if (!hasValue)
-                    templateSlots.try_emplace(tableData.keys[i], entry);
-                elements.push_back(std::move(entry));
-            }
-        }
-    }
-    const size_t templateEntries = elements.size();
+    bool &bFoundSetList = plan.foundSetList;
 
     std::unordered_set<SSARef, std::hash<SSARef>> closureVisited;
     std::function<bool(const LiftedOperand &)> dependsOnClosure = [&](const LiftedOperand &op) -> bool {
@@ -876,19 +865,12 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     // a local table renders at its NEWTABLE, before values declared after it; an inlined table renders at its
     // last use, where every contributor exists
     const int32_t tableIndex = inst.instructionIndex;
-    // a plan is asked while deciding whether the table inlines, so it assumes it does
-    const bool tableIsLocal = !dryRun && !ShouldInline(&inst);
+    plan.tableIsLocal = !assumeInlined && !ShouldInline(&inst);
+    const bool tableIsLocal = plan.tableIsLocal;
 
     auto isLaterName = [&](const LiftedInstruction *def) -> bool { return BlockOf(def) == tableBlock && def->instructionIndex > tableIndex; };
 
-    std::unordered_set<std::string> templateKeys;
-    if (const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
-        inst.operation == LiftedOperation::DUPTABLE && inst.operands[1].value.imm.k >= 0 &&
-        static_cast<size_t>(inst.operands[1].value.imm.k) < constants.size())
-        if (const auto &constant = constants[inst.operands[1].value.imm.k]; constant.kType == LUA_TTABLE) {
-            const auto shape = constant.GetValue<LuauTable>();
-            templateKeys.insert(shape.keys.begin(), shape.keys.end());
-        }
+    const auto templateKeys = TemplateKeys(inst, constants);
     // unoptimized code stores a template field through a key loaded into a register
     const auto templateKey = [&](const LiftedOperand &key) {
         const auto *def = key.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(key) : nullptr;
@@ -909,7 +891,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     // an inlined table renders at its reader, after the closure's handler, which parked the closure for it
     auto closureField = [&](const LiftedOperand &value) -> bool {
         if (value.type != LiftedOperandType::Register ||
-            (!tableIsLocal && !dryRun && !m_inlineableClosures.contains({static_cast<uint8_t>(value.value.reg), value.ssaVersion})))
+            (!tableIsLocal && !assumeInlined && !m_inlineableClosures.contains({static_cast<uint8_t>(value.value.reg), value.ssaVersion})))
             return false;
         const auto *def = m_currentFunction->GetDefinition(value);
         const auto *store = SoleUser({static_cast<uint8_t>(value.value.reg), value.ssaVersion});
@@ -947,7 +929,11 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         if (!tableIsLocal || value.type != LiftedOperandType::Register || IsDiamondBoolLoad(value))
             return false;
         const auto *def = m_currentFunction->GetDefinition(value);
-        return def && !ShouldInline(def) && !isLaterName(def) && def->operation != LiftedOperation::NEWCLOSURE && def->operation != LiftedOperation::DUPCLOSURE;
+        if (!def || ShouldInline(def) || isLaterName(def))
+            return false;
+        // a closure read more than once is declared by name; a single-use one renders in place
+        return (def->operation != LiftedOperation::NEWCLOSURE && def->operation != LiftedOperation::DUPCLOSURE) ||
+               !m_currentFunction->IsSingleUse(value) || !m_inlineableClosures.contains({static_cast<uint8_t>(value.value.reg), value.ssaVersion});
     };
     // a field folds only when its whole value inlines at the field site; a register it reads that stays a
     // statement would be named inside the constructor before its declaration
@@ -974,15 +960,6 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         foldableMemo[key] = ok;
         return ok;
     };
-    auto closureSlot = [&](const LiftedOperand &value) -> std::shared_ptr<Expression> {
-        if (!tableIsLocal)
-            return LiftExpression(value);
-        auto slot =
-            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, nullptr, false);
-        m_closureSlots[SSARef{static_cast<uint8_t>(value.value.reg), value.ssaVersion}].push_back(slot);
-        return slot;
-    };
-
     // does `op`, rendered by LiftExpression, name a statement-level value declared after this table?
     std::unordered_map<SSARef, bool, std::hash<SSARef>> laterMemo;
     std::function<bool(const LiftedOperand &)> readsLaterName = [&](const LiftedOperand &op) -> bool {
@@ -1070,7 +1047,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
 
     // An effect between the table and a store may only be skipped when it is rendered inside this constructor:
     // its value reaches a store into this table, possibly through a nested constructor built after it.
-    auto feedsThisTable = [&](const LiftedInstruction &value) {
+    auto feedsThisTable = [&](const LiftedInstruction &value) -> const LiftedInstruction * {
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
         const LiftedInstruction *current = &value;
         if (current->operation == LiftedOperation::NAMECALL || current->operation == LiftedOperation::NAMECALLUDATA)
@@ -1101,225 +1078,284 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                         candidate->operands[tableIndex].ssaVersion == ref.version)
                         continue;
                     if (user && user != candidate)
-                        return false;
+                        return nullptr;
                     user = candidate;
                 }
             }
             if (!user || user->instructionIndex <= current->instructionIndex)
-                return false;
+                return nullptr;
             const bool store = isStore(*user);
             if (!store) {
                 current = user;
                 continue;
             }
             if (user->operands.size() < 2)
-                return false;
+                return nullptr;
             const auto &table = user->operands[user->operation == LiftedOperation::SETLIST ? 0 : 1];
             if (table.value.reg == tableReg && table.ssaVersion == tableVersion)
-                return true;
+                return user;
             const auto *nested = m_currentFunction->GetDefinition(table);
             if (!nested || (nested->operation != LiftedOperation::NEWTABLE && nested->operation != LiftedOperation::DUPTABLE) ||
                 nested->instructionIndex <= inst.instructionIndex)
-                return false;
+                return nullptr;
             current = nested;
         }
-        return false;
+        return nullptr;
     };
 
-    for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
-        const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
-        const bool store = candidate.operation == LiftedOperation::SETLIST || candidate.operation == LiftedOperation::SETTABLE ||
-                           candidate.operation == LiftedOperation::SETTABLEKS || candidate.operation == LiftedOperation::SETTABLEN;
-        const size_t tableOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
-        const bool ownStore = store && candidate.operands.size() > tableOperand && candidate.operands[tableOperand].type == LiftedOperandType::Register &&
-                              candidate.operands[tableOperand].value.reg == tableReg && candidate.operands[tableOperand].ssaVersion == tableVersion;
-        if (!ownStore) {
-            const auto readsOwnTable = [&](const LiftedOperand &op) {
-                return op.type == LiftedOperandType::Register && op.value.reg == tableReg && op.ssaVersion == tableVersion;
-            };
-            bool readsTable = false;
-            for (size_t oi = 0; oi < candidate.operands.size(); ++oi) {
-                const auto access = SSABuilder::GetRegisterAccess(candidate, oi);
-                if ((access == AccessType::Read || access == AccessType::ReadWrite) && readsOwnTable(candidate.operands[oi])) {
-                    readsTable = true;
-                    break;
-                }
-            }
-            if (!readsTable && (candidate.operation == LiftedOperation::CALL || candidate.operation == LiftedOperation::CALLFB))
-                readsTable = std::ranges::any_of(CallArguments(candidate), readsOwnTable);
-            if (readsTable)
-                break;
-        }
-        if ((candidate.operation == LiftedOperation::SETLIST && storesIntoForeignTable(candidate, 0)) ||
-            ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
-              candidate.operation == LiftedOperation::SETTABLEN) &&
-             storesIntoForeignTable(candidate, 1)))
-            break;
-        if (inst.operation == LiftedOperation::DUPTABLE) {
-            if (tableBlock < 0 || i > static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex))
-                break;
-            const bool fieldStore =
-                (candidate.operation == LiftedOperation::SETTABLEKS || (candidate.operation == LiftedOperation::SETTABLE && templateKey(candidate.operands[2]))) &&
-                candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion == tableVersion;
-            const bool closure = (candidate.operation == LiftedOperation::NEWCLOSURE || candidate.operation == LiftedOperation::DUPCLOSURE) &&
-                                 closureField(candidate.operands[0]);
-            const size_t storedOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
-            const bool nestedStore = (candidate.operation == LiftedOperation::SETLIST || candidate.operation == LiftedOperation::SETTABLE ||
-                                      candidate.operation == LiftedOperation::SETTABLEKS || candidate.operation == LiftedOperation::SETTABLEN) &&
-                                     candidate.operands.size() > storedOperand && candidate.operands[storedOperand].value.reg != tableReg;
-            if (!fieldStore && !closure && !nestedStore && candidate.operation != LiftedOperation::NOP && candidate.operation != LiftedOperation::CAPTURE &&
-                !IsFastCall(candidate.operation)) {
-                if (!ShouldInline(&candidate))
-                    break;
+    // an effect skipped because a later store carries it into the constructor: (its index, that store's index)
+    std::vector<std::pair<size_t, int32_t>> carried;
+    const auto scan = [&] {
+        for (size_t i = inst.instructionIndex + 1; i < scanEnd; ++i) {
+            const auto &candidate = m_currentFunction->lpLiftedFunction->instructions[i];
+            const bool store = candidate.operation == LiftedOperation::SETLIST || candidate.operation == LiftedOperation::SETTABLE ||
+                               candidate.operation == LiftedOperation::SETTABLEKS || candidate.operation == LiftedOperation::SETTABLEN;
+            const size_t tableOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
+            const bool ownStore = store && candidate.operands.size() > tableOperand && candidate.operands[tableOperand].type == LiftedOperandType::Register &&
+                                  candidate.operands[tableOperand].value.reg == tableReg && candidate.operands[tableOperand].ssaVersion == tableVersion;
+            if (!ownStore) {
+                const auto readsOwnTable = [&](const LiftedOperand &op) {
+                    return op.type == LiftedOperandType::Register && op.value.reg == tableReg && op.ssaVersion == tableVersion;
+                };
                 bool readsTable = false;
-                for (size_t operand = 1; operand < candidate.operands.size(); ++operand)
-                    if (candidate.operands[operand].type == LiftedOperandType::Register && candidate.operands[operand].value.reg == tableReg &&
-                        candidate.operands[operand].ssaVersion == tableVersion)
+                for (size_t oi = 0; oi < candidate.operands.size(); ++oi) {
+                    const auto access = SSABuilder::GetRegisterAccess(candidate, oi);
+                    if ((access == AccessType::Read || access == AccessType::ReadWrite) && readsOwnTable(candidate.operands[oi])) {
                         readsTable = true;
+                        break;
+                    }
+                }
+                if (!readsTable && (candidate.operation == LiftedOperation::CALL || candidate.operation == LiftedOperation::CALLFB))
+                    readsTable = std::ranges::any_of(CallArguments(candidate), readsOwnTable);
                 if (readsTable)
                     break;
             }
-        }
-
-        if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF ||
-            candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::JUMPIFEQ ||
-            candidate.operation == LiftedOperation::JUMPIFNOTEQ || candidate.operation == LiftedOperation::JUMPIFLE ||
-            candidate.operation == LiftedOperation::JUMPIFNOTLE || candidate.operation == LiftedOperation::JUMPIFLT ||
-            candidate.operation == LiftedOperation::JUMPIFNOTLT || candidate.operation == LiftedOperation::JUMPXEQK ||
-            candidate.operation == LiftedOperation::RETURN || candidate.operation == LiftedOperation::BREAK ||
-            candidate.operation == LiftedOperation::FORNPREP || candidate.operation == LiftedOperation::FORNLOOP ||
-            candidate.operation == LiftedOperation::FORGLOOP || candidate.operation == LiftedOperation::FORGPREP ||
-            candidate.operation == LiftedOperation::FORGPREP_INEXT || candidate.operation == LiftedOperation::FORGPREP_NEXT)
-            break;
-
-        if (candidate.operation == LiftedOperation::SETLIST) {
-            if (candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion != tableVersion)
+            if ((candidate.operation == LiftedOperation::SETLIST && storesIntoForeignTable(candidate, 0)) ||
+                ((candidate.operation == LiftedOperation::SETTABLE || candidate.operation == LiftedOperation::SETTABLEKS ||
+                  candidate.operation == LiftedOperation::SETTABLEN) &&
+                 storesIntoForeignTable(candidate, 1)))
                 break;
-            if (candidate.operands[0].value.reg == tableReg) {
-                if (const auto setListElements = SetListElements(candidate); !setListElements.empty()) {
-                    const int startReg = candidate.operands[1].value.reg;
-                    // a local table renders before later-declared values; elements naming them, or collapsed
-                    // comparisons, stay `t[i] = elem` statements after the constructor
-                    if (tableIsLocal && std::ranges::any_of(setListElements, [&](const LiftedOperand &element) {
-                            diamondVisited.clear();
-                            return elementForwardRefs(startReg, element) || dependsOnMaterializedDiamond(element);
-                        }))
+            if (inst.operation == LiftedOperation::DUPTABLE) {
+                if (tableBlock < 0 || i > static_cast<size_t>(m_currentFunction->basicBlocks[tableBlock].lpTail->instructionIndex))
+                    break;
+                const bool fieldStore = (candidate.operation == LiftedOperation::SETTABLEKS ||
+                                         (candidate.operation == LiftedOperation::SETTABLE && templateKey(candidate.operands[2]))) &&
+                                        candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion == tableVersion;
+                const bool closure = (candidate.operation == LiftedOperation::NEWCLOSURE || candidate.operation == LiftedOperation::DUPCLOSURE) &&
+                                     closureField(candidate.operands[0]);
+                const size_t storedOperand = candidate.operation == LiftedOperation::SETLIST ? 0 : 1;
+                const bool nestedStore = (candidate.operation == LiftedOperation::SETLIST || candidate.operation == LiftedOperation::SETTABLE ||
+                                          candidate.operation == LiftedOperation::SETTABLEKS || candidate.operation == LiftedOperation::SETTABLEN) &&
+                                         candidate.operands.size() > storedOperand && candidate.operands[storedOperand].value.reg != tableReg;
+                if (!fieldStore && !closure && !nestedStore && candidate.operation != LiftedOperation::NOP &&
+                    candidate.operation != LiftedOperation::CAPTURE && !IsFastCall(candidate.operation)) {
+                    if (!ShouldInline(&candidate))
                         break;
-
-                    for (size_t k = 0; k < setListElements.size() && !dryRun; k++)
-                        elements.push_back(closureField(setListElements[k]) ? closureSlot(setListElements[k]) : LiftSetListElement(candidate, k, true));
-
-                    // a fixed-count SETLIST truncated its last element to one value: `{a, (g())}`
-                    if (!dryRun && candidate.operands.size() > 2 && candidate.operands[2].value.imm.n != 0 && !elements.empty()) {
-                        const auto *ldef = m_currentFunction->GetDefinition(setListElements.back());
-                        if (ldef &&
-                            (ldef->operation == LiftedOperation::CALL || ldef->operation == LiftedOperation::CALLFB ||
-                             ldef->operation == LiftedOperation::NAMECALL) &&
-                            IsMultretCall(*ldef, ldef->instructionIndex)) {
-                            if (auto c = std::dynamic_pointer_cast<CallExpressionNode>(elements.back()))
-                                c->bAdjustToOne = true;
-                            else if (auto n = std::dynamic_pointer_cast<NameCallExpressionNode>(elements.back()))
-                                n->bAdjustToOne = true;
-                        }
-                    }
+                    bool readsTable = false;
+                    for (size_t operand = 1; operand < candidate.operands.size(); ++operand)
+                        if (candidate.operands[operand].type == LiftedOperandType::Register && candidate.operands[operand].value.reg == tableReg &&
+                            candidate.operands[operand].ssaVersion == tableVersion)
+                            readsTable = true;
+                    if (readsTable)
+                        break;
                 }
-                bFoundSetList = true;
-                candidatesIndexes.emplace_back(candidate.instructionIndex);
+            }
+
+            if (candidate.operation == LiftedOperation::JUMP || candidate.operation == LiftedOperation::JUMPIF ||
+                candidate.operation == LiftedOperation::JUMPIFNOT || candidate.operation == LiftedOperation::JUMPIFEQ ||
+                candidate.operation == LiftedOperation::JUMPIFNOTEQ || candidate.operation == LiftedOperation::JUMPIFLE ||
+                candidate.operation == LiftedOperation::JUMPIFNOTLE || candidate.operation == LiftedOperation::JUMPIFLT ||
+                candidate.operation == LiftedOperation::JUMPIFNOTLT || candidate.operation == LiftedOperation::JUMPXEQK ||
+                candidate.operation == LiftedOperation::RETURN || candidate.operation == LiftedOperation::BREAK ||
+                candidate.operation == LiftedOperation::FORNPREP || candidate.operation == LiftedOperation::FORNLOOP ||
+                candidate.operation == LiftedOperation::FORGLOOP || candidate.operation == LiftedOperation::FORGPREP ||
+                candidate.operation == LiftedOperation::FORGPREP_INEXT || candidate.operation == LiftedOperation::FORGPREP_NEXT)
+                break;
+
+            if (candidate.operation == LiftedOperation::SETLIST) {
+                if (candidate.operands[0].value.reg == tableReg && candidate.operands[0].ssaVersion != tableVersion)
+                    break;
+                if (candidate.operands[0].value.reg == tableReg) {
+                    std::vector<bool> slots;
+                    if (const auto setListElements = SetListElements(candidate); !setListElements.empty()) {
+                        const int startReg = candidate.operands[1].value.reg;
+                        // a local table renders before later-declared values; elements naming them, or collapsed
+                        // comparisons, stay `t[i] = elem` statements after the constructor
+                        if (tableIsLocal && std::ranges::any_of(setListElements, [&](const LiftedOperand &element) {
+                                diamondVisited.clear();
+                                return elementForwardRefs(startReg, element) || dependsOnMaterializedDiamond(element);
+                            }))
+                            break;
+                        for (const auto &element : setListElements)
+                            slots.push_back(closureField(element));
+                    }
+                    bFoundSetList = true;
+                    plan.stores.push_back({candidate.instructionIndex, std::move(slots)});
+                    // a multi-value tail must stay last: a field rendered after it cuts it to one value
+                    if (candidate.operands.size() > 2 && candidate.operands[2].value.imm.n == 0)
+                        return;
+                }
+            } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
+                if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                    break;
+                if (candidate.operands[1].value.reg == tableReg) {
+                    const bool closure = closureField(candidate.operands[0]);
+                    if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
+                                     (tableIsLocal && readsLaterName(candidate.operands[0]))))
+                        break;
+                    plan.stores.push_back({candidate.instructionIndex, {closure}});
+                    ++keyedFields;
+                }
+            } else if (candidate.operation == LiftedOperation::SETTABLEN) {
+                if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                    break;
+                if (candidate.operands[1].value.reg == tableReg) {
+                    const bool closure = closureField(candidate.operands[0]);
+                    if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
+                                     (tableIsLocal && readsLaterName(candidate.operands[0]))))
+                        break;
+                    plan.stores.push_back({candidate.instructionIndex, {closure}});
+                    ++keyedFields;
+                }
+            } else if (candidate.operation == LiftedOperation::SETTABLE) {
+                if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
+                    break;
+                if (candidate.operands[1].value.reg == tableReg) {
+                    if (m_setListKeySnapshots.contains(&candidate))
+                        break;
+                    const bool closure = closureField(candidate.operands[0]);
+                    const bool keyClosure = tableIsLocal && closureField(candidate.operands[2]);
+                    if ((!closure && readsTableReg(candidate.operands[0])) || (!keyClosure && readsTableReg(candidate.operands[2])))
+                        break;
+                    if (tableIsLocal && ((!closure && readsLaterName(candidate.operands[0])) || (!keyClosure && readsLaterName(candidate.operands[2]))))
+                        break;
+                    diamondVisited.clear();
+                    if (!closure && dependsOnMaterializedDiamond(candidate.operands[0]))
+                        break;
+                    diamondVisited.clear();
+                    if (!keyClosure && dependsOnMaterializedDiamond(candidate.operands[2]))
+                        break;
+                    if (!closure && !valueFoldable(candidate.operands[0]) && !earlierLocal(candidate.operands[0]))
+                        break;
+                    // a closure key outside its slot is declared by its own statement after the constructor
+                    closureVisited.clear();
+                    if (!keyClosure && dependsOnClosure(candidate.operands[2]))
+                        break;
+                    plan.stores.push_back({candidate.instructionIndex, {closure, keyClosure}});
+                    ++keyedFields;
+                }
+            } else if (CanOperationRaise(candidate.operation) || StaysAsStatement(&candidate)) {
+                const auto *store = feedsThisTable(candidate);
+                if (!store)
+                    break;
+                carried.emplace_back(i, store->instructionIndex);
+            }
+        }
+    };
+    // the carrying store must fold too, or the effect would land after the stores folded past it
+    for (;;) {
+        plan.stores.clear();
+        bFoundSetList = false;
+        keyedFields = 0;
+        carried.clear();
+        scan();
+        const auto stranded = std::ranges::find_if(carried, [&](const auto &effect) {
+            return std::ranges::none_of(plan.stores, [&](const auto &store) { return store.index == effect.second; });
+        });
+        if (stranded == carried.end())
+            return plan;
+        scanEnd = stranded->first;
+    }
+}
+
+std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInstruction &inst, const TableLiteralPlan &plan) {
+    const auto &constants = m_currentFunction->lpLiftedFunction->lpDeserialized->constants;
+    const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+    std::vector<std::shared_ptr<Expression>> elements;
+    // a template holding constant values lists every record field in source order; the others arrive as stores
+    std::unordered_map<std::string, std::shared_ptr<BinaryExpressionNode>> templateSlots;
+    if (inst.operation == LiftedOperation::DUPTABLE)
+        if (const auto &constant = constants[inst.operands[1].value.imm.k]; constant.kType == LUA_TTABLE) {
+            const auto &tableData = constant.GetValue<LuauTable>();
+            for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
+                const auto valIdx = tableData.valueConstantIndices[i];
+                const bool hasValue = valIdx >= 0 && static_cast<size_t>(valIdx) < constants.size();
+                auto entry = std::make_shared<BinaryExpressionNode>(
+                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
+                );
+                if (!hasValue)
+                    templateSlots.try_emplace(tableData.keys[i], entry);
+                elements.push_back(std::move(entry));
+            }
+        }
+    const size_t templateEntries = elements.size();
+
+    const auto value = [&](const LiftedOperand &operand, bool closureSlot) -> std::shared_ptr<Expression> {
+        if (!closureSlot || !plan.tableIsLocal)
+            return LiftExpression(operand);
+        auto slot =
+            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, nullptr, false);
+        m_closureSlots[SSARef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion}].push_back(slot);
+        return slot;
+    };
+    for (const auto &store : plan.stores) {
+        const auto &candidate = instructions[store.index];
+        if (candidate.operation == LiftedOperation::SETLIST) {
+            const auto setListElements = SetListElements(candidate);
+            for (size_t k = 0; k < setListElements.size(); k++)
+                elements.push_back(store.closureSlots[k] ? value(setListElements[k], true) : LiftSetListElement(candidate, k, true));
+            // a fixed-count SETLIST truncated its last element to one value: `{a, (g())}`
+            if (!setListElements.empty() && candidate.operands.size() > 2 && candidate.operands[2].value.imm.n != 0 && !elements.empty()) {
+                const auto *ldef = m_currentFunction->GetDefinition(setListElements.back());
+                if (ldef &&
+                    (ldef->operation == LiftedOperation::CALL || ldef->operation == LiftedOperation::CALLFB || ldef->operation == LiftedOperation::NAMECALL) &&
+                    IsMultretCall(*ldef, ldef->instructionIndex)) {
+                    if (auto c = std::dynamic_pointer_cast<CallExpressionNode>(elements.back()))
+                        c->bAdjustToOne = true;
+                    else if (auto n = std::dynamic_pointer_cast<NameCallExpressionNode>(elements.back()))
+                        n->bAdjustToOne = true;
+                }
             }
         } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
-            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
-                break;
-            if (candidate.operands[1].value.reg == tableReg) {
-                const bool closure = closureField(candidate.operands[0]);
-                if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
-                                 (tableIsLocal && readsLaterName(candidate.operands[0]))))
-                    break;
-                candidatesIndexes.emplace_back(candidate.instructionIndex);
-                ++keyedFields;
-                if (dryRun)
-                    continue;
-                const auto &k = ConstantAt(candidate.operands[2].value.imm.k);
-                elements.push_back(
-                    std::make_shared<BinaryExpressionNode>(
-                        "=", MakeTableKey(std::get<std::string>(k.constantData)),
-                        closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
-                    )
-                );
-                ConsumeInlinedDefs(candidate.operands[0]);
-            }
+            const auto &k = ConstantAt(candidate.operands[2].value.imm.k);
+            elements.push_back(
+                std::make_shared<BinaryExpressionNode>("=", MakeTableKey(std::get<std::string>(k.constantData)), value(candidate.operands[0], store.closureSlots[0]))
+            );
+            ConsumeInlinedDefs(candidate.operands[0]);
         } else if (candidate.operation == LiftedOperation::SETTABLEN) {
-            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
-                break;
-            if (candidate.operands[1].value.reg == tableReg) {
-                const bool closure = closureField(candidate.operands[0]);
-                if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
-                                 (tableIsLocal && readsLaterName(candidate.operands[0]))))
-                    break;
-                candidatesIndexes.emplace_back(candidate.instructionIndex);
-                ++keyedFields;
-                if (dryRun)
-                    continue;
-                // the immediate is index - 1
-                const int idx = candidate.operands[2].value.imm.n + 1;
-                elements.push_back(
-                    std::make_shared<BinaryExpressionNode>(
-                        "=", std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx)),
-                        closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0])
-                    )
-                );
-                ConsumeInlinedDefs(candidate.operands[0]);
-            }
+            // the immediate is index - 1
+            const int idx = candidate.operands[2].value.imm.n + 1;
+            elements.push_back(
+                std::make_shared<BinaryExpressionNode>(
+                    "=", std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx)), value(candidate.operands[0], store.closureSlots[0])
+                )
+            );
+            ConsumeInlinedDefs(candidate.operands[0]);
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
-            if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
-                break;
-            if (candidate.operands[1].value.reg == tableReg) {
-                if (m_setListKeySnapshots.contains(&candidate))
-                    break;
-                const bool closure = closureField(candidate.operands[0]);
-                if ((!closure && readsTableReg(candidate.operands[0])) || readsTableReg(candidate.operands[2]))
-                    break;
-                if (tableIsLocal && ((!closure && readsLaterName(candidate.operands[0])) || readsLaterName(candidate.operands[2])))
-                    break;
-                diamondVisited.clear();
-                if (!closure && dependsOnMaterializedDiamond(candidate.operands[0]))
-                    break;
-                diamondVisited.clear();
-                if (dependsOnMaterializedDiamond(candidate.operands[2]))
-                    break;
-                if (!closure && !valueFoldable(candidate.operands[0]) && !earlierLocal(candidate.operands[0]))
-                    break;
-                // a closure key is declared by its own statement after the constructor; computed keys fold fine
-                closureVisited.clear();
-                if (dependsOnClosure(candidate.operands[2]))
-                    break;
-                candidatesIndexes.emplace_back(candidate.instructionIndex);
-                ++keyedFields;
-                if (dryRun)
-                    continue;
-                auto keyExpr = LiftExpression(candidate.operands[2]);
-                auto valExpr = closure ? closureSlot(candidate.operands[0]) : LiftExpression(candidate.operands[0]);
-
-                elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
-                ConsumeInlinedDefs(candidate.operands[0]);
-                ConsumeInlinedDefs(candidate.operands[2]);
-            }
-        } else if ((CanOperationRaise(candidate.operation) || StaysAsStatement(&candidate)) && !feedsThisTable(candidate)) {
-            break;
+            auto keyExpr = value(candidate.operands[2], store.closureSlots[1]);
+            auto valExpr = value(candidate.operands[0], store.closureSlots[0]);
+            elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
+            ConsumeInlinedDefs(candidate.operands[0]);
+            ConsumeInlinedDefs(candidate.operands[2]);
         }
     }
 
-    if (dryRun) {
-        *plan = std::move(candidatesIndexes);
-        return nullptr;
-    }
+    const bool bFoundSetList = plan.foundSetList;
+    const auto templateKeys = TemplateKeys(inst, constants);
     if (bFoundSetList || !elements.empty())
-        for (const auto &ins : candidatesIndexes)
-            m_processedInstructions.insert(ins);
+        for (const auto &store : plan.stores)
+            m_emission.MarkEmitted(store.index);
     // a template names only record fields; beside list items a record field and a bracketed string key compile alike
     for (auto &element : elements)
         if (const auto keyed = std::dynamic_pointer_cast<TableBinaryExpressionNode>(element))
             if (const auto str = std::dynamic_pointer_cast<StringLiteralNode>(keyed->left); str && (bFoundSetList || templateKeys.contains(str->value)))
                 element = std::make_shared<BinaryExpressionNode>("=", MakeTableKey(str->value), keyed->right);
+    const auto literal = [](const std::shared_ptr<Expression> &value) {
+        return std::dynamic_pointer_cast<NilLiteralNode>(value) || std::dynamic_pointer_cast<BooleanLiteralNode>(value) ||
+               std::dynamic_pointer_cast<NumberLiteralNode>(value) || std::dynamic_pointer_cast<StringLiteralNode>(value);
+    };
+    // a value moved up into its slot would run before an earlier value that stays behind
+    bool pinned = false;
     for (size_t i = templateEntries; i < elements.size();) {
         const auto keyed = std::dynamic_pointer_cast<BinaryExpressionNode>(elements[i]);
         std::string key;
@@ -1328,7 +1364,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         else if (const auto str = keyed ? std::dynamic_pointer_cast<StringLiteralNode>(keyed->left) : nullptr)
             key = str->value;
         const auto slot = key.empty() ? templateSlots.end() : templateSlots.find(key);
-        if (slot == templateSlots.end()) {
+        if (slot == templateSlots.end() || (pinned && !literal(keyed->right))) {
+            pinned = pinned || !literal(keyed ? keyed->right : elements[i]);
             ++i;
             continue;
         }

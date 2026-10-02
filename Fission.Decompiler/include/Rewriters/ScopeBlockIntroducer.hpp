@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -284,53 +285,10 @@ class ScopeBlockIntroducer {
             ScanExpr(decl->value, refs, captures); // RHS only; the bound LHS name is the declaration, not a use
             return;
         }
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
-            ScanExpr(ifS->condition, refs, captures);
-            if (ifS->thenBranch)
-                ProcessList(ifS->thenBranch->body, refs, nullptr, &captures);
-            if (ifS->elseBranch)
-                ProcessList(ifS->elseBranch->body, refs, nullptr, &captures);
-            return;
-        }
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
             captures.insert(fn->capturedNames.begin(), fn->capturedNames.end());
             if (fn->lpFunctionBody)
                 ProcessList(fn->lpFunctionBody->body, refs);
-            return;
-        }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
-            ScanExpr(w->condition, refs, captures);
-            if (w->body)
-                ProcessList(w->body->body, refs, nullptr, &captures);
-            return;
-        }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
-            std::unordered_set<std::string> conditionRefs;
-            ScanExpr(r->condition, conditionRefs, captures);
-            refs.insert(conditionRefs.begin(), conditionRefs.end());
-            if (r->body)
-                ProcessList(r->body->body, refs, &conditionRefs, &captures);
-            return;
-        }
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
-            ScanExpr(fnum->startVariable, refs, captures);
-            ScanExpr(fnum->increaseBy, refs, captures);
-            ScanExpr(fnum->maxIncreased, refs, captures);
-            if (fnum->lpLoopBody)
-                ProcessList(fnum->lpLoopBody->body, refs, nullptr, &captures);
-            return;
-        }
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
-            ScanExpr(fgen->generator, refs, captures);
-            ScanExpr(fgen->state, refs, captures);
-            ScanExpr(fgen->index, refs, captures);
-            if (fgen->body)
-                ProcessList(fgen->body->body, refs, nullptr, &captures);
-            return;
-        }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            ScanExpr(asn->left, refs, captures); // a bare-identifier LHS write to a scoped-away local is unsafe
-            ScanExpr(asn->right, refs, captures);
             return;
         }
         if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
@@ -345,18 +303,12 @@ class ScopeBlockIntroducer {
             ScanExpr(expr, refs, captures);
             return;
         }
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
-            for (const auto &v : ret->returnValues)
-                ScanExpr(v, refs, captures);
-            return;
-        }
-        if (auto blk = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
-            ProcessList(blk->body, refs, nullptr, &captures);
-            return;
-        }
-        // BreakStatementNode / ContinueStatementNode / CommentNode reference nothing. Any future
-        // statement type lands here referencing nothing; which could permit an unsafe cut, so new
-        // statement kinds that can read locals MUST be added above.
+        // an assignment's bare-identifier LHS write to a scoped-away local is unsafe, so targets count as uses
+        const auto repeat = std::dynamic_pointer_cast<RepeatStatementNode>(stmt);
+        std::unordered_set<std::string> conditionRefs;
+        ForEachStatementExpression(stmt, [&](const std::shared_ptr<Expression> &e) { ScanExpr(e, repeat ? conditionRefs : refs, captures); });
+        refs.insert(conditionRefs.begin(), conditionRefs.end());
+        ForEachChildBlock(stmt, [&](std::vector<std::shared_ptr<Statement>> &body) { ProcessList(body, refs, repeat ? &conditionRefs : nullptr, &captures); });
     }
 
     // Scan a call used as a statement: callee/args are uses; rets are uses only when the call is NOT

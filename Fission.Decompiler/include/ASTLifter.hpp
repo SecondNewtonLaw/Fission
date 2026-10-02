@@ -8,14 +8,17 @@
 #include "DenominatorAnalysis.hpp"
 #include "Deserializer.hpp"
 #include "FissionDebugNotes.hpp"
+#include "InlineCallRecovery.hpp"
 #include "lua.h"
 
+#include <bitset>
 #include <boost/unordered/unordered_flat_set.hpp>
 #include <functional>
 #include <map>
 #include <memory>
 #include <optional>
 #include <set>
+#include <span>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -28,37 +31,13 @@ struct ASTFunction {
 
 };
 
-// Source line spans of every function in a chunk; an instruction whose line falls in another function's span is that function's body inlined
-// by the compiler at O2. Needs line info (debug level 1+).
-struct InlineSourceMap {
-    struct Source {
-        const DeserializedFunction *function;
-        int32_t parent;
-        int32_t firstLine;
-        int32_t lastLine;
-    };
-    std::vector<Source> sources;
-    // per source line: the innermost inlinable function whose body spans it, or -1
-    std::vector<int32_t> innermostByLine;
-    bool hasLineInfo = false;
-};
-std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder);
-
 class ControlFlowTask;
 
 // Limit recovery failure to one function.
 struct ASTLiftBudgetExceeded {};
 
-class ASTLifter {
-  public:
-    std::shared_ptr<Expression> InvertCondition(const std::shared_ptr<Expression> &cond);
-    explicit ASTLifter();
-
-    ASTFunction Lift(AnalyzedFunction &analyzedFunction);
-    std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
-    void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
-    void SetInlineSources(std::shared_ptr<const InlineSourceMap> sources) { m_inlineSources = std::move(sources); }
-
+// Everything ASTLifter knows about the function it is lifting; Lift starts each function from a fresh one.
+struct ASTLifterFunctionState {
     boost::unordered_flat_set<int32_t> m_definedRegisters;
     std::unordered_set<std::string> m_globalNames;
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_pinnedRegisters;
@@ -87,30 +66,42 @@ class ASTLifter {
     std::unordered_map<const LiftedInstruction *, CompoundAssignment> m_compoundAssignments;
     boost::unordered_flat_set<const LiftedInstruction *> m_compoundInlined;
 
-    boost::unordered_flat_set<int32_t> m_processedInstructions;
-    std::unordered_map<const LiftedInstruction *, std::string> m_setListKeySnapshots;
-
-    // Tail duplication must re-inline pure reads that never emitted a declaration.
-    boost::unordered_flat_set<int32_t> m_inlineConsumedDefs;
-    // defs rendered inside a folded constructor; force-materialized headers must not emit them again
-    boost::unordered_flat_set<int32_t> m_foldConsumedDefs;
-
-    struct PinnedRegisterScope {
-        ASTLifter *m_lpLifter;
-        SSARef m_ref;
-        bool m_inserted;
-
-        PinnedRegisterScope(ASTLifter *lifter, SSARef ref)
-            : m_lpLifter(lifter), m_ref(ref), m_inserted(lifter->m_pinnedRegisters.insert(ref).second) {}
-
-        ~PinnedRegisterScope() {
-            if (m_inserted)
-                m_lpLifter->m_pinnedRegisters.erase(m_ref);
+    // Per instruction index: what lifting has rendered of it so far. Copied whole to undo a speculative lift.
+    class EmissionLedger {
+        enum : uint8_t { kEmitted = 1, kPrelift = 2, kInlineConsumed = 4, kFoldConsumed = 8 };
+        std::vector<uint8_t> m_flags;
+        bool Test(int32_t index, uint8_t flag) const { return index >= 0 && static_cast<size_t>(index) < m_flags.size() && (m_flags[index] & flag); }
+        void Set(int32_t index, uint8_t flag) {
+            if (index < 0)
+                return;
+            if (static_cast<size_t>(index) >= m_flags.size())
+                m_flags.resize(index + 1, 0);
+            m_flags[index] |= flag;
         }
 
-        PinnedRegisterScope(const PinnedRegisterScope &) = delete;
-        PinnedRegisterScope &operator=(const PinnedRegisterScope &) = delete;
+      public:
+        bool Emitted(int32_t index) const { return Test(index, kEmitted); }
+        void MarkEmitted(int32_t index) { Set(index, kEmitted); }
+        // A re-lift may render the instruction again, unless a pre-pass folded it into a later construct (a generic-for's iterator call).
+        void Reopen(int32_t index) {
+            if (!Test(index, kPrelift) && index >= 0 && static_cast<size_t>(index) < m_flags.size())
+                m_flags[index] &= ~kEmitted;
+        }
+        // Everything emitted so far was folded by the pre-passes.
+        void FreezePrelift() {
+            for (auto &flags : m_flags)
+                if (flags & kEmitted)
+                    flags |= kPrelift;
+        }
+        // Rendered inside another expression; tail duplication must re-inline a pure read that never emitted a declaration.
+        bool InlineConsumed(int32_t index) const { return Test(index, kInlineConsumed); }
+        void MarkInlineConsumed(int32_t index) { Set(index, kEmitted | kInlineConsumed); }
+        // Rendered inside a folded constructor; force-materialized headers must not emit it again.
+        bool FoldConsumed(int32_t index) const { return Test(index, kFoldConsumed); }
+        void MarkFoldConsumed(int32_t index) { Set(index, kFoldConsumed); }
     };
+    EmissionLedger m_emission;
+    std::unordered_map<const LiftedInstruction *, std::string> m_setListKeySnapshots;
 
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_phiConsumers;
 
@@ -132,43 +123,9 @@ class ASTLifter {
     std::unordered_map<int32_t, SharedClosure> m_sharedClosures;
     // Constructor fields holding a closure lifted after the constructor; its handler fills them in place.
     std::unordered_map<SSARef, std::vector<std::shared_ptr<FunctionDeclarationNode>>> m_closureSlots;
-    // Renders a closure at a constructor slot or its own block's return instead of declaring it; true when handled.
-    bool RenderClosureInPlace(const LiftedInstruction &closure, const std::shared_ptr<FunctionDeclarationNode> &function, bool anonymous);
 
     // Class declarations collect following NEWCLASSMEMBER operations by SSA reference.
     std::unordered_map<SSARef, std::shared_ptr<ClassDeclarationNode>> m_pendingClasses;
-
-    int32_t m_dwLastFunctionIndex = 0;
-
-  private:
-    FissionDebugNotes *m_debugNotes = nullptr;
-    std::shared_ptr<const InlineSourceMap> m_inlineSources;
-    // per instruction index: the InlineSourceMap source whose inlined body it belongs to, or -1
-    std::vector<int32_t> m_inlineOrigin;
-    void ComputeInlineOrigins();
-    // Wraps each run of statements from one inlined function in a commented `do ... end`.
-    void MarkInlinedRegions(std::vector<std::shared_ptr<Statement>> &statements, int32_t enclosing = -1);
-    std::string m_debugFunction;
-
-    template <typename... Args> void Explain(std::format_string<Args...> format, Args &&...args) const {
-        if (m_debugNotes)
-            m_debugNotes->Add(FissionDebugStage::AST, format, std::forward<Args>(args)...);
-    }
-
-    template <typename... Args> void Explain(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
-        if (!m_debugNotes || !m_debugNotes->Enabled())
-            return;
-        m_debugNotes->AddBlock(FissionDebugStage::AST, m_debugFunction, block.dwBlockId, block.analysisNotes,
-                               std::format(format, std::forward<Args>(args)...));
-    }
-
-    void ExplainKeep(const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer = nullptr,
-                     const LiftedInstruction *barrier = nullptr) const;
-
-    AnalyzedFunction *m_currentFunction = nullptr;
-
-    // Reject malformed constant indices at the decompiler safety boundary.
-    const LuauConstant &ConstantAt(long idx) const;
 
     // Bound recursive definition lookup for hostile graphs.
     int m_expressionDepth = 0;
@@ -195,6 +152,117 @@ class ASTLifter {
     // Phi outputs of a condition's value term, read as the term's rebuilt expression while the condition is lifted.
     boost::unordered_flat_map<SSARef, std::shared_ptr<Expression>, std::hash<SSARef>> m_valueTermOverrides;
 
+    // ShouldInline inputs remain fixed during a function lift.
+    std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
+    std::unordered_map<const LiftedInstruction *, uint8_t> m_inlineBinaryDepth;
+    std::unordered_map<const LiftedInstruction *, bool> m_constructorElementMemo;
+    std::unordered_set<const LiftedInstruction *> m_shouldInlineActive;
+    // Materialized LOADB-diamond booleans cannot fold into table literals.
+    std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
+
+    // Natural loop bodies, one per header, merged over its latches; and the registers each body writes.
+    struct LoopBody {
+        std::vector<bool> blocks;
+        std::bitset<256> writes;
+    };
+    std::vector<LoopBody> m_loops;
+    std::vector<std::vector<uint32_t>> m_loopsOfBlock;
+    std::vector<int32_t> m_blockOfInstruction;
+
+    // Cap value-arm re-lifts for pathological CFGs.
+    uint32_t m_valueArmDuplications = 0;
+
+    // a `continue` runs the latch's statements; its copy is filled with clones of the latch's one lift
+    struct LatchCopies {
+        std::vector<std::shared_ptr<BlockStatementNode>> pending;
+        std::optional<std::vector<std::shared_ptr<Statement>>> lifted;
+    };
+    std::unordered_map<int32_t, LatchCopies> m_latchCopies;
+    std::unordered_set<const BlockStatementNode *> m_latchCopyNodes;
+
+    // what one walk iteration emitted for the block it entered, chained in walk order; a shared tail clones its first lift
+    struct BlockLift {
+        uint32_t block;
+        uint32_t next;
+        std::vector<std::shared_ptr<Statement>> statements;
+        // break/continue the walk emitted on reaching `next`
+        std::vector<std::shared_ptr<Statement>> trailer{};
+        std::shared_ptr<BlockLift> successor{};
+    };
+    std::unordered_map<uint32_t, std::shared_ptr<BlockLift>> m_blockLifts;
+    // visited blocks a walk meets as a tail it must repeat, with the loop exit that tail runs to
+    std::unordered_map<uint32_t, uint32_t> m_repeatedTails;
+
+    // union-find over the SSA versions phis join; a root identifies one variable
+    std::unordered_map<SSARef, SSARef> m_variableParent;
+
+    SSARef VariableOf(const SSARef &ref) {
+        const auto found = m_variableParent.find(ref);
+        if (found == m_variableParent.end() || found->second == ref)
+            return ref;
+        return found->second = VariableOf(found->second);
+    }
+};
+
+class ASTLifter : private ASTLifterFunctionState {
+  public:
+    std::shared_ptr<Expression> InvertCondition(const std::shared_ptr<Expression> &cond);
+    explicit ASTLifter();
+
+    ASTFunction Lift(AnalyzedFunction &analyzedFunction);
+    std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
+    void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
+    void SetInlineSources(std::shared_ptr<const InlineSourceMap> sources) { m_inlineSources = std::move(sources); }
+
+    struct PinnedRegisterScope {
+        ASTLifter *m_lpLifter;
+        SSARef m_ref;
+        bool m_inserted;
+
+        PinnedRegisterScope(ASTLifter *lifter, SSARef ref)
+            : m_lpLifter(lifter), m_ref(ref), m_inserted(lifter->m_pinnedRegisters.insert(ref).second) {}
+
+        ~PinnedRegisterScope() {
+            if (m_inserted)
+                m_lpLifter->m_pinnedRegisters.erase(m_ref);
+        }
+
+        PinnedRegisterScope(const PinnedRegisterScope &) = delete;
+        PinnedRegisterScope &operator=(const PinnedRegisterScope &) = delete;
+    };
+
+    // Renders a closure at a constructor slot or its own block's return instead of declaring it; true when handled.
+    bool RenderClosureInPlace(const LiftedInstruction &closure, const std::shared_ptr<FunctionDeclarationNode> &function, bool anonymous);
+
+    int32_t m_dwLastFunctionIndex = 0;
+
+  private:
+    FissionDebugNotes *m_debugNotes = nullptr;
+    std::shared_ptr<const InlineSourceMap> m_inlineSources;
+    // Records on each statement the inlined function its code came from, and notes each call rebuilt from an inlined body.
+    void StampInlineSources(std::vector<std::shared_ptr<Statement>> &statements);
+    std::string m_debugFunction;
+
+    template <typename... Args> void Explain(std::format_string<Args...> format, Args &&...args) const {
+        if (m_debugNotes)
+            m_debugNotes->Add(FissionDebugStage::AST, format, std::forward<Args>(args)...);
+    }
+
+    template <typename... Args> void Explain(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
+        if (!m_debugNotes || !m_debugNotes->Enabled())
+            return;
+        m_debugNotes->AddBlock(FissionDebugStage::AST, m_debugFunction, block.dwBlockId, block.analysisNotes,
+                               std::format(format, std::forward<Args>(args)...));
+    }
+
+    void ExplainKeep(const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer = nullptr,
+                     const LiftedInstruction *barrier = nullptr) const;
+
+    AnalyzedFunction *m_currentFunction = nullptr;
+
+    // Reject malformed constant indices at the decompiler safety boundary.
+    const LuauConstant &ConstantAt(long idx) const;
+
     ControlFlowTask LiftControlFlow(uint32_t currentBlockId, uint32_t stopBlockId, boost::unordered_flat_set<uint32_t> &visited);
     std::string GetFunctionName(DeserializedFunction *lpDeserialized) {
         if (lpDeserialized->debugName.has_value())
@@ -206,13 +274,34 @@ class ASTLifter {
     }
 
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const BasicBlock &block, bool forceDefinitions = false);
+    std::vector<std::shared_ptr<Statement>> EmitBlockInstructions(const BasicBlock &block, bool forceDefinitions);
+    // targets of `a, t.k = <multi-value>` whose temporaries each feed one adjacent move or store; empty when not that shape
+    std::vector<std::shared_ptr<Expression>> FoldMultiAssignment(
+        const LiftedInstruction &def, const std::vector<SSARef> &defs, std::vector<std::shared_ptr<Statement>> &statements, bool &declares
+    );
+    std::shared_ptr<BlockStatementNode> LatchCopy(uint32_t latchId);
+    // clones of the first walk from `fromBlockId` up to `stopBlockId`; `second` when it ran into the innermost loop exit
+    std::optional<std::pair<std::vector<std::shared_ptr<Statement>>, bool>> CloneLiftedWalk(uint32_t fromBlockId, uint32_t stopBlockId) const;
+    void SpliceLatchCopies(std::vector<std::shared_ptr<Statement>> &statements);
     bool CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const boost::unordered_flat_set<uint32_t> &visitedScopes);
     std::shared_ptr<Expression> LiftExpression(const LiftedOperand &operand, bool forceExpression = false);
     std::shared_ptr<Expression> ConstantLiteral(int32_t index) const;
     std::shared_ptr<Expression>
     LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, bool isNested, std::shared_ptr<Expression> calleeOverride = nullptr);
-    // With `plan`, renders nothing: records the store instructions an inlined constructor would fold.
-    std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst, std::vector<int32_t> *plan = nullptr);
+    // The population stores a constructor folds, in order, and which of their values render as a closure slot.
+    struct TableLiteralPlan {
+        struct Store {
+            int32_t index;
+            std::vector<bool> closureSlots;
+        };
+        std::vector<Store> stores;
+        bool foundSetList = false;
+        bool tableIsLocal = false;
+    };
+    // Lifts nothing. `assumeInlined` answers for an inlined table while that is still being decided. Nullopt for a malformed template.
+    std::optional<TableLiteralPlan> PlanTableLiteral(const LiftedInstruction &inst, bool assumeInlined);
+    std::shared_ptr<TableLiteralNode> RenderTableLiteral(const LiftedInstruction &inst, const TableLiteralPlan &plan);
+    std::shared_ptr<TableLiteralNode> LiftTableLiteral(const LiftedInstruction &inst);
     // The location a SETGLOBAL, SETUPVAL or SETTABLE* writes.
     std::shared_ptr<Expression> LiftStoreTarget(const LiftedInstruction &store);
     // Resolve SETLIST elements for folded and deferred constructor paths.
@@ -224,13 +313,13 @@ class ASTLifter {
     void ConsumeInlinedDefs(const LiftedOperand &operand);
     void ConsumeInlinedInputs(const LiftedInstruction &def);
     bool ShouldInlineImpl(const LiftedInstruction *inst);
-    // ShouldInline inputs remain fixed during a function lift.
-    std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
-    std::unordered_map<const LiftedInstruction *, uint8_t> m_inlineBinaryDepth;
-    std::unordered_map<const LiftedInstruction *, bool> m_constructorElementMemo;
-    std::unordered_set<const LiftedInstruction *> m_shouldInlineActive;
-    // Materialized LOADB-diamond booleans cannot fold into table literals.
-    std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
+    bool SingleUse(const LiftedInstruction *inst) const;
+    const LiftedInstruction *OnlyUser(const SSARef &ref) const;
+    bool MustMaterialize(const LiftedInstruction *inst);
+    std::optional<bool> InlinesConstructor(const LiftedInstruction *inst);
+    bool InlinesCall(const LiftedInstruction *inst);
+    bool InlinesCopy(const LiftedInstruction *inst);
+    bool InlinesValue(const LiftedInstruction *inst);
     static bool CanOperationRaise(LiftedOperation op);
     bool KeyMayRaise(const LiftedInstruction &store) const;
     // Luau never reallocates a parameter's register, so any write to it assigns the parameter.
@@ -252,6 +341,9 @@ class ASTLifter {
     bool InputRebound(const LiftedInstruction *def, const LiftedInstruction *use, int32_t skipIndex = -1, bool sameRegister = true);
     // True if an instruction satisfying `changes` runs on some path from `def` to `use` without re-running `def`.
     bool ChangedOnPath(const LiftedInstruction *def, const LiftedInstruction *use, const std::function<bool(const LiftedInstruction &)> &changes);
+    // Adds to `seen` the blocks reachable from `pending` along successor (or predecessor) edges without entering block `avoid`; false past the budget.
+    bool ReachAvoiding(std::vector<uint32_t> pending, bool forward, int32_t avoid, boost::unordered_flat_set<uint32_t> &seen) const;
+    void ComputeLoopBodies();
     // True if a location `def` reads outside its registers may be written before one of its uses.
     bool ReadLocationChanged(const LiftedInstruction *def);
     // True if `inst` inlines into an operand of `use` that is evaluated after the operand holding `value`, so rendering keeps their order.
@@ -284,7 +376,6 @@ class ASTLifter {
     void CollectCompoundAssignments();
     // Drops compounds whose right-hand side does not fully inline: a part left as a statement would run before the load.
     void KeepOrderedCompoundAssignments();
-    std::vector<int32_t> m_blockOfInstruction;
     int32_t BlockOf(const LiftedInstruction *inst) const {
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
         if (instructions.empty() || inst < instructions.data() || inst >= instructions.data() + instructions.size())
@@ -303,8 +394,6 @@ class ASTLifter {
     bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
     // Blocks of a forward region entered only at `start` and ending at `stop` or a return.
     std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6) const;
-    // Cap value-arm re-lifts for pathological CFGs.
-    uint32_t m_valueArmDuplications = 0;
 
     // Hoist phi targets that must outlive branch scopes.
     void HoistPhiLocals(

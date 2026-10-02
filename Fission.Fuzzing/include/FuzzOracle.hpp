@@ -44,6 +44,7 @@ namespace fuzz {
     inline int optimizationLevel = kOpt;
     // debug level <= 1 elides constant locals; Fission reads no debug names, so only code shape changes
     inline int debugLevel = kDebug;
+    inline DecompilerFlags decompileFlags = static_cast<DecompilerFlags>(0);
 
     inline void EnableLuauFlags() {
         static bool done = false;
@@ -224,7 +225,7 @@ namespace fuzz {
         Decompiler decompiler{};
         DecompiledOut r{};
         try {
-            auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{optimizationLevel, debugLevel});
+            auto result = decompiler.DecompileTestCode(source, decompileFlags, Luau::CompileOptions{optimizationLevel, debugLevel});
             r.code = result.resultCode;
             r.output = result.decompilationOutput;
         } catch (...) {

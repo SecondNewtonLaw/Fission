@@ -90,6 +90,18 @@ class ExportDeclarationRewriter {
                 }
             }
         }
+        for (const auto &key : entryOrder) {
+            const auto rhs = std::dynamic_pointer_cast<IdentifierExpressionNode>(entries.at(key));
+            if (!rhs || !rhs->identifier || functionSources.contains(key))
+                continue;
+            for (size_t j = 0; j < tableIndex; ++j)
+                if (const auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements[j]);
+                    fn && fn->bIsLocalDeclaration && fn->functionName == rhs->identifier->name) {
+                    functionSources.emplace(key, j);
+                    functionNames.emplace(key, rhs->identifier->name);
+                    break;
+                }
+        }
         if (keys.empty())
             return;
         for (size_t i = 0; i + 1 < statements.size(); ++i)

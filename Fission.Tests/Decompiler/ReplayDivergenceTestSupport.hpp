@@ -12,11 +12,14 @@
 namespace replay_divergence {
     struct CompileLevels {
         int optimization, debug;
-        CompileLevels(int optimizationLevel, int debugLevel)
-            : optimization(std::exchange(fuzz::optimizationLevel, optimizationLevel)), debug(std::exchange(fuzz::debugLevel, debugLevel)) {}
+        DecompilerFlags flags;
+        CompileLevels(int optimizationLevel, int debugLevel, DecompilerFlags decompileFlags = fuzz::decompileFlags)
+            : optimization(std::exchange(fuzz::optimizationLevel, optimizationLevel)), debug(std::exchange(fuzz::debugLevel, debugLevel)),
+              flags(std::exchange(fuzz::decompileFlags, decompileFlags)) {}
         ~CompileLevels() {
             fuzz::optimizationLevel = optimization;
             fuzz::debugLevel = debug;
+            fuzz::decompileFlags = flags;
         }
     };
 
