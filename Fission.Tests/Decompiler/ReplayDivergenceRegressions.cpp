@@ -1027,6 +1027,37 @@ return true;)LUA";
     CHECK(fuzz::LuauCompiles(result.output));
 }
 
+TEST_CASE("Replay: a break out of a loop whose body ends in an endless loop skips that loop", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function g(c, s, tb)
+    while c() do
+        if s then
+            if tb then
+                break
+            end
+        else
+            print(1)
+        end
+        while 447 do
+            print(2)
+        end
+    end
+    for i = 1, c() do
+        print(i)
+    end
+    return nil
+end
+local k = 0
+local function c()
+    k += 1
+    return k > 1 and 2
+end
+g(c, true, true)
+g(c, true, true)
+return true)LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
 TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item","[Decompiler][ReplayRegress][Semantics]") {
     const std::string source = "local o = { field = 1, method = function() return 2 end }\nresult = { o.field, [function() end] = { y = 160 }, o:method(), [\"k\"] = 3 }\nprint(#result, result.k)";
     for (int opt = 0; opt <= 2; ++opt)

@@ -1438,10 +1438,42 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 if (exitId > static_cast<int32_t>(currentBlockId) && exitId < static_cast<int32_t>(m_currentFunction->basicBlocks.size()) &&
                     (stopBlockId == InvalidBlockId || exitId <= static_cast<int32_t>(stopBlockId))) {
                     const auto &exit = m_currentFunction->basicBlocks[exitId];
-                    if ((exit.bType == BlockType::Standard || exit.bType == BlockType::Return) && exit.predecessors.size() > 1 && exit.phiNodes.empty()) {
+                    const bool plainExit = exit.bType == BlockType::Standard || exit.bType == BlockType::Return;
+                    if ((plainExit || exit.bType == BlockType::IfHeader || exit.bType == BlockType::LoopHeader) && exit.predecessors.size() > 1 &&
+                        exit.phiNodes.empty()) {
                         m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
                         const int32_t bodyId = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse, true);
                         m_loopExitStack.pop_back();
+                        // a loop whose body ends in an endless loop loses its back edge; the test skipping the body is its only normal exit
+                        const auto bodyNeverFallsOut = [&] {
+                            if (std::ranges::find(exit.predecessors, currentBlockId) == exit.predecessors.end())
+                                return false;
+                            // tests jumping to the exit are its breaks; falling into it or returning is an ordinary arm
+                            boost::unordered_flat_set<uint32_t> seen;
+                            bool endless = false;
+                            for (std::vector<uint32_t> pending{static_cast<uint32_t>(bodyId)}; !pending.empty();) {
+                                const uint32_t id = pending.back();
+                                pending.pop_back();
+                                if (id >= m_currentFunction->basicBlocks.size())
+                                    return false;
+                                const auto &block = m_currentFunction->basicBlocks[id];
+                                if (!seen.insert(id).second)
+                                    continue;
+                                if (block.bType == BlockType::Return || block.successors.empty())
+                                    return false;
+                                endless |= block.bType == BlockType::LoopLatch && block.bTerminator == BlockTerminator::Unconditional;
+                                for (const uint32_t successor : block.successors) {
+                                    if (successor == static_cast<uint32_t>(exitId)) {
+                                        if (block.bTerminator != BlockTerminator::Conditional || block.bType == BlockType::LoopHeader ||
+                                            block.bType == BlockType::LoopLatch)
+                                            return false;
+                                        continue;
+                                    }
+                                    pending.push_back(successor);
+                                }
+                            }
+                            return endless;
+                        };
                         if (bodyId > static_cast<int32_t>(currentBlockId) && bodyId < exitId &&
                             std::ranges::any_of(
                                 exit.predecessors,
@@ -1450,14 +1482,15 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                            m_currentFunction->basicBlocks[pred].ifStatementTrue == static_cast<uint32_t>(exitId);
                                 }
                             ) &&
-                            std::ranges::any_of(
-                                exit.predecessors,
-                                [&](uint32_t pred) {
-                                    const auto &normal = m_currentFunction->basicBlocks[pred];
-                                    return pred >= static_cast<uint32_t>(bodyId) && normal.bType == BlockType::LoopLatch &&
-                                           normal.loopExit == static_cast<uint32_t>(exitId);
-                                }
-                            )) {
+                            ((plainExit && std::ranges::any_of(
+                                               exit.predecessors,
+                                               [&](uint32_t pred) {
+                                                   const auto &normal = m_currentFunction->basicBlocks[pred];
+                                                   return pred >= static_cast<uint32_t>(bodyId) && normal.bType == BlockType::LoopLatch &&
+                                                          normal.loopExit == static_cast<uint32_t>(exitId);
+                                               }
+                                           )) ||
+                             bodyNeverFallsOut())) {
                             m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
                             auto body = co_await LiftControlFlow(currentBlockId, static_cast<uint32_t>(exitId), visited);
                             m_loopExitStack.pop_back();
@@ -1528,7 +1561,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
         // fuck you luauc.
         if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
-            if (visited.contains(currentBlockId)) {                if (const auto repeated = m_repeatedTails.find(currentBlockId); repeated != m_repeatedTails.end()) {
+            if (visited.contains(currentBlockId)) {
+                if (const auto repeated = m_repeatedTails.find(currentBlockId); repeated != m_repeatedTails.end()) {
                     if (appendLiftedWalk())
                         break;
                     if (const auto region = SharedTailRegion(
