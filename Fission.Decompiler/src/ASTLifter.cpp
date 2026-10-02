@@ -216,6 +216,28 @@ static std::string DisambiguateClosureName(
     return unique;
 }
 
+// a value read past the innermost loop holding its write outlives one iteration's `local`
+static bool ReadAfterEnclosingLoop(const AnalyzedFunction &function, const LiftedInstruction &definition, const LiftedOperand &output) {
+    const int32_t at = definition.instructionIndex;
+    std::optional<std::pair<int32_t, int32_t>> loop;
+    for (const auto &header : function.basicBlocks) {
+        if (header.bType != BlockType::LoopHeader || !header.loopLatch || *header.loopLatch >= function.basicBlocks.size() || !header.lpHead)
+            continue;
+        const auto *latchTail = function.basicBlocks[*header.loopLatch].lpTail;
+        if (!latchTail)
+            continue;
+        const int32_t from = header.lpHead->instructionIndex, to = latchTail->instructionIndex;
+        if (from <= at && at <= to && (!loop || to - from < loop->second - loop->first))
+            loop.emplace(from, to);
+    }
+    if (!loop)
+        return false;
+    const auto users = function.users.find({static_cast<uint8_t>(output.value.reg), output.ssaVersion});
+    return users != function.users.end() && std::ranges::any_of(users->second, [&](const LiftedInstruction *user) {
+               return user->operation != LiftedOperation::PHI && (user->instructionIndex < loop->first || user->instructionIndex > loop->second);
+           });
+}
+
 std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Expression> &cond) {
     if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ") {
         return unary->operand;
@@ -1444,13 +1466,22 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 m_blockLifts.erase(id);
                             if (!body.empty() && body.back()->nodeKind == ASTNodeKind::BreakStatement)
                                 body.pop_back();
-                            const auto guard = std::ranges::find_if(body, [](const std::shared_ptr<Statement> &stmt) {
-                                const auto branch = std::dynamic_pointer_cast<IfStatementNode>(stmt);
-                                const auto breaks = [](const std::shared_ptr<BlockStatementNode> &arm) {
-                                    return arm && !arm->body.empty() && arm->body.back()->nodeKind == ASTNodeKind::BreakStatement;
+                            // a nested arm's break leaves the wrapper too, so nothing before it may move out
+                            const auto breaks = [](this const auto &self, const std::shared_ptr<Statement> &stmt) -> bool {
+                                if (!stmt)
+                                    return false;
+                                if (stmt->nodeKind == ASTNodeKind::BreakStatement)
+                                    return true;
+                                const auto anyIn = [&](const std::shared_ptr<BlockStatementNode> &block) {
+                                    return block && std::ranges::any_of(block->body, [&](const auto &inner) { return self(inner); });
                                 };
-                                return branch && (breaks(branch->thenBranch) || breaks(branch->elseBranch));
-                            });
+                                if (const auto branch = std::dynamic_pointer_cast<IfStatementNode>(stmt))
+                                    return anyIn(branch->thenBranch) || anyIn(branch->elseBranch);
+                                if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(stmt))
+                                    return anyIn(block);
+                                return false;
+                            };
+                            const auto guard = std::ranges::find_if(body, breaks);
                             if (guard != body.end()) {
                                 nodes.insert(nodes.end(), body.begin(), guard);
                                 body.erase(body.begin(), guard);
@@ -1497,8 +1528,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // compilers may inline the return for a break, which is annoying as fuck, and will break our lifting.
         // fuck you luauc.
         if (this->m_currentFunction->basicBlocks.at(currentBlockId).bType != BlockType::Return) {
-            if (visited.contains(currentBlockId)) {
-                if (const auto repeated = m_repeatedTails.find(currentBlockId); repeated != m_repeatedTails.end()) {
+            if (visited.contains(currentBlockId)) {                if (const auto repeated = m_repeatedTails.find(currentBlockId); repeated != m_repeatedTails.end()) {
                     if (appendLiftedWalk())
                         break;
                     if (const auto region = SharedTailRegion(
@@ -1522,9 +1552,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 const bool canDup = atEntryBlock && m_valueArmDuplications < kMaxValueArmDuplications;
                 // a sibling arm lifted this forward-entered block: it is a tail shared by exclusive paths, not a convergence
                 const auto &visitedBlock = m_currentFunction->basicBlocks[currentBlockId];
-                // a long tail is copied only when it rejoins this region's stop, never when it runs on to a return or out of a loop
+                // a long tail is copied only when it rejoins this region's stop, never when it runs on to a return or out of a loop;
+                // other paths entering it midway lift their own copies, so each path still runs it once
                 const auto closedTailRegion = [&]() -> std::optional<std::vector<uint32_t>> {
-                    auto region = SharedTailRegion(currentBlockId, stopBlockId, 4096, 256);
+                    auto region = SharedTailRegion(currentBlockId, stopBlockId, 4096, 256, false);
                     if (region && std::ranges::all_of(*region, [&](uint32_t id) {
                             const auto &block = m_currentFunction->basicBlocks[id];
                             return block.bType != BlockType::Return && std::ranges::all_of(block.successors, [&](uint32_t successor) {
@@ -1535,8 +1566,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     return std::nullopt;
                 };
                 const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && m_valueArmDuplications < kMaxValueArmDuplications &&
-                                         std::ranges::all_of(visitedBlock.predecessors, [&](uint32_t p) { return p < currentBlockId; });
-                if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
+                                         std::ranges::all_of(visitedBlock.predecessors, [&](uint32_t p) {
+                                             // a loop's own back edge does not enter the tail
+                                             return p < currentBlockId || (visitedBlock.bType == BlockType::LoopHeader && visitedBlock.loopLatch == p);
+                                         });                if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
                     // single pure value block whose successor IS the merge: fall through and re-lift inline.
                     ++m_valueArmDuplications;
                 } else if ((canDup || (siblingTail && visitedBlock.bType == BlockType::IfHeader)) && IsDuplicablePureRegion(currentBlockId, stopBlockId)) {
@@ -4161,7 +4194,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             // else e`): its value merges into the named local, so it must inherit that name. Pinning the
             // anon name here makes the closure's own assignment resolve to `anon_N = function`; a bare
             // global that drops the merge target, leaving the local nil.
-            if (!m_currentFunction->IsConsumedByPhi(inst.operands[0]))
+            const bool outlivesLoop = ReadAfterEnclosingLoop(*m_currentFunction, inst, inst.operands[0]);
+            if (!m_currentFunction->IsConsumedByPhi(inst.operands[0]) && !outlivesLoop)
                 m_currentFunction->SetVariableName(inst.operands[0].value.reg, inst.operands[0].ssaVersion, funcName);
 
             std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> argNames;
@@ -4260,7 +4294,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
-            if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
+            if (m_currentFunction->IsConsumedByPhi(saveWhere) || outlivesLoop ||
                 (m_definedRegisters.contains(saveWhere.value.reg) &&
                  (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion}) || IsParameterRegister(saveWhere.value.reg)))) {
                 if (localName) {
@@ -4508,6 +4542,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             // lookup, so later emissions would resolve to an unbound name.
             // ...also a class method's closure (single use is a NEWCLASSMEMBER value): park it so the
             // class reconstruction can pull the literal into the class body as `function m(self) ... end`.
+            const bool outlivesLoop = ReadAfterEnclosingLoop(*m_currentFunction, inst, saveWhere);
             if (IsSingleUseCallArgument(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion) ||
                 IsSingleUseClassMemberValue(m_currentFunction, saveWhere.value.reg, saveWhere.ssaVersion)) {
                 fnDecl->bAnonymousInline = true;
@@ -4518,7 +4553,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
             // Preserve phi targets and assignments to active debug locals.
             const auto localName = activeLocalName(inst, saveWhere);
-            if (m_currentFunction->IsConsumedByPhi(saveWhere) ||
+            if (m_currentFunction->IsConsumedByPhi(saveWhere) || outlivesLoop ||
                 (m_definedRegisters.contains(saveWhere.value.reg) &&
                  (localName || m_capturedVariableWrites.contains({saveWhere.value.reg, saveWhere.ssaVersion}) || IsParameterRegister(saveWhere.value.reg)))) {
                 if (localName) {

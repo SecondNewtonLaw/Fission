@@ -878,6 +878,155 @@ TEST_CASE("Replay: an empty if after a repeat sharing its header with an inner w
     }
 }
 
+TEST_CASE("Replay: a closure stored inside a loop and read after it stays visible past the loop", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local function f0()\nend\nrepeat\n  f0 = function()\n    return 1\n  end\n  if f0 then\n    break\n  end\nuntil f0()\nprint(f0())";
+    for (int opt = 0; opt <= 2; ++opt)
+        for (int debug = 1; debug <= 2; ++debug)
+            replay_divergence::CheckSemanticParity(source, opt, debug);
+}
+
+TEST_CASE("Replay: a tail after a nested continue runs on the path that skips the continue", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local n, m, a, b, c = 0, 2, tostring, tostring, tonumber("x")
+while n < 3 do
+    n += 1
+    if a then
+        if b then
+            print("x")
+            if c then
+                continue
+            end
+        end
+        for i = 1, m do
+            print(i)
+        end
+    else
+        print("y")
+    end
+    print("z")
+end
+)LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: a falsy term in a guarded and-or selector falls through to the default", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local function f(k, key, d, t)
+    return t and (k == 1 and t.Level1 or k == 2 and t.Level2 or k == 3 and t.Level3 or d[key]) or d[key]
+end
+print(f(1, "k", { k = 9 }, { Level2 = 5 }), f(2, "k", { k = 9 }, { Level2 = 5 }), f(4, "k", { k = 9 }, {}), f(1, "k", { k = 9 }, nil))
+)LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: a loop shared by two arms of a run-once repeat runs on both", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local n = 0
+local function w()
+    n += 1
+    return n < 3
+end
+local function g(x, a, b, c, d)
+    if x then
+        repeat
+            if a then
+                print(0)
+                if b then
+                    break
+                end
+            elseif c then
+                break
+            end
+            while w() do
+                print(1)
+            end
+            if d then
+                print(3)
+            end
+        until "a-b"
+    else
+        print(2)
+    end
+end
+g(true, true, nil, nil, true)
+return true)LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: breaks nested in arms keep a run-once repeat around them", "[Decompiler][ReplayRegress]") {
+    const std::string source = R"LUA(local v0 = function(p0, p1, p2)
+for i3 = p1("hello"), 294, (-"hello") do
+    if select then
+        continue
+    end
+end
+while (if p1(select) then print else (print <= "key")) do
+    local v3 = (#242.5);
+end
+return p0(), { y = nil, "a-b" };
+end;
+((if next then "" else select))(..., (v0)[next(next)]);
+while v0[{ data = v0, [t] = print }]:method(v0:set(string, table)) do
+    if (not {  }) then
+    end
+end
+v0 //= nil;
+if (v0:run()) then
+    repeat
+        if (false - nil) then
+            v0();
+            if select then
+                break
+            end
+        else
+            if obj then
+                break
+            end
+        end
+        while tostring:set(print) do
+            v0("a-b", tostring);
+            tonumber();
+        end
+        if ... then
+            v0();
+        end
+    until "a-b";
+    while (false) do
+        if v0[243.75] then
+            v0(string, v0);
+            print(nil, nil);
+            v0();
+        else
+            tonumber(ipairs, nil);
+            select();
+            if table then
+                break
+            end
+        end
+        while v0:run("x", 106.25) do
+            v0(false);
+            v0(243.25);
+        end
+    end
+else
+    v0 = (tonumber[true]);
+    for i1 = (-(-select)), (if "a-b" then v0 else "key"), tostring() do
+        pairs(nil, 382);
+        for i2 = obj, print, "key" do
+            i2(nil, "key");
+            v0(346);
+        end
+    end
+end
+return true;)LUA";
+    const replay_divergence::CompileLevels levels(2, 1);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(fuzz::LuauCompiles(result.output));
+}
+
 TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item","[Decompiler][ReplayRegress][Semantics]") {
     const std::string source = "local o = { field = 1, method = function() return 2 end }\nresult = { o.field, [function() end] = { y = 160 }, o:method(), [\"k\"] = 3 }\nprint(#result, result.k)";
     for (int opt = 0; opt <= 2; ++opt)

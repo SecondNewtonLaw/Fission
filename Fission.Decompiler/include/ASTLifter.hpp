@@ -393,7 +393,7 @@ class ASTLifter : private ASTLifterFunctionState {
     // Extend safe re-lifting across pure short-circuit regions that reconverge at one merge.
     bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
     // Blocks of a forward region entered only at `start` and ending at `stop` or a return.
-    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6) const;
+    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6, bool singleEntry = true) const;
 
     // Hoist phi targets that must outlive branch scopes.
     void HoistPhiLocals(

@@ -238,7 +238,7 @@ bool ASTLifter::IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) con
     return feedsMergePhi;
 }
 
-std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions, size_t maxBlocks) const {
+std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions, size_t maxBlocks, bool singleEntry) const {
     const auto &blocks = m_currentFunction->basicBlocks;
     if (start >= blocks.size() || stop >= blocks.size() || start == stop)
         return std::nullopt;
@@ -255,6 +255,9 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
             continue;
         if (id >= blocks.size())
             return std::nullopt;
+        // a shared `return` is copied wherever it is reached, so it bounds the tail like the stop does
+        if (id != start && blocks[id].bType == BlockType::Return && blocks[id].predecessors.size() > 1)
+            continue;
         if (!inRegion.insert(id).second)
             continue;
         const auto &block = blocks[id];
@@ -275,6 +278,8 @@ std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start,
         }
         region.push_back(id);
     }
+    if (!singleEntry)
+        return region;
     for (const uint32_t id : region)
         if (id != start)
             for (const uint32_t predecessor : blocks[id].predecessors)
