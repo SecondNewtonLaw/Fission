@@ -446,9 +446,9 @@ local v2 = f()
 print(v1, v3))LUA";
     const auto output = DecompileWith(source, 0, 2, DecompilerFlags::OmitFissionComments);
     INFO(output);
-    CHECK(output.find("local v1 = 1") != std::string::npos);
-    CHECK(output.find("local v3 = true") != std::string::npos);
-    CHECK(output.find("local v2 = f()") != std::string::npos);
+    CHECK(output.find("const v1 = 1") != std::string::npos);
+    CHECK(output.find("const v3 = true") != std::string::npos);
+    CHECK(output.find("const v2 = f()") != std::string::npos);
     CHECK(output.find("_v") == std::string::npos);
     CheckTraceWith(source, 0, 2);
 }
@@ -470,7 +470,7 @@ return b, b)LUA";
     for (int optimization = 0; optimization <= 2; optimization++) {
         const auto output = DecompileWith(source, optimization, 2, DecompilerFlags::OmitFissionComments);
         INFO("O" << optimization << "\n" << output);
-        CHECK(output.find("local b = {") != std::string::npos);
+        CHECK(output.find("const b = {") != std::string::npos);
     }
 }
 
@@ -535,9 +535,9 @@ make(3, { Size = 4 }))LUA";
     for (int optimization : {1, 2}) {
         const auto output = DecompileWith(source, optimization, 2, static_cast<DecompilerFlags>(0));
         INFO(output);
-        CHECK(output.find("local first = { a = x + 1, b = 2 }") != std::string::npos);
-        CHECK(output.find("local second = { Size = part.Size * 2, Name = \"n\", Parent = part }") != std::string::npos);
-        CHECK(output.find("local third = { b = 2, a = tostring(x)") != std::string::npos);
+        CHECK(output.find("const first = { a = x + 1, b = 2 }") != std::string::npos);
+        CHECK(output.find("const second = { Size = part.Size * 2, Name = \"n\", Parent = part }") != std::string::npos);
+        CHECK(output.find("const third = { b = 2, a = tostring(x)") != std::string::npos);
         CheckTraceWith(source, optimization, 2);
         CheckTraceWith(source, optimization, 1);
     }
@@ -648,13 +648,13 @@ print(walk({ 3, 4, 5 })))LUA";
     const auto output = DecompileWith(source, 1, 2, static_cast<DecompilerFlags>(0));
     INFO(output);
     CHECK(lifting_semantics_test::Contains(output, "local function pick(first, second, third)"));
-    CHECK(lifting_semantics_test::Contains(output, "local value = first and 1"));
+    CHECK(lifting_semantics_test::Contains(output, "const value = first and 1"));
     CHECK(lifting_semantics_test::Contains(output, "return value, third"));
     CHECK(lifting_semantics_test::Contains(output, "local total = 0"));
-    CHECK(lifting_semantics_test::Contains(output, "local count = #items"));
+    CHECK(lifting_semantics_test::Contains(output, "const count = #items"));
     CHECK(lifting_semantics_test::Contains(output, "for index = 1, count do"));
     CHECK(lifting_semantics_test::Contains(output, "for key, item in pairs(items) do"));
-    CHECK(lifting_semantics_test::Contains(output, "local shadow = total"));
+    CHECK(lifting_semantics_test::Contains(output, "const shadow = total"));
     const int optimization = GENERATE(0, 1, 2);
     CheckTraceWith(source, optimization, 2);
 }

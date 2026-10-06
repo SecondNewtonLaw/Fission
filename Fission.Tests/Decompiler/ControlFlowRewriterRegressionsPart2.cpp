@@ -39,7 +39,7 @@ TEST_CASE("Regress: path require is renamed to its module leaf", "[Decompiler][R
 
     INFO("decompile:\n" << out);
     // The auto-named local becomes `local Widget = require(...)`.
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+Widget\s*=\s*require\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+Widget\s*=\s*require\()")));
     CHECK(Recompiles(out));
 }
 
@@ -93,7 +93,7 @@ TEST_CASE("Regress: require leaf colliding with a Luau global is not renamed", "
     // `task` is a built-in -> never bound as a local name.
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(local\s+task\s*=\s*require\()")));
     // The non-clashing module still renames.
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+Inventory\s*=\s*require\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+Inventory\s*=\s*require\()")));
     CHECK(Recompiles(out));
 }
 
@@ -114,8 +114,8 @@ TEST_CASE("Regress: getter-bound local is renamed to its property", "[Decompiler
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+fullName\s*=\s*\w+:GetFullName\()")));
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+humanoid\s*=\s*\w+:GetHumanoid\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+fullName\s*=\s*\w+:GetFullName\()")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+humanoid\s*=\s*\w+:GetHumanoid\()")));
     CHECK(Recompiles(out));
 }
 
@@ -154,8 +154,8 @@ TEST_CASE("Regress: GetAttribute-bound local is renamed to the attribute", "[Dec
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+accuracyDeviation\s*=\s*\w+:GetAttribute\("AccuracyDeviation"\))")));
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+pellets\s*=\s*\w+:GetAttribute\("Pellets"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+accuracyDeviation\s*=\s*\w+:GetAttribute\("AccuracyDeviation"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+pellets\s*=\s*\w+:GetAttribute\("Pellets"\))")));
     CHECK(Recompiles(out));
 }
 
@@ -172,7 +172,7 @@ TEST_CASE("Regress: SetAttribute value local is renamed to the attribute", "[Dec
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+damage\s*=)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+damage\s*=)")));
     CHECK(ContainsRegex(out, std::regex(R"(:SetAttribute\("Damage",\s*damage\))")));
     CHECK(Recompiles(out));
 }
@@ -194,7 +194,7 @@ TEST_CASE("Regress: GetAttribute claims the name over a same-attribute SetAttrib
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+damage\s*=\s*\w+:GetAttribute\("Damage"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+damage\s*=\s*\w+:GetAttribute\("Damage"\))")));
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(:SetAttribute\("Damage",\s*damage\))")));
     CHECK(Recompiles(out));
 }
@@ -214,8 +214,8 @@ TEST_CASE("Regress: multi-word attribute name is camelCased", "[Decompiler][Attr
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+maxHp\s*=\s*\w+:GetAttribute\("Max HP"\))")));
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+superLongName\s*=\s*\w+:GetAttribute\("Super Long Name"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+maxHp\s*=\s*\w+:GetAttribute\("Max HP"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+superLongName\s*=\s*\w+:GetAttribute\("Super Long Name"\))")));
     CHECK(Recompiles(out));
 }
 
@@ -234,8 +234,8 @@ TEST_CASE("Regress: leading-digit attribute name spells the digit out", "[Decomp
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+threeDOffset\s*=\s*\w+:GetAttribute\("3D Offset"\))")));
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+twoHanded\s*=\s*\w+:GetAttribute\("2Handed"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+threeDOffset\s*=\s*\w+:GetAttribute\("3D Offset"\))")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+twoHanded\s*=\s*\w+:GetAttribute\("2Handed"\))")));
     CHECK(Recompiles(out));
 }
 
@@ -360,8 +360,8 @@ TEST_CASE("Regress: property reads are renamed end-to-end", "[Decompiler][Proper
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+character\s*=\s*\w+\.Character)")));
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+humanoid\s*=\s*character\.Humanoid)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+character\s*=\s*\w+\.Character)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+humanoid\s*=\s*character\.Humanoid)")));
     CHECK(Recompiles(out));
 }
 
@@ -452,7 +452,7 @@ TEST_CASE("Regress: reverse-field naming names a local after its field", "[Decom
     );
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+health\s*=)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+health\s*=)")));
     CHECK(ContainsRegex(out, std::regex(R"(\.health\s*=\s*health)")));
     CHECK(Recompiles(out));
 }
@@ -491,7 +491,7 @@ TEST_CASE("Regress: SETLIST first element indexing an inner table is sound", "[D
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+t\s*=\s*\{\s*\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\],\s*43\s*\})")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+t\s*=\s*\{\s*\(\{\s*"a",\s*"b",\s*f\s*=\s*""\s*\}\)\[2\],\s*43\s*\})")));
     CHECK(NoForwardReference(out));
     CHECK(Recompiles(out));
 }

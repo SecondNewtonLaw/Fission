@@ -532,7 +532,7 @@ TEST_CASE("Generic loop bindings do not suppress later local declarations", "[De
     )", 1, 1);
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+v3\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+v3\b)")));
     CHECK(Recompiles(out));
 }
 
@@ -554,7 +554,8 @@ TEST_CASE("Branch-local register reuse does not leak a global", "[Decompiler][Sc
     )", 1, 1);
 
     INFO("decompile:\n" << out);
-    CHECK(CountOccurrences(out, "local v1") == 2);
+    CHECK(CountOccurrences(out, "local v1") == 1);
+    CHECK(CountOccurrences(out, "const v1") == 1);
     CHECK_FALSE(ContainsRegex(out, std::regex(R"((^|\n)v1\s*=)")));
     CHECK(Recompiles(out));
 }
@@ -579,7 +580,7 @@ TEST_CASE("Sibling branches keep independent local bindings", "[Decompiler][Scop
     )", 1, 1);
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(if\s+flag\s+then\s+local\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));
+    CHECK(ContainsRegex(out, std::regex(R"(if\s+flag\s+then\s+const\s+v\d+(?:_\d+)?\s*=\s*not\s+(?:\.\.\.|\(\.\.\.\)))")));
     CHECK(Recompiles(out));
 }
 

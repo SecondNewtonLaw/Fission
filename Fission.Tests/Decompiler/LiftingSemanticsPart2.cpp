@@ -40,9 +40,9 @@ TEST_CASE("Lift: InferRobloxTypes annotates well-known globals and Instance look
 
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "Decompile Options: InferRobloxTypes"));
-    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*RunService\s*=\s*game:GetService\("RunService"\))")));
-    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Instance\s*=\s*workspace:FindFirstChild\("Map"\))")));
-    CHECK(std::regex_search(out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Humanoid\s*=\s*script.Parent:FindFirstChildOfClass\("Humanoid"\))")));
+    CHECK(std::regex_search(out, std::regex(R"(const\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*RunService\s*=\s*game:GetService\("RunService"\))")));
+    CHECK(std::regex_search(out, std::regex(R"(const\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Instance\s*=\s*workspace:FindFirstChild\("Map"\))")));
+    CHECK(std::regex_search(out, std::regex(R"(const\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Humanoid\s*=\s*script.Parent:FindFirstChildOfClass\("Humanoid"\))")));
 }
 
 TEST_CASE("Lift: InferRobloxTypes annotates dot-call FindFirstChildWhichIsA returns", "[Decompiler][TypeInference][RobloxTypes]") {
@@ -58,7 +58,7 @@ TEST_CASE("Lift: InferRobloxTypes annotates dot-call FindFirstChildWhichIsA retu
     INFO("decompile:\n" << out);
     CHECK(
         std::regex_search(
-            out, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*BasePart\s*=\s*workspace\.FindFirstChildWhichIsA\(workspace,\s*"BasePart"\))")
+            out, std::regex(R"(const\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*BasePart\s*=\s*workspace\.FindFirstChildWhichIsA\(workspace,\s*"BasePart"\))")
         )
     );
 }
@@ -77,9 +77,9 @@ TEST_CASE("Lift: AutoNameVariables derives names from Roblox lookup calls", "[De
 
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "Decompile Options: AutoNameVariables"));
-    CHECK(Contains(out, "local RunService = game:GetService(\"RunService\")"));
-    CHECK(Contains(out, "local Map = workspace:FindFirstChild(\"Map\")"));
-    CHECK(Contains(out, "local BasePart = workspace:FindFirstChildWhichIsA(\"BasePart\")"));
+    CHECK(Contains(out, "const RunService = game:GetService(\"RunService\")"));
+    CHECK(Contains(out, "const Map = workspace:FindFirstChild(\"Map\")"));
+    CHECK(Contains(out, "const BasePart = workspace:FindFirstChildWhichIsA(\"BasePart\")"));
     CHECK(Contains(out, "print(RunService, Map, BasePart)"));
     CHECK(Contains(out, "return RunService, Map, BasePart"));
 }
@@ -96,8 +96,8 @@ TEST_CASE("Lift: AutoNameVariables prefixes Roblox names on collision", "[Decomp
     );
 
     INFO("decompile:\n" << out);
-    CHECK(Contains(out, "local Map = workspace:FindFirstChild(\"Map\")"));
-    CHECK(std::regex_search(out, std::regex(R"(local\s+v[0-9]+_Map\s*=\s*workspace:FindFirstChild\("Map"\))")));
+    CHECK(Contains(out, "const Map = workspace:FindFirstChild(\"Map\")"));
+    CHECK(std::regex_search(out, std::regex(R"(const\s+v[0-9]+_Map\s*=\s*workspace:FindFirstChild\("Map"\))")));
     CHECK(!Contains(out, "local Map = workspace:FindFirstChild(\"Map\")\nlocal Map = workspace:FindFirstChild(\"Map\")"));
 }
 
@@ -122,7 +122,7 @@ TEST_CASE("Lift: AutoNameVariables keeps references to prefixed scoped locals", 
 
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "HumanoidRootPart.Transparency = 0"));
-    const std::regex prefixed(R"(local\s+(v[0-9]+_HumanoidRootPart)\s*=\s*workspace:WaitForChild\("HumanoidRootPart"\))");
+    const std::regex prefixed(R"(const\s+(v[0-9]+_HumanoidRootPart)\s*=\s*workspace:WaitForChild\("HumanoidRootPart"\))");
     auto match = std::sregex_iterator(out.begin(), out.end(), prefixed);
     REQUIRE(match != std::sregex_iterator{});
     const auto second = (*match++)[1].str();
@@ -145,8 +145,8 @@ TEST_CASE("Lift: AutoNameVariables handles dot-call Roblox lookups", "[Decompile
     );
 
     INFO("decompile:\n" << out);
-    CHECK(Contains(out, "local Players = game.GetService(game, \"Players\")"));
-    CHECK(Contains(out, "local Part = workspace.FindFirstChildOfClass(workspace, \"Part\")"));
+    CHECK(Contains(out, "const Players = game.GetService(game, \"Players\")"));
+    CHECK(Contains(out, "const Part = workspace.FindFirstChildOfClass(workspace, \"Part\")"));
     CHECK(Contains(out, "print(Players, Part)"));
     CHECK(Contains(out, "return Players, Part"));
 }
@@ -163,8 +163,8 @@ TEST_CASE("Lift: AutoNameVariables sanitizes derived names", "[Decompiler][AutoN
     );
 
     INFO("decompile:\n" << out);
-    CHECK(Contains(out, "local Bad_Name_1 = workspace:FindFirstChild(\"Bad Name-1\")"));
-    CHECK(Contains(out, "local _123Folder = workspace:FindFirstChild(\"123Folder\")"));
+    CHECK(Contains(out, "const Bad_Name_1 = workspace:FindFirstChild(\"Bad Name-1\")"));
+    CHECK(Contains(out, "const _123Folder = workspace:FindFirstChild(\"123Folder\")"));
     CHECK(Contains(out, "print(Bad_Name_1, _123Folder)"));
     CHECK(Contains(out, "return Bad_Name_1, _123Folder"));
 }
@@ -213,17 +213,17 @@ TEST_CASE("Lift: AutoNameVariables and InferRobloxTypes compose without coupling
 
     INFO("typed only:\n" << typedOnly);
     CHECK(Contains(typedOnly, "Decompile Options: InferRobloxTypes"));
-    CHECK(std::regex_search(typedOnly, std::regex(R"(local\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Players\s*=\s*game:GetService\("Players"\))")));
+    CHECK(std::regex_search(typedOnly, std::regex(R"(const\s+[A-Za-z_][A-Za-z_0-9]*\s*:\s*Players\s*=\s*game:GetService\("Players"\))")));
     CHECK(!Contains(typedOnly, "Decompile Options: AutoNameVariables"));
 
     INFO("named only:\n" << namedOnly);
     CHECK(Contains(namedOnly, "Decompile Options: AutoNameVariables"));
-    CHECK(Contains(namedOnly, "local Players = game:GetService(\"Players\")"));
+    CHECK(Contains(namedOnly, "const Players = game:GetService(\"Players\")"));
     CHECK(!Contains(namedOnly, "local Players: Players"));
 
     INFO("both:\n" << both);
     CHECK(Contains(both, "Decompile Options: InferRobloxTypes, AutoNameVariables"));
-    CHECK(Contains(both, "local Players: Players = game:GetService(\"Players\")"));
+    CHECK(Contains(both, "const Players: Players = game:GetService(\"Players\")"));
     CHECK(Contains(both, "print(Players)"));
     CHECK(Contains(both, "return Players"));
 }
@@ -274,7 +274,7 @@ TEST_CASE("Lift: complex strict ModuleScript with generic loops and deferred cal
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "BindToRenderStep"));
     // Declaration and closure references must share the captured upvalue name.
-    CHECK(Contains(out, "local module ="));
+    CHECK(Contains(out, "const module ="));
     CHECK(CompilesOk(out));
     CHECK(Contains(out, "for "));
     CHECK(Contains(out, " in "));

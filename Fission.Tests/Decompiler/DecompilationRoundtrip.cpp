@@ -43,6 +43,23 @@ TEST_CASE("Roundtrip: simple return", "[Decompiler][Roundtrip]") {
     CHECK(ContainsRegex(out, std::regex(R"((?:^|\n)\s*return\s+42\s*$)")));
 }
 
+TEST_CASE("Roundtrip: omitted IR preserves source and captures", "[Decompiler][Roundtrip][OmitIR]") {
+    EnableLuauFFlagsOnce();
+    const std::string source = "local total = 0; for i = 1, 10 do total += i end; return total";
+    const auto flags = DecompilerFlags::CaptureAST | DecompilerFlags::CaptureCFGGraph | DecompilerFlags::FissionDebugNotes;
+    Decompiler baseline{}, omitted{};
+    const auto expected = baseline.DecompileTestCode(source, flags);
+    const auto actual = omitted.DecompileTestCode(source, flags | DecompilerFlags::OmitIR);
+    REQUIRE(expected.resultCode == DecompileResult::Success);
+    REQUIRE(actual.resultCode == expected.resultCode);
+    CHECK_FALSE(expected.irOutput.empty());
+    CHECK(actual.irOutput.empty());
+    CHECK(actual.decompilationOutput == expected.decompilationOutput);
+    CHECK(actual.astJson == expected.astJson);
+    CHECK(actual.cfgGraph == expected.cfgGraph);
+    CHECK(actual.debugNotes == expected.debugNotes);
+}
+
 TEST_CASE("Roundtrip: while loop", "[Decompiler][Roundtrip]") {
     const auto out = DecompileOrFail(R"(
         local i = 0

@@ -187,13 +187,15 @@ static size_t CountOccurrences(const std::string &haystack, const std::string &n
 // register declared twice (once at an outer scope, once nested) is the phi shadowing bug: the nested
 // `local` shadows the outer, so branch writes never reach the outer read.
 static size_t CountLocalDeclsOf(const std::string &s, const std::string &name) {
-    const std::string needle = "local " + name;
     size_t n = 0;
-    for (size_t p = s.find(needle); p != std::string::npos; p = s.find(needle, p + needle.size())) {
-        const size_t after = p + needle.size();
-        if (after < s.size() && std::isdigit(static_cast<unsigned char>(s[after])))
-            continue; // `local v1` must not match `local v10`
-        ++n;
+    for (const std::string keyword : {"local ", "const "}) {
+        const std::string needle = keyword + name;
+        for (size_t p = s.find(needle); p != std::string::npos; p = s.find(needle, p + needle.size())) {
+            const size_t after = p + needle.size();
+            if (after < s.size() && std::isdigit(static_cast<unsigned char>(s[after])))
+                continue; // `local v1` must not match `local v10`
+            ++n;
+        }
     }
     return n;
 }

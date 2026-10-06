@@ -86,19 +86,17 @@ namespace control_flow_regression {
         return count;
     }
 
-    // No auto-named local `vN` is textually used before its `local vN` declaration; the
-    // forward-reference bug (a value folded into a constructor whose own `local` is emitted, or
-    // dropped, afterwards reads nil). Comment blocks are stripped first. Names that never appear
-    // in a `local` declaration are globals/params and are ignored.
+    // Auto-named bindings must be declared before first use.
+    // Strip comment blocks; ignore globals and parameters.
     bool NoForwardReference(const std::string &decompiled) {
         const std::string s = std::regex_replace(decompiled, std::regex(R"(--\[\[[\s\S]*?\]\])"), "");
-        const std::regex localRe(R"(\blocal\s+(v\d+)\b)");
+        const std::regex localRe(R"(\b(?:local|const)\s+(v\d+)\b)");
         std::set<std::string> names;
         for (std::sregex_iterator it(s.begin(), s.end(), localRe), e; it != e; ++it)
             names.insert((*it)[1].str());
         for (const auto &name : names) {
             std::smatch dm;
-            if (!std::regex_search(s, dm, std::regex("\\blocal\\s+(" + name + ")\\b")))
+            if (!std::regex_search(s, dm, std::regex("\\b(?:local|const)\\s+(" + name + ")\\b")))
                 continue;
             const auto declTokPos = static_cast<size_t>(dm.position(1));
             std::smatch tm;
@@ -109,6 +107,13 @@ namespace control_flow_regression {
     }
 
 } // namespace control_flow_regression
+
+TEST_CASE("Forward-reference checks include immutable declarations", "[Decompiler][Regression][Const]") {
+    CHECK_FALSE(control_flow_regression::NoForwardReference("print(v1)\nconst v1 = 1\n"));
+    CHECK(control_flow_regression::NoForwardReference("const v1 = 1\nprint(v1)\n"));
+    CHECK_FALSE(control_flow_regression::NoForwardReference("print(v1)\nlocal v1 = 1\n"));
+    CHECK(control_flow_regression::NoForwardReference("local v1 = 1\nprint(v1)\n"));
+}
 
 using namespace control_flow_regression;
 
@@ -465,10 +470,10 @@ TEST_CASE("Scope: module initializer keeps crossing locals outside later scopes"
     INFO("decompile:\n" << out);
     CHECK(out.starts_with("--[["));
     const auto firstScope = out.find("\ndo\n");
-    REQUIRE(out.find("local cache") != std::string::npos);
-    REQUIRE(out.find("local lookups") != std::string::npos);
-    CHECK(out.find("local cache") < firstScope);
-    CHECK(out.find("local lookups") < firstScope);
+    REQUIRE(out.find("const cache") != std::string::npos);
+    REQUIRE(out.find("const lookups") != std::string::npos);
+    CHECK(out.find("const cache") < firstScope);
+    CHECK(out.find("const lookups") < firstScope);
     CHECK(Recompiles(out));
 }
 

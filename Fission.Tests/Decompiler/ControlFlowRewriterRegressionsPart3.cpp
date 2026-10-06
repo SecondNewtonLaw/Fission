@@ -81,7 +81,7 @@ TEST_CASE("Regress: register auto-name does not overwrite a same-named global", 
 
     INFO("decompile:\n" << out);
     // the colliding register local is prefixed (the global `v6` is referenced as a bare call).
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+_v\d+\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+_v\d+\b)")));
     // the global `v6` survives as a global (not shadowed before its use).
     CHECK(NoForwardReference(out));
     CHECK(Recompiles(out));
@@ -102,9 +102,10 @@ TEST_CASE("Regress: SETGLOBAL back-propagates a lower-first global name", "[Deco
     )", 1, 1);
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+blahBlah\b)")));        // lower-first local
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+blahBlah\b)"))); // lower-first local
     CHECK(ContainsRegex(out, std::regex(R"(\bBlahBlah\s*=\s*blahBlah\b)"))); // global preserved, no shadow
-    CHECK_FALSE(ContainsRegex(out, std::regex(R"(\blocal\s+BlahBlah\b)")));  // never a same-cased local
+    CHECK_FALSE(ContainsRegex(out, std::regex(R"(\blocal\s+BlahBlah\b)"))); // never a same-cased local
+    CHECK_FALSE(ContainsRegex(out, std::regex(R"(\bconst\s+BlahBlah\b)")));
     CHECK(Recompiles(out));
 }
 
@@ -121,7 +122,7 @@ TEST_CASE("Regress: reverse-field back-prop lowers a capitalized field name", "[
     )", 1, 1);
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+health\b)")));      // lower-first local
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+health\b)")));      // lower-first const
     CHECK(ContainsRegex(out, std::regex(R"(\.Health\s*=\s*health\b)"))); // field key keeps its casing
     CHECK(Recompiles(out));
 }
@@ -160,7 +161,7 @@ TEST_CASE("Feature: Instance.new names the local after the class string", "[Deco
         return f
     )", 1, 1);
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+part\s*=\s*Instance\.new)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+part\s*=\s*Instance\.new)")));
     CHECK(Recompiles(out));
 }
 
@@ -175,7 +176,7 @@ TEST_CASE("Feature: Instance.new lower-firsts a PascalCase class string", "[Deco
         return f
     )", 1, 1);
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+screenGui\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+screenGui\b)")));
     CHECK(Recompiles(out));
 }
 
@@ -190,7 +191,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+vector3\s*=\s*Vector3\.new)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+vector3\s*=\s*Vector3\.new)")));
         CHECK(Recompiles(out));
     }
     SECTION("Color3.fromRGB (from* factory)") {
@@ -203,7 +204,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+color3\s*=\s*Color3\.fromRGB)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+color3\s*=\s*Color3\.fromRGB)")));
         CHECK(Recompiles(out));
     }
     SECTION("user OOP class .new()") {
@@ -216,7 +217,7 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+myClass\s*=\s*MyClass\.new)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+myClass\s*=\s*MyClass\.new)")));
         CHECK(Recompiles(out));
     }
 }
@@ -363,7 +364,7 @@ TEST_CASE("Feature: length operator names the local count", "[Decompiler][Naming
         return f
     )", 1, 1);
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+count\s*=\s*#)")));
+    CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+count\s*=\s*#)")));
     CHECK(Recompiles(out));
 }
 
@@ -391,7 +392,7 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
         )");
         INFO("decompile:\n" << out);
         CHECK_FALSE(ContainsRegex(out, leak));                               // no global leak
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+\w+\s*=\s*\{)"))); // table is a local
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+\w+\s*=\s*\{)"))); // table is a local
         CHECK(NoForwardReference(out));
         CHECK(Recompiles(out));
     }
@@ -427,7 +428,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*,\s*result\s*=\s*pcall\b)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*,\s*result\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("single-return pcall") {
@@ -440,7 +441,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*=\s*pcall\b)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("xpcall names the same way") {
@@ -452,7 +453,7 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*,\s*result\s*=\s*xpcall\b)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*,\s*result\s*=\s*xpcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("two pcalls in one scope stay distinct (no aliasing)") {
@@ -467,8 +468,8 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
             return f
         )", 1, 1);
         INFO("decompile:\n" << out);
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok\s*=\s*pcall\b)")));
-        CHECK(ContainsRegex(out, std::regex(R"(\blocal\s+ok2\s*=\s*pcall\b)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*=\s*pcall\b)")));
+        CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok2\s*=\s*pcall\b)")));
         // the two statuses must remain two distinct names through the return
         CHECK(ContainsRegex(out, std::regex(R"(\breturn\s+ok\s*,\s*ok2\b)")));
         CHECK(Recompiles(out));
@@ -560,7 +561,7 @@ TEST_CASE("Regress: numeric-for conditional step closure is merged", "[Decompile
     )");
 
     INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+v\d+\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+v\d+\b)")));
     CHECK(ContainsRegex(out, std::regex(R"(\bv\d+\s*=.*\bfunction\s*\()")));
     const bool emitsUndeclaredStep = Contains(out, "for i = 57, v1, v2") && !Contains(out, "local v2");
     CHECK_FALSE(emitsUndeclaredStep);

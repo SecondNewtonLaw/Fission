@@ -673,7 +673,7 @@ TEST_CASE("Replay: varargs and repeat-header arguments keep declarations in plac
     const auto result = fuzz::FullDecompile(source);
     REQUIRE(result.code == DecompileResult::Success);
     INFO(result.output);
-    CHECK(result.output.find("local v0, v1 = ...") != std::string::npos);
+    CHECK(result.output.find("const v0, v1 = ...") != std::string::npos);
     CHECK(result.output.find("print(true, 99)") != std::string::npos);
 }
 
@@ -706,7 +706,7 @@ print(z(function(i) return i, i + 1 end, 4), t.x, t.y, b, c))LUA";
     INFO(result.output);
     CHECK(result.output.find("x, p = f(i)") != std::string::npos);
     CHECK(result.output.find("t.x, t.y = ...") != std::string::npos);
-    CHECK(result.output.find("local b, c = select(2, ...)") != std::string::npos);
+    CHECK(result.output.find("const b, c = select(2, ...)") != std::string::npos);
     CHECK(result.output.find("({ ... })") == std::string::npos);
 }
 
@@ -1056,6 +1056,38 @@ g(c, true, true)
 return true)LUA";
     for (int opt = 0; opt <= 2; ++opt)
         replay_divergence::CheckSemanticParity(source, opt, 1);
+}
+
+TEST_CASE("Replay: locals never written after their declaration are const", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = R"LUA(local fixed = tostring(1)
+local counted = 0
+local captured = 0
+local function bump()
+    captured += 1
+end
+for i = 1, 3 do
+    counted += i
+    bump()
+end
+local shadowed = tonumber("2")
+do
+    local shadowed = tonumber("3")
+    shadowed += 1
+    print(shadowed)
+end
+print(fixed, counted, captured, shadowed))LUA";
+    for (int opt = 0; opt <= 2; ++opt)
+        replay_divergence::CheckSemanticParity(source, opt, 2);
+    const replay_divergence::CompileLevels levels(0, 2);
+    fuzz::EnableLuauFlags();
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO(result.output);
+    CHECK(result.output.find("const fixed =") != std::string::npos);
+    CHECK(result.output.find("local counted =") != std::string::npos);
+    CHECK(result.output.find("local captured =") != std::string::npos);
+    CHECK(result.output.find("const shadowed =") != std::string::npos);
+    CHECK(result.output.find("const shadowed_2 =") != std::string::npos);
 }
 
 TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item","[Decompiler][ReplayRegress][Semantics]") {

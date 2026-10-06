@@ -406,7 +406,7 @@ TEST_CASE("Regress: local declared before an infinite while survives", "[Decompi
 
     INFO("decompile:\n" << out);
     // declaration present AND the same variable is what table.insert mutates.
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+(\w+)\s*=\s*\{\s*\}[\s\S]*table\.insert\(\1\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+(\w+)\s*=\s*\{\s*\}[\s\S]*table\.insert\(\1\b)")));
 }
 
 // Empty-arm diamond before a return must not null the if's then-branch
@@ -431,7 +431,7 @@ TEST_CASE("Regress: empty-arm diamond before return does not crash the and-or fo
     // local read placed before the `t.Ready` read: inlining it into `return t.X` would move the
     // index past the `if t.Ready` and change which read throws first if `t` is nil, so the faithful
     // form keeps `local v = t.X ... return v`.
-    CHECK(ContainsRegex(out, std::regex(R"(local\s+(\w+)\s*=\s*\w+\.X\b[\s\S]*return\s+\1\b)")));
+    CHECK(ContainsRegex(out, std::regex(R"(const\s+(\w+)\s*=\s*\w+\.X\b[\s\S]*return\s+\1\b)")));
     // The guarded read survives (t.Ready is observable via __index).
     CHECK(Contains(out, ".Ready"));
     // No malformed-branch residue from a null/empty if.

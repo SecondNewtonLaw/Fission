@@ -350,7 +350,7 @@ TEST_CASE("Lift: generated-name shadowing preserves global bindings", "[Decompil
                            const std::string &expected) {
         const auto output = DecompileOrFail(source, opts.optimizationLevel, static_cast<DecompilerFlags>(0), 1);
         INFO("decompiled output:\n" << output);
-        CHECK(std::regex_search(output, std::regex("local\\s+" + localName + R"(\b)")));
+        CHECK(std::regex_search(output, std::regex("const\\s+" + localName + R"(\b)")));
         CHECK_FALSE(std::regex_search(output, std::regex("local\\s+" + globalName + R"(\b)")));
 
         const auto prelude = Luau::compile(preludeSource, opts);
@@ -585,8 +585,8 @@ TEST_CASE("Lift: FastWait keeps short-circuit duration separate from timer", "[D
     const auto function = result.decompilationOutput.substr(functionStart);
     std::smatch duration;
     std::smatch timer;
-    REQUIRE(std::regex_search(function, duration, std::regex(R"(local\s+(\w+): number = tonumber\(arg0\))")));
-    REQUIRE(std::regex_search(function, timer, std::regex(R"(local\s+(\w+) = tick\(\))")));
+    REQUIRE(std::regex_search(function, duration, std::regex(R"(const\s+(\w+): number = tonumber\(arg0\))")));
+    REQUIRE(std::regex_search(function, timer, std::regex(R"(const\s+(\w+) = tick\(\))")));
     CHECK(Contains(function, std::string(" = ") + timer[1].str() + " + (" + duration[1].str() + " or 0.03333333333333333)"));
     CHECK(Contains(function, std::string("coroutine.yield() - ") + timer[1].str()));
     CHECK(Contains(function, "[coroutine.running()] = " + timer[1].str() + " + ("));
@@ -597,7 +597,7 @@ TEST_CASE("Lift: FastWait keeps short-circuit duration separate from timer", "[D
 
 TEST_CASE("Lift: ItemSpawn successful guards continue to later checks", "[Decompiler][ControlFlow][Regression]") {
     const auto out = DecompileItemSpawnOrFail();
-    const auto tickStart = out.find("local serverTimeNow");
+    const auto tickStart = out.find("const serverTimeNow");
     const auto tickEnd = out.find("Triggered:Connect", tickStart);
     REQUIRE(tickStart != std::string::npos);
     REQUIRE(tickEnd != std::string::npos);
@@ -649,7 +649,7 @@ TEST_CASE("Lift: rename comments only describe surviving suffixed locals", "[Dec
     REQUIRE(result.resultCode == DecompileResult::Success);
     INFO("decompile:\n" << result.decompilationOutput);
 
-    CHECK(Contains(result.decompilationOutput, "local ok, result = pcall(require, v)"));
+    CHECK(Contains(result.decompilationOutput, "const ok, result = pcall(require, v)"));
     CHECK_FALSE(Contains(result.decompilationOutput, "has been suffixed to avoid shadowing"));
 }
 
