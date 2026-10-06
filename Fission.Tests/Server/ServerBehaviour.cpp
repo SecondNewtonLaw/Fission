@@ -1,6 +1,12 @@
 // Exercise routing, validation, decompilation, captures, and status mapping without socket I/O.
 
+#include "../Decompiler/IntegrationTestSupport.hpp"
 #include "Server.hpp"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
+#include <boost/json.hpp>
+#pragma clang diagnostic pop
 
 #include "Luau/Common.h"
 #pragma clang diagnostic push
@@ -29,7 +35,8 @@ namespace {
     std::string Base64Encode(const std::string &in) {
         static const char *t = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
         std::string out;
-        int val = 0, bits = -6;
+        unsigned int val = 0;
+        int bits = -6;
         for (unsigned char c : in) {
             val = (val << 8) + c;
             bits += 8;
@@ -79,7 +86,21 @@ namespace {
                            "    end\n"
                            "    return b\n"
                            "end\n"
+                           "print(add(1, 2), add(4, 3), 'quoted \\\"text\\\"')\n"
                            "return add(1, 2)\n";
+
+    void
+    CheckResponse(const Fission::Server::HttpResult &response, const std::string &bytecode, const Luau::CompileOptions &options = Luau::CompileOptions{1, 2}) {
+        INFO(response.body);
+        REQUIRE(response.status == 200);
+        REQUIRE(response.contentType == "application/json");
+        const auto json = boost::json::parse(response.body);
+        REQUIRE(json.at("ok").as_bool());
+        const auto &result = json.at("result");
+        REQUIRE(result.at("resultCode").as_string() == "Success");
+        const auto &source = result.at("decompilationOutput").as_string();
+        integration_test::CheckOutput(bytecode, std::string(source.data(), source.size()), options);
+    }
 } // namespace
 
 // Routing
@@ -150,33 +171,36 @@ TEST_CASE("Server: invalid base64 bytecode is rejected", "[Server][Validation]")
 
 // Decompilation
 
-TEST_CASE("Server: valid vanilla bytecode decompiles successfully", "[Server][Decompile]") {
-    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(CompileVanilla(kSnippet))));
-    INFO(res.body);
-    CHECK(res.status == 200);
-    CHECK(Contains(res.body, "\"ok\":true"));
-    CHECK(Contains(res.body, "\"resultCode\":\"Success\""));
-    CHECK(Contains(res.body, "\"decompilationOutput\":"));
-    // source/ir/timing are always present; optional artifacts are absent unless requested.
-    CHECK_FALSE(Contains(res.body, "\"cfg\":"));
-    CHECK_FALSE(Contains(res.body, "\"ast\":"));
-    CHECK_FALSE(Contains(res.body, "\"debugNotes\":"));
+TEST_CASE("Server: valid vanilla bytecode decompiles successfully", "[Server][Decompile][Integration]") {
+    EnableLuauFFlagsOnce();
+    for (int optimization : {0, 1, 2}) {
+        for (int debug : {0, 2}) {
+            const Luau::CompileOptions options{optimization, debug};
+            const auto bytecode = Luau::compile(kSnippet, options);
+            const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode)));
+            CheckResponse(res, bytecode, options);
+            const auto result = boost::json::parse(res.body).at("result").as_object();
+            CHECK(result.contains("irOutput"));
+            CHECK(result.contains("timingStatistics"));
+            CHECK_FALSE(result.contains("cfg"));
+            CHECK_FALSE(result.contains("ast"));
+            CHECK_FALSE(result.contains("debugNotes"));
+        }
+    }
 }
 
 // A remote client must not be able to make the server touch its filesystem: the flags that write
 // ir_out.txt / cfg.dot (WriteIRToFile / GenerateIRGraph / GenerateSSAIRGraph) and the stdout-noise
 // flags are stripped server-side. Requesting writeIRToFile must still decompile but leave no file.
-TEST_CASE("Server: filesystem-writing flags are stripped from a request", "[Server][Decompile][Security]") {
+TEST_CASE("Server: filesystem-writing flags are stripped from a request", "[Server][Decompile][Security][Integration]") {
     namespace fs = std::filesystem;
     const fs::path irFile = fs::current_path() / "ir_out.txt";
     std::error_code rmec;
     fs::remove(irFile, rmec); // clear any stale artifact first
 
-    const auto res = Handle("POST", "/decompile",
-                            DecompileBody(Base64Encode(CompileVanilla(kSnippet)), ",\"flags\":{\"writeIRToFile\":true,\"generateIRGraph\":true}"));
-    INFO(res.body);
-    CHECK(res.status == 200);
-    CHECK(Contains(res.body, "\"resultCode\":\"Success\""));
+    const auto bytecode = CompileVanilla(kSnippet);
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"flags\":{\"writeIRToFile\":true,\"generateIRGraph\":true}"));
+    CheckResponse(res, bytecode);
     // the write flag was masked, so no ir_out.txt should have appeared in the server's CWD.
     CHECK_FALSE(fs::exists(irFile));
     fs::remove(irFile, rmec);
@@ -184,31 +208,29 @@ TEST_CASE("Server: filesystem-writing flags are stripped from a request", "[Serv
 
 // A missing or non-positive timeout must reset the (thread_local, reused) decompiler budget to the
 // server default rather than inherit a prior request's larger budget. Both are accepted and succeed.
-TEST_CASE("Server: an invalid or absent timeout still decompiles under the default budget", "[Server][Decompile]") {
-    const std::string b64 = Base64Encode(CompileVanilla(kSnippet));
+TEST_CASE("Server: an invalid or absent timeout still decompiles under the default budget", "[Server][Decompile][Integration]") {
+    const auto bytecode = CompileVanilla(kSnippet);
+    const std::string b64 = Base64Encode(bytecode);
     const auto neg = Handle("POST", "/decompile", DecompileBody(b64, ",\"timeout\":-5"));
-    CHECK(neg.status == 200);
-    CHECK(Contains(neg.body, "\"resultCode\":\"Success\""));
+    CheckResponse(neg, bytecode);
     const auto absent = Handle("POST", "/decompile", DecompileBody(b64));
-    CHECK(absent.status == 200);
-    CHECK(Contains(absent.body, "\"resultCode\":\"Success\""));
+    CheckResponse(absent, bytecode);
 }
 
-TEST_CASE("Server: outputs=[cfg,ast] add the CFG graph and AST tree", "[Server][Decompile][Outputs]") {
-    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(CompileVanilla(kSnippet)), ",\"outputs\":[\"cfg\",\"ast\"]"));
-    INFO(res.body);
-    CHECK(res.status == 200);
-    CHECK(Contains(res.body, "\"ok\":true"));
+TEST_CASE("Server: outputs=[cfg,ast] add the CFG graph and AST tree", "[Server][Decompile][Outputs][Integration]") {
+    const auto bytecode = CompileVanilla(kSnippet);
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"outputs\":[\"cfg\",\"ast\"]"));
+    CheckResponse(res, bytecode);
     // cfg is a Graphviz DOT string; ast is embedded as a real JSON tree rooted at a Root node.
     CHECK(Contains(res.body, "\"cfg\":\"digraph"));
     CHECK(Contains(res.body, "\"ast\":{\"kind\":\"Root\""));
     CHECK(Contains(res.body, "\"nodeKind\":\"IfStatement\""));
 }
 
-TEST_CASE("Server: outputs=[debug] adds bounded decompiler notes", "[Server][Decompile][Outputs]") {
-    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(CompileVanilla(kSnippet)), ",\"outputs\":[\"debug\"]"));
-    INFO(res.body);
-    CHECK(res.status == 200);
+TEST_CASE("Server: outputs=[debug] adds bounded decompiler notes", "[Server][Decompile][Outputs][Integration]") {
+    const auto bytecode = CompileVanilla(kSnippet);
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"outputs\":[\"debug\"]"));
+    CheckResponse(res, bytecode);
     CHECK(Contains(res.body, "\"debugNotes\":\"[Pipeline]"));
     CHECK(Contains(res.body, "[CFA]"));
     CHECK(Contains(res.body, "[SSA]"));
@@ -226,8 +248,7 @@ TEST_CASE("Server: undeserializable bytecode maps to a 4xx/5xx error, not a cras
 
 TEST_CASE("Server: Luau script errors include compiler diagnostic", "[Server][Decompile]") {
     const std::string diagnostic = ":1: Incomplete statement: expected assignment or a function call";
-    const auto res =
-        Handle("POST", "/decompile", DecompileBody(Base64Encode(std::string(1, '\0') + diagnostic), ",\"outputs\":[\"debug\"]"));
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(std::string(1, '\0') + diagnostic), ",\"outputs\":[\"debug\"]"));
     INFO(res.body);
     CHECK(res.status == 422);
     CHECK(Contains(res.body, "Nothing to decompile, bytecode is a script error: " + diagnostic));
@@ -235,9 +256,9 @@ TEST_CASE("Server: Luau script errors include compiler diagnostic", "[Server][De
     CHECK(Contains(res.body, "compiler input contains an error diagnostic instead of bytecode"));
 }
 
-TEST_CASE("Server: a per-request timeout is accepted and clamped to the server max", "[Server][Decompile]") {
+TEST_CASE("Server: a per-request timeout is accepted and clamped to the server max", "[Server][Decompile][Integration]") {
     // Verify that timeout parsing and clamping preserve a successful request.
-    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(CompileVanilla(kSnippet)), ",\"timeout\":5"));
-    CHECK(res.status == 200);
-    CHECK(Contains(res.body, "\"resultCode\":\"Success\""));
+    const auto bytecode = CompileVanilla(kSnippet);
+    const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"timeout\":5"));
+    CheckResponse(res, bytecode);
 }

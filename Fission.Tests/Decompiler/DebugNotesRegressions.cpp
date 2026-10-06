@@ -2,7 +2,7 @@
 // Created by Dottik on 22/9/2026.
 //
 
-#include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
 
@@ -18,11 +18,17 @@ static DecompilationResult DecompileForNotes(const std::string &source, bool ena
         if (std::strncmp(flag->name, "Luau", 4) == 0)
             flag->value = true;
     Decompiler decompiler{};
-    return decompiler.DecompileTestCode(source, enabled ? DecompilerFlags::FissionDebugNotes : static_cast<DecompilerFlags>(0),
-                                        Luau::CompileOptions{1, 2});
+    const Luau::CompileOptions options{1, 2};
+    const auto bytecode = Luau::compile(source, options);
+    REQUIRE_FALSE(bytecode.empty());
+    REQUIRE(bytecode.front() != '\0');
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode, enabled ? DecompilerFlags::FissionDebugNotes : static_cast<DecompilerFlags>(0));
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(bytecode, result.decompilationOutput, options);
+    return result;
 }
 
-TEST_CASE("Debug notes retain final shared-loop decisions", "[Decompiler][DebugNotes]") {
+TEST_CASE("Debug notes retain final shared-loop decisions", "[Decompiler][DebugNotes][Integration]") {
     std::ifstream input(std::filesystem::path(FISSION_SOURCE_DIR) / "Fission.Fuzzing/regressions/nested_repeat_shared_header.lua");
     REQUIRE(input.good());
     const auto result = DecompileForNotes(std::string(std::istreambuf_iterator<char>(input), {}));
@@ -36,7 +42,7 @@ TEST_CASE("Debug notes retain final shared-loop decisions", "[Decompiler][DebugN
     CHECK(result.debugNotes.size() < 16384);
 }
 
-TEST_CASE("Debug notes identify functions and lift each closure body once", "[Decompiler][DebugNotes]") {
+TEST_CASE("Debug notes identify functions and lift each closure body once", "[Decompiler][DebugNotes][Integration]") {
     const std::string source = "local function mark(value) print(value) return value end\nreturn mark(4)";
     const auto result = DecompileForNotes(source);
     const auto plain = DecompileForNotes(source, false);
@@ -52,7 +58,7 @@ TEST_CASE("Debug notes identify functions and lift each closure body once", "[De
     CHECK(plain.debugNotes.empty());
 }
 
-TEST_CASE("Debug notes name the instruction blocking effect movement", "[Decompiler][DebugNotes]") {
+TEST_CASE("Debug notes name the instruction blocking effect movement", "[Decompiler][DebugNotes][Integration]") {
     const auto result = DecompileForNotes(R"LUA(local function mark(tag, value)
     print(tag)
     return value
@@ -67,38 +73,35 @@ return value + tonumber("1"))LUA");
     CHECK(result.debugNotes.find("R") != std::string::npos);
 }
 
-TEST_CASE("Debug note budgets retain decisions and reset cleanly", "[Decompiler][DebugNotes]") {
-    FissionDebugNotes notes;
-    notes.Reset(true);
-    for (int i = 0; i < 100; ++i)
-        notes.Add(FissionDebugStage::CFA, "routine {}", i);
-    notes.AddDecision(FissionDebugStage::CFA, "final loop decision");
-    for (int i = 0; i < 100; ++i)
-        notes.Add(FissionDebugStage::CFA, "later routine {}", i);
-    CHECK(notes.Render().find("final loop decision") != std::string::npos);
-    CHECK(notes.Render().find("169 additional notes omitted") != std::string::npos);
+TEST_CASE("Debug note budgets survive large requests and reset on reuse", "[Decompiler][DebugNotes][Integration]") {
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler;
+    const Luau::CompileOptions options{1, 2};
+    const auto run = [&](const std::string &source, bool enabled) {
+        const auto bytecode = Luau::compile(source, options);
+        REQUIRE_FALSE(bytecode.empty());
+        REQUIRE(bytecode.front() != '\0');
+        const auto result = decompiler.DecompileVanillaBytecode(bytecode, enabled ? DecompilerFlags::FissionDebugNotes : static_cast<DecompilerFlags>(0));
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        integration_test::CheckOutput(bytecode, result.decompilationOutput, options);
+        return result;
+    };
+    std::string source = "local total = 0\n";
+    for (int i = 0; i < 80; ++i)
+        source += "if tonumber(\"" + std::to_string(i) + "\") % 2 == 0 then total += 1 else total += 2 end\n";
+    source += "print(total)\n";
+    const auto large = run(source, true);
+    CHECK(large.debugNotes.find("additional notes omitted") != std::string::npos);
+    CHECK(large.debugNotes.find("[CFA]") != std::string::npos);
+    CHECK(large.debugNotes.find("[SSA]") != std::string::npos);
+    CHECK(large.debugNotes.find("[AST]") != std::string::npos);
+    CHECK(large.debugNotes.size() < 65536);
 
-    std::vector<std::string> blockNotes{"SSA: retain other stage"};
-    notes.AddBlock(FissionDebugStage::CFA, "F0 (loop)", 1, blockNotes, "partition detail", false);
-    REQUIRE(blockNotes.size() == 2);
-    CHECK(blockNotes.back() == "CFA: partition detail");
-    for (int i = 0; i < 100; ++i)
-        notes.AddBlock(FissionDebugStage::CFA, "F0 (loop)", 1, blockNotes, std::format("decision {}", i));
-    CHECK(blockNotes.size() == 8);
-    CHECK(blockNotes.front() == "SSA: retain other stage");
-    CHECK(blockNotes.back() == "CFA: decision 99");
-    CHECK(notes.Render().find("F0 (loop) B1: decision 99") != std::string::npos);
-    CHECK(notes.Render().find("final loop decision") == std::string::npos);
-
-    notes.Reset(true);
-    notes.AddDecision(FissionDebugStage::AST, std::string(4096, 'x'));
-    CHECK(notes.Render().size() < 600);
-    CHECK(notes.Render().find("...") != std::string::npos);
-    notes.Reset(false);
-    notes.AddDecision(FissionDebugStage::AST, "disabled");
-    notes.AddBlock(FissionDebugStage::CFA, "F0 (loop)", 1, blockNotes, "disabled");
-    CHECK(notes.Render().empty());
-    CHECK(blockNotes.size() == 8);
-    notes.Reset(true);
-    CHECK(notes.Render().empty());
+    const auto small = run("print(17)", true);
+    CHECK_FALSE(small.debugNotes.empty());
+    CHECK(small.debugNotes.find("additional notes omitted") == std::string::npos);
+    CHECK(small.debugNotes.size() < large.debugNotes.size());
+    const auto disabled = run("print(23)", false);
+    CHECK(disabled.debugNotes.empty());
+    CHECK(run("print(17)", true).debugNotes == small.debugNotes);
 }

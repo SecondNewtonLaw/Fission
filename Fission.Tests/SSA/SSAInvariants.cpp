@@ -18,6 +18,7 @@
 //                                            dataflow over the raw bytecode; a superset is tolerated)
 
 #include "../../Fission.Fuzzing/include/SSAOracle.hpp"
+#include "../Decompiler/IntegrationTestSupport.hpp"
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "DenominatorAnalysis.hpp"
@@ -482,26 +483,47 @@ TEST_CASE("SSA: broad IR opcode coverage is sound", "[SSA][Invariant][Coverage]"
     CheckSSA("local function f(a, b, c) return a and b or c, a or b and c end return f");
 }
 
-TEST_CASE("SSA: FASTCALL2 and CAPTURE access modes are explicit", "[SSA][Invariant][Access]") {
-    LiftedInstruction fastcall{LiftedOperation::FASTCALL2, 0};
-    fastcall.operands.resize(4);
-    fastcall.operands[0].type = LiftedOperandType::ImmediateInteger;
-    fastcall.operands[1].type = LiftedOperandType::Register;
-    fastcall.operands[2].type = LiftedOperandType::ImmediateInteger;
-    fastcall.operands[3].type = LiftedOperandType::Register;
-    CHECK(SSABuilder::GetRegisterAccess(fastcall, 1) == AccessType::Read);
-    CHECK(SSABuilder::GetRegisterAccess(fastcall, 3) == AccessType::Read);
-
-    LiftedInstruction capture{LiftedOperation::CAPTURE, 0};
-    capture.operands.resize(2);
-    capture.operands[0].type = LiftedOperandType::ImmediateInteger;
-    capture.operands[1].type = LiftedOperandType::Register;
-    for (int mode = 0; mode <= 1; ++mode) {
-        capture.operands[0].value.imm.n = mode;
-        CHECK(SSABuilder::GetRegisterAccess(capture, 1) == AccessType::Read);
+TEST_CASE("SSA: builtin calls and capture modes preserve live values", "[SSA][Invariant][Access][Integration]") {
+    const std::string source = R"(
+        local low, high = tonumber("4"), tonumber("9")
+        local fixed = math.min(low, high)
+        local changing = low
+        local function outer()
+            local function value() return fixed, changing end
+            return value
+        end
+        local first, second = outer(), outer()
+        print(first())
+        changing = high
+        print(first(), second())
+        print(math.max(low, high), fixed, changing)
+    )";
+    for (int optimization : {0, 1, 2})
+        CheckSSA(source, optimization);
+    const auto bytecode = Luau::compile(source, Luau::CompileOptions{1, 2});
+    Deserializer deserializer;
+    const auto deserialized = deserializer.Deserialize(bytecode);
+    REQUIRE(deserialized.has_value());
+    Fission::InstructionDecoder decoder;
+    BytecodeLifter lifter{&decoder};
+    const auto lifted = lifter.LiftDeserializedBytecode(*deserialized);
+    bool sawFastcall = false;
+    std::set<int> captures;
+    std::vector<const LiftedFunction *> pending{&lifted};
+    while (!pending.empty()) {
+        const auto *function = pending.back();
+        pending.pop_back();
+        for (const auto &child : function->subfunctions)
+            pending.push_back(&child);
+        for (const auto &instruction : function->instructions) {
+            sawFastcall |= instruction.operation == LiftedOperation::FASTCALL2;
+            if (instruction.operation == LiftedOperation::CAPTURE)
+                captures.insert(instruction.operands.at(0).value.imm.n);
+        }
     }
-    capture.operands[0].value.imm.n = 2;
-    CHECK(SSABuilder::GetRegisterAccess(capture, 1) == AccessType::NoAccess);
+    REQUIRE(sawFastcall);
+    REQUIRE(captures == std::set<int>{0, 1, 2});
+    integration_test::Check(source);
 }
 
 TEST_CASE("SSA: FORNLOOP defines only a fresh control-variable version", "[SSA][Invariant][LoopScope]") {
