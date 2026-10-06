@@ -7,18 +7,35 @@
 #include <boost/json.hpp>
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
 #include <optional>
+#include <stdexcept>
 #include <string>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace fs = std::filesystem;
+
+static constexpr int kCompileLevelCount = 3;
+static constexpr int kMaximumCompileLevel = 2;
+static constexpr int kDefaultBudgetMs = 120000;
+static constexpr int kMinimumBudgetMs = 1;
+static constexpr int kMaximumBudgetMs = 2147483647;
+static constexpr size_t kFlushRecordCount = 32;
+static constexpr size_t kFlushByteCount = 65536;
+static constexpr unsigned int kFreshCliSeed = 1;
+static constexpr size_t kBytecodeVersionSize = 1;
+static constexpr int kWorkerArgumentCount = 2;
+static constexpr int kFirstArgumentIndex = 1;
 
 enum class InputKind { Source, Bytecode, Roblox, RobloxBase64 };
 
@@ -37,6 +54,12 @@ struct Options {
 static void PrintUsage() {
     std::fputs(
         "usage: Fission.Batch [options] <file|dir>...\n"
+        "       Fission.Batch --worker\n"
+        "  --worker                                  persistent source requests on stdin, JSONL events on stdout\n"
+        "    request: requestId, kind=source, budgetMs, reportProgress?, inputs[{id,path,source}], "
+        "profiles[{id,optimizationLevel,debugLevel,flags,inputIds?}]\n"
+        "    events: record (existing fields + requestId/id/profileId), complete (records/failures), error\n"
+        "    optional stderr event: record-start (requestId/profileId/id/path)\n"
         "Decompiles every input and writes one JSON object per line (stdout or --out).\n"
         "  --kind source|bytecode|roblox|roblox-b64   input format (default source)\n"
         "  --opt N / --debug N                        Luau compile levels for --kind source (default 1 / 1)\n"
@@ -47,6 +70,30 @@ static void PrintUsage() {
         "  --recover-inline --no-comments --no-names --types --roblox-types --no-ir\n",
         stderr
     );
+}
+
+static bool ApplyFlag(Options &options, std::string_view flag) {
+    if (flag == "--ast")
+        options.flags |= DecompilerFlags::CaptureAST;
+    else if (flag == "--cfg")
+        options.flags |= DecompilerFlags::CaptureCFGGraph;
+    else if (flag == "--notes")
+        options.flags |= DecompilerFlags::FissionDebugNotes;
+    else if (flag == "--recover-inline")
+        options.flags |= DecompilerFlags::RecoverInline;
+    else if (flag == "--no-comments")
+        options.flags |= DecompilerFlags::OmitFissionComments;
+    else if (flag == "--no-names")
+        options.flags &= ~DecompilerFlags::AutoNameVariables;
+    else if (flag == "--types")
+        options.flags |= DecompilerFlags::InferTypes;
+    else if (flag == "--roblox-types")
+        options.flags |= DecompilerFlags::InferRobloxTypes;
+    else if (flag == "--no-ir")
+        options.includeIR = false;
+    else
+        return false;
+    return true;
 }
 
 static std::optional<Options> ParseArguments(int argc, char **argv) {
@@ -88,24 +135,7 @@ static std::optional<Options> ParseArguments(int argc, char **argv) {
             if (!value)
                 return std::nullopt;
             (arg == "--ext" ? options.extension : options.outPath) = *value;
-        } else if (arg == "--ast") {
-            options.flags |= DecompilerFlags::CaptureAST;
-        } else if (arg == "--cfg") {
-            options.flags |= DecompilerFlags::CaptureCFGGraph;
-        } else if (arg == "--notes") {
-            options.flags |= DecompilerFlags::FissionDebugNotes;
-        } else if (arg == "--recover-inline") {
-            options.flags |= DecompilerFlags::RecoverInline;
-        } else if (arg == "--no-comments") {
-            options.flags |= DecompilerFlags::OmitFissionComments;
-        } else if (arg == "--no-names") {
-            options.flags &= ~DecompilerFlags::AutoNameVariables;
-        } else if (arg == "--types") {
-            options.flags |= DecompilerFlags::InferTypes;
-        } else if (arg == "--roblox-types") {
-            options.flags |= DecompilerFlags::InferRobloxTypes;
-        } else if (arg == "--no-ir") {
-            options.includeIR = false;
+        } else if (ApplyFlag(options, arg)) {
         } else if (arg == "-h" || arg == "--help" || arg.starts_with("--")) {
             return std::nullopt;
         } else {
@@ -161,50 +191,15 @@ static const char *StatusName(DecompileResult code) {
     return "unknown";
 }
 
-static boost::json::object DecompileOne(const fs::path &path, const Options &options) {
-    boost::json::object record;
-    record["path"] = path.generic_string();
-
-    const auto total = std::chrono::steady_clock::now();
-    const auto input = ReadBinary(path);
-    if (!input) {
-        record["status"] = StatusName(DecompileResult::FailedToReadFile);
-        return record;
-    }
-
-    std::string bytecode;
-    double compileSeconds = 0;
-    if (options.kind == InputKind::Source) {
-        record["input"] = *input;
-        Luau::CompileOptions compileOptions{};
-        compileOptions.optimizationLevel = options.optimizationLevel;
-        compileOptions.debugLevel = options.debugLevel;
-        const auto start = std::chrono::steady_clock::now();
-        bytecode = Luau::compile(*input, compileOptions);
-        compileSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
-        // Luau encodes a compile error as a zero version byte followed by the message
-        if (!bytecode.empty() && bytecode.front() == '\0') {
-            record["status"] = "failed_to_compile";
-            record["error"] = bytecode.substr(1);
-            return record;
-        }
-    } else if (options.kind == InputKind::RobloxBase64) {
-        const auto decoded = DecodeBase64(*input);
-        if (!decoded) {
-            record["status"] = StatusName(DecompileResult::FailedToDeserialize);
-            record["error"] = "invalid base64";
-            return record;
-        }
-        bytecode = *decoded;
-    } else {
-        bytecode = *input;
-    }
-
+static boost::json::object DecompileBytes(
+    boost::json::object record, const std::string &bytecode, const Options &options, double compileSeconds, std::chrono::steady_clock::time_point total
+) {
     Decompiler decompiler;
     decompiler.SetDecompileBudget(options.budget);
     const auto start = std::chrono::steady_clock::now();
     const bool roblox = options.kind == InputKind::Roblox || options.kind == InputKind::RobloxBase64;
-    const auto result = roblox ? decompiler.DecompileRobloxBytecode(bytecode, options.flags) : decompiler.DecompileVanillaBytecode(bytecode, options.flags);
+    const auto flags = options.includeIR ? options.flags : options.flags | DecompilerFlags::OmitIR;
+    const auto result = roblox ? decompiler.DecompileRobloxBytecode(bytecode, flags) : decompiler.DecompileVanillaBytecode(bytecode, flags);
     const auto end = std::chrono::steady_clock::now();
 
     record["status"] = StatusName(result.resultCode);
@@ -233,17 +228,280 @@ static boost::json::object DecompileOne(const fs::path &path, const Options &opt
     return record;
 }
 
+static boost::json::object DecompileOne(const fs::path &path, const Options &options) {
+    boost::json::object record;
+    record["path"] = path.generic_string();
+    const auto total = std::chrono::steady_clock::now();
+    const auto input = ReadBinary(path);
+    if (!input) {
+        record["status"] = StatusName(DecompileResult::FailedToReadFile);
+        return record;
+    }
+    std::string bytecode;
+    double compileSeconds = 0;
+    if (options.kind == InputKind::Source) {
+        record["input"] = *input;
+        Luau::CompileOptions compileOptions{};
+        compileOptions.optimizationLevel = options.optimizationLevel;
+        compileOptions.debugLevel = options.debugLevel;
+        const auto start = std::chrono::steady_clock::now();
+        bytecode = Luau::compile(*input, compileOptions);
+        compileSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+        if (!bytecode.empty() && bytecode.front() == '\0') {
+            record["status"] = "failed_to_compile";
+            record["error"] = bytecode.substr(1);
+            return record;
+        }
+    } else if (options.kind == InputKind::RobloxBase64) {
+        const auto decoded = DecodeBase64(*input);
+        if (!decoded) {
+            record["status"] = StatusName(DecompileResult::FailedToDeserialize);
+            record["error"] = "invalid base64";
+            return record;
+        }
+        bytecode = *decoded;
+    } else {
+        bytecode = *input;
+    }
+    return DecompileBytes(std::move(record), bytecode, options, compileSeconds, total);
+}
+
+static void ValidateFields(const boost::json::object &object, std::initializer_list<std::string_view> fields) {
+    for (const auto &field : object)
+        if (std::ranges::find(fields, std::string_view{field.key()}) == fields.end())
+            throw std::invalid_argument("unknown field: " + std::string{field.key()});
+}
+
+static std::string_view JsonString(const boost::json::value &value) {
+    const auto &string = value.as_string();
+    return {string.data(), string.size()};
+}
+
+static int JsonInteger(const boost::json::value &value, int minimum, int maximum) {
+    if (!value.is_int64() || value.as_int64() < minimum || value.as_int64() > maximum)
+        throw std::invalid_argument("integer outside allowed range " + std::to_string(minimum) + ".." + std::to_string(maximum));
+    return static_cast<int>(value.as_int64());
+}
+
+struct WorkerProfile {
+    std::string id;
+    Options options;
+    std::vector<size_t> inputs;
+};
+
+struct CompiledSource {
+    std::string bytecode;
+    std::string error;
+};
+
+static std::unordered_map<std::string_view, size_t> ValidateWorkerInputs(const boost::json::array &inputs) {
+    std::unordered_map<std::string_view, size_t> inputIndices;
+    for (size_t i = 0; i < inputs.size(); ++i) {
+        const auto &input = inputs[i].as_object();
+        ValidateFields(input, {"id", "path", "source"});
+        const auto id = JsonString(input.at("id"));
+        if (id.empty() || !inputIndices.emplace(id, i).second)
+            throw std::invalid_argument("input IDs must be nonempty and unique");
+        JsonString(input.at("path"));
+        JsonString(input.at("source"));
+    }
+    return inputIndices;
+}
+
+static WorkerProfile ParseWorkerProfile(
+    const boost::json::object &profile, const boost::json::array &inputs, const std::unordered_map<std::string_view, size_t> &inputIndices, int budgetMs
+) {
+    ValidateFields(profile, {"id", "optimizationLevel", "debugLevel", "flags", "inputIds"});
+    WorkerProfile validated;
+    validated.id = JsonString(profile.at("id"));
+    validated.options.budget = std::chrono::milliseconds{budgetMs};
+    validated.options.optimizationLevel = JsonInteger(profile.at("optimizationLevel"), 0, kMaximumCompileLevel);
+    validated.options.debugLevel = JsonInteger(profile.at("debugLevel"), 0, kMaximumCompileLevel);
+    if (const auto flags = profile.if_contains("flags"))
+        for (const auto &flag : flags->as_array())
+            if (!ApplyFlag(validated.options, JsonString(flag)))
+                throw std::invalid_argument("unsupported profile flag: " + std::string{JsonString(flag)});
+    if (const auto selected = profile.if_contains("inputIds")) {
+        std::unordered_set<size_t> seen;
+        for (const auto &inputId : selected->as_array()) {
+            const auto found = inputIndices.find(JsonString(inputId));
+            if (found == inputIndices.end() || !seen.insert(found->second).second)
+                throw std::invalid_argument("inputIds must contain unique known IDs");
+            validated.inputs.push_back(found->second);
+        }
+    } else {
+        for (size_t i = 0; i < inputs.size(); ++i)
+            validated.inputs.push_back(i);
+    }
+    std::ranges::stable_sort(validated.inputs, [&](size_t lhs, size_t rhs) {
+        return JsonString(inputs[lhs].as_object().at("path")) < JsonString(inputs[rhs].as_object().at("path"));
+    });
+    return validated;
+}
+
+static std::vector<WorkerProfile> ParseWorkerProfiles(const boost::json::object &request) {
+    ValidateFields(request, {"requestId", "kind", "budgetMs", "inputs", "profiles", "reportProgress"});
+    if (const auto progress = request.if_contains("reportProgress"); progress && !progress->is_bool())
+        throw std::invalid_argument("reportProgress must be boolean");
+    if (JsonString(request.at("requestId")).empty() || JsonString(request.at("kind")) != "source")
+        throw std::invalid_argument("nonempty requestId and kind=source required");
+    const auto budget = request.if_contains("budgetMs");
+    const auto budgetMs = budget ? JsonInteger(*budget, kMinimumBudgetMs, kMaximumBudgetMs) : kDefaultBudgetMs;
+    const auto &inputs = request.at("inputs").as_array();
+    const auto &profiles = request.at("profiles").as_array();
+    if (inputs.empty() || profiles.empty())
+        throw std::invalid_argument("inputs and profiles must be nonempty");
+    const auto inputIndices = ValidateWorkerInputs(inputs);
+    std::vector<WorkerProfile> validatedProfiles;
+    std::unordered_set<std::string_view> profileIds;
+    for (const auto &value : profiles) {
+        const auto &profile = value.as_object();
+        const auto id = JsonString(profile.at("id"));
+        if (id.empty() || !profileIds.insert(id).second)
+            throw std::invalid_argument("profile IDs must be nonempty and unique");
+        validatedProfiles.push_back(ParseWorkerProfile(profile, inputs, inputIndices, budgetMs));
+    }
+    return validatedProfiles;
+}
+
+using WorkerCompileCache = std::unordered_map<std::string_view, std::array<std::optional<CompiledSource>, kCompileLevelCount * kCompileLevelCount>>;
+
+static CompiledSource CompileWorkerSource(std::string_view source, const Options &options) {
+    CompiledSource compiled;
+    try {
+        Luau::CompileOptions compileOptions{};
+        compileOptions.optimizationLevel = options.optimizationLevel;
+        compileOptions.debugLevel = options.debugLevel;
+        compiled.bytecode = Luau::compile(std::string{source}, compileOptions);
+        if (!compiled.bytecode.empty() && compiled.bytecode.front() == '\0')
+            compiled.error = compiled.bytecode.substr(kBytecodeVersionSize);
+    } catch (const std::exception &error) {
+        compiled.error = error.what();
+    }
+    return compiled;
+}
+
+static boost::json::object
+DecompileWorkerInput(const boost::json::object &input, const WorkerProfile &profile, std::string_view requestId, WorkerCompileCache &compiled) {
+    const auto total = std::chrono::steady_clock::now();
+    const auto &options = profile.options;
+    const auto source = JsonString(input.at("source"));
+    auto &cached = compiled[source].at(options.optimizationLevel * kCompileLevelCount + options.debugLevel);
+    double compileSeconds = 0;
+    const bool compileReused = cached.has_value();
+    if (!cached) {
+        const auto start = std::chrono::steady_clock::now();
+        cached = CompileWorkerSource(source, options);
+        compileSeconds = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    }
+    boost::json::object record{
+        {"event", "record"},
+        {"requestId", requestId},
+        {"id", input.at("id")},
+        {"profileId", profile.id},
+        {"path", input.at("path")},
+        {"input", input.at("source")},
+        {"optimizationLevel", options.optimizationLevel},
+        {"debugLevel", options.debugLevel},
+        {"compileReused", compileReused}
+    };
+    if (cached->error.empty())
+        return DecompileBytes(std::move(record), cached->bytecode, options, compileSeconds, total);
+    record["status"] = "failed_to_compile";
+    record["error"] = cached->error;
+    record["bytecodeSize"] = cached->bytecode.size();
+    record["output"] = "";
+    record["timingBreakdown"] = "";
+    record["timings"] = {
+        {"compileSeconds", compileSeconds},
+        {"decompileSeconds", 0.0},
+        {"totalSeconds", std::chrono::duration<double>(std::chrono::steady_clock::now() - total).count()}
+    };
+    if (options.includeIR)
+        record["ir"] = "";
+    return record;
+}
+
+static void RunWorkerRequest(const boost::json::object &request) {
+    const auto validatedProfiles = ParseWorkerProfiles(request);
+    const auto requestId = JsonString(request.at("requestId"));
+    const auto &inputs = request.at("inputs").as_array();
+    const auto progress = request.if_contains("reportProgress");
+    const bool reportProgress = progress && progress->as_bool();
+    WorkerCompileCache compiled;
+    size_t records = 0, failures = 0, bufferedBytes = 0;
+    for (const auto &profile : validatedProfiles) {
+        // CLI-compatible anonymous names. NOLINTNEXTLINE(bugprone-random-generator-seed,cert-msc51-cpp)
+        std::srand(kFreshCliSeed);
+        for (const auto index : profile.inputs) {
+            const auto &input = inputs[index].as_object();
+            if (reportProgress) {
+                std::cerr << boost::json::serialize(
+                                 boost::json::object{
+                                     {"event", "record-start"},
+                                     {"requestId", requestId},
+                                     {"profileId", profile.id},
+                                     {"id", input.at("id")},
+                                     {"path", input.at("path")}
+                                 }
+                             )
+                          << '\n';
+                std::cerr.flush();
+            }
+            const auto record = DecompileWorkerInput(input, profile, requestId, compiled);
+            failures += record.at("status").as_string() != "success";
+            ++records;
+            const auto line = boost::json::serialize(record);
+            std::cout << line << '\n';
+            bufferedBytes += line.size() + sizeof('\n');
+            if (records % kFlushRecordCount == 0 || bufferedBytes >= kFlushByteCount) {
+                std::cout.flush();
+                bufferedBytes = 0;
+            }
+        }
+    }
+    std::cout << boost::json::serialize(boost::json::object{{"event", "complete"}, {"requestId", requestId}, {"records", records}, {"failures", failures}})
+              << '\n';
+    std::cout.flush();
+}
+
+static int RunWorker() {
+    std::string line;
+    while (std::getline(std::cin, line)) {
+        boost::json::value request;
+        try {
+            request = boost::json::parse(line);
+            RunWorkerRequest(request.as_object());
+        } catch (const std::exception &error) {
+            boost::json::object event{{"event", "error"}, {"error", error.what()}};
+            if (request.is_object())
+                if (const auto id = request.as_object().if_contains("requestId"); id && id->is_string())
+                    event["requestId"] = *id;
+            std::cout << boost::json::serialize(event) << '\n';
+            std::cout.flush();
+        }
+        if (!std::cout)
+            return EXIT_FAILURE;
+    }
+    return std::cin.bad() ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+static void EnableLuauFlags() {
+    // integer constants deserialize only with the experimental Luau flags on
+    for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
+        if (std::strncmp(flag->name, "Luau", 4) == 0)
+            flag->value = true;
+}
+
 int main(int argc, char **argv) {
+    EnableLuauFlags();
+    if (argc == kWorkerArgumentCount && std::strcmp(argv[kFirstArgumentIndex], "--worker") == 0)
+        return RunWorker();
     const auto options = ParseArguments(argc, argv);
     if (!options) {
         PrintUsage();
         return 2;
     }
-
-    // integer constants deserialize only with the experimental Luau flags on
-    for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
-        if (std::strncmp(flag->name, "Luau", 4) == 0)
-            flag->value = true;
 
     std::vector<fs::path> files;
     for (const auto &input : options->inputs) {

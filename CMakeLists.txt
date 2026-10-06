@@ -312,15 +312,15 @@ endif ()
 target_compile_options(Fission.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.CLI PRIVATE ${CXX_LINK_OPTIONS})
 
-add_executable(Fission.Batch
-        Fission.Batch/src/main.cpp
-)
-target_link_libraries(Fission.Batch PRIVATE Fission.Decompiler Boost::json)
-target_compile_options(Fission.Batch PRIVATE ${CXX_COMPILE_OPTIONS})
-if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND WIN32)
-    target_compile_options(Fission.Batch PRIVATE -Wno-error=language-extension-token -Wno-error=gnu-anonymous-struct -Wno-error=nested-anon-types)
-endif ()
-target_link_options(Fission.Batch PRIVATE ${CXX_LINK_OPTIONS})
+foreach (batch_target Fission.Batch Fission.Batch.Worker)
+    add_executable(${batch_target} Fission.Batch/src/main.cpp)
+    target_link_libraries(${batch_target} PRIVATE Fission.Decompiler Boost::json)
+    target_compile_options(${batch_target} PRIVATE ${CXX_COMPILE_OPTIONS})
+    if (CMAKE_CXX_COMPILER_ID MATCHES "Clang" AND WIN32)
+        target_compile_options(${batch_target} PRIVATE -Wno-error=language-extension-token -Wno-error=gnu-anonymous-struct -Wno-error=nested-anon-types)
+    endif ()
+    target_link_options(${batch_target} PRIVATE ${CXX_LINK_OPTIONS})
+endforeach ()
 
 add_library(Fission.Server STATIC
     Fission.Server/src/Server.cpp

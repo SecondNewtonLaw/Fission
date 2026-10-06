@@ -759,7 +759,8 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         std::cout << "generated source code:\n" << generator << '\n';
 
     const auto writeIR = (flags & DecompilerFlags::WriteIRToFile) == DecompilerFlags::WriteIRToFile;
-    const auto formattedIR = FormatAnalyzedIR(controlFlowAnalyzedFunction);
+    const auto omitIR = (flags & DecompilerFlags::OmitIR) == DecompilerFlags::OmitIR;
+    auto formattedIR = !omitIR || printIR || writeIR ? FormatAnalyzedIR(controlFlowAnalyzedFunction) : std::string{};
     if (printIR || writeIR) {
         if (writeIR)
             writefile(std::filesystem::path{"ir_out.txt"}, formattedIR);
@@ -816,7 +817,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         );
     }
 
-    res.irOutput = formattedIR;
+    res.irOutput = std::move(formattedIR);
     res.resultCode = DecompileResult::Success;
     res.decompilationOutput = std::move(generator);
     return res;

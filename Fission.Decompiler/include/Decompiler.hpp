@@ -49,7 +49,8 @@ enum class DecompilerFlags : uint16_t {
     // Emit bounded reasoning notes for pipeline, CFA, SSA, and AST decisions.
     FissionDebugNotes = 1 << 12,
     // Replace function bodies the compiler inlined (O2, needs line info) with a call when the arguments can be recovered.
-    RecoverInline = 1 << 13
+    RecoverInline = 1 << 13,
+    OmitIR = 1 << 14
 };
 
 constexpr DecompilerFlags operator|(DecompilerFlags lhs, DecompilerFlags rhs) {
