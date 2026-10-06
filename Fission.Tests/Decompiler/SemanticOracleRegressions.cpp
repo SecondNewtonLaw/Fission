@@ -6,6 +6,19 @@
 #pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
 
+TEST_CASE("Semantic oracle executes exported closures through a real caller", "[Fuzz][SemanticOracle][Integration]") {
+    const auto prelude = Luau::compile("");
+    const auto driver = Luau::compile("local f=__integration_subject(); print(f(7))");
+    const auto original = fuzz::RunLuauTrace(Luau::compile("return function(value) return value*2 end"), prelude, std::chrono::milliseconds(1000), driver);
+    const auto different = fuzz::RunLuauTrace(Luau::compile("return function(value) return value*3 end"), prelude, std::chrono::milliseconds(1000), driver);
+    REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
+    REQUIRE(different.status == fuzz::SemTrace::Status::Ok);
+    CHECK(original.comparable);
+    CHECK(different.comparable);
+    CHECK(original.trace == "14\n");
+    CHECK(different.trace == "21\n");
+}
+
 TEST_CASE("Semantic oracle normalizes runtime addresses in printed strings", "[Fuzz][SemanticOracle]") {
     const std::string bytecode = Luau::compile("print(tostring(function() end)) return 1");
     const std::string prelude = Luau::compile("");

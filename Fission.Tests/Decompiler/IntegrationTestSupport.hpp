@@ -11,8 +11,10 @@
 #include <string>
 
 namespace integration_test {
-    inline void
-    CheckOutput(const std::string &originalBytecode, const std::string &output, const Luau::CompileOptions &options, const std::string &environment = "") {
+    inline void CheckOutput(
+        const std::string &originalBytecode, const std::string &output, const Luau::CompileOptions &options, const std::string &environment = "",
+        const std::string &driver = ""
+    ) {
         INFO("decompiled:\n" << output);
         const auto reconstructedBytecode = Luau::compile(output, options);
         REQUIRE_FALSE(reconstructedBytecode.empty());
@@ -20,17 +22,32 @@ namespace integration_test {
         const auto prelude = Luau::compile(environment, options);
         REQUIRE_FALSE(prelude.empty());
         REQUIRE(prelude.front() != '\0');
-        const auto expected = fuzz::RunLuauTrace(originalBytecode, prelude);
+        const auto driverBytecode = driver.empty() ? std::string{} : Luau::compile(driver, options);
+        if (!driver.empty()) {
+            REQUIRE_FALSE(driverBytecode.empty());
+            REQUIRE(driverBytecode.front() != '\0');
+        }
+        const auto expected = fuzz::RunLuauTrace(originalBytecode, prelude, std::chrono::milliseconds(1000), driverBytecode);
         REQUIRE(expected.status == fuzz::SemTrace::Status::Ok);
         REQUIRE(expected.comparable);
         REQUIRE_FALSE(expected.trace.empty());
-        const auto actual = fuzz::RunLuauTrace(reconstructedBytecode, prelude);
+        const auto actual = fuzz::RunLuauTrace(reconstructedBytecode, prelude, std::chrono::milliseconds(1000), driverBytecode);
         CHECK(actual.status == expected.status);
         CHECK(actual.comparable);
         CHECK(actual.trace == expected.trace);
     }
 
-    inline void Check(std::initializer_list<std::string> sources) {
+    inline void CheckSource(
+        const std::string &source, const std::string &output, const Luau::CompileOptions &options, const std::string &driver = "",
+        const std::string &environment = "math.randomseed(0)"
+    ) {
+        const auto originalBytecode = Luau::compile(source, options);
+        REQUIRE_FALSE(originalBytecode.empty());
+        REQUIRE(originalBytecode.front() != '\0');
+        CheckOutput(originalBytecode, output, options, environment, driver);
+    }
+
+    inline void Check(std::initializer_list<std::string> sources, const std::string &driver = "", const std::string &environment = "math.randomseed(0)") {
         fuzz::EnableLuauFlags();
         for (int optimization : {0, 1, 2}) {
             for (int debug : {0, 2}) {
@@ -43,10 +60,12 @@ namespace integration_test {
                     REQUIRE(originalBytecode.front() != '\0');
                     const auto result = decompiler.DecompileVanillaBytecode(originalBytecode, DecompilerFlags::OptimizeIR | DecompilerFlags::AutoNameVariables);
                     REQUIRE(result.resultCode == DecompileResult::Success);
-                    CheckOutput(originalBytecode, result.decompilationOutput, options);
+                    CheckOutput(originalBytecode, result.decompilationOutput, options, environment, driver);
                 }
             }
         }
     }
-    inline void Check(const std::string &source) { Check(std::initializer_list<std::string>{source}); }
+    inline void Check(const std::string &source, const std::string &driver = "", const std::string &environment = "math.randomseed(0)") {
+        Check(std::initializer_list<std::string>{source}, driver, environment);
+    }
 } // namespace integration_test

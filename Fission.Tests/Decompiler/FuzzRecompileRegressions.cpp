@@ -1,6 +1,7 @@
 #include "../../Fission.Fuzzing/include/FuzzOracle.hpp"
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
 #include <catch2/catch_test_macros.hpp>
@@ -76,6 +77,7 @@ TEST_CASE("Forward-reference oracle recognizes Luau local bindings", "[Fuzz][For
     );
 
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(source));
+    integration_test::Check(source, "print(select('#',__integration_subject()))");
 }
 
 TEST_CASE("Forward-reference oracle rejects a local hidden from its use", "[Fuzz][ForwardRef][Regression]") {
@@ -83,6 +85,15 @@ TEST_CASE("Forward-reference oracle rejects a local hidden from its use", "[Fuzz
 
     CHECK(fuzz::UsesGeneratedLocalBeforeDeclared(source));
     CHECK(fuzz::ClassifyForwardRef(source) == "USE_BEFORE_DECL");
+    fuzz::EnableLuauFlags();
+    const auto prelude = Luau::compile("v0=9");
+    const auto expected = fuzz::RunLuauTrace(Luau::compile("local v0=1 print(v0)"), prelude);
+    const auto bad = fuzz::RunLuauTrace(Luau::compile(source), prelude);
+    REQUIRE(expected.status == fuzz::SemTrace::Status::Ok);
+    REQUIRE(bad.status == fuzz::SemTrace::Status::Ok);
+    CHECK(expected.trace == "1\n");
+    CHECK(bad.trace == "9\n");
+    integration_test::Check("local v0=1 print(v0)");
 }
 
 TEST_CASE("Forward-reference oracle ignores globals outside nested local scopes", "[Fuzz][ForwardRef][Regression]") {
@@ -90,6 +101,7 @@ TEST_CASE("Forward-reference oracle ignores globals outside nested local scopes"
 
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(source));
     CHECK(fuzz::ClassifyForwardRef(source) == "OTHER");
+    integration_test::Check(source, "", "v0=9");
 }
 
 TEST_CASE("Forward-reference oracle catches shadowing of an original global", "[Fuzz][ForwardRef][Regression]") {
@@ -98,6 +110,15 @@ TEST_CASE("Forward-reference oracle catches shadowing of an original global", "[
 
     CHECK(fuzz::UsesGeneratedLocalBeforeDeclared(output, &original));
     CHECK(fuzz::ClassifyForwardRef(output, &original) == "USE_BEFORE_DECL");
+    fuzz::EnableLuauFlags();
+    const auto prelude = Luau::compile("v0=3");
+    const auto expected = fuzz::RunLuauTrace(Luau::compile(original), prelude);
+    const auto bad = fuzz::RunLuauTrace(Luau::compile(output), prelude);
+    REQUIRE(expected.status == fuzz::SemTrace::Status::Ok);
+    REQUIRE(bad.status == fuzz::SemTrace::Status::Ok);
+    CHECK(expected.trace == "return: 9\n");
+    CHECK(bad.trace == "3\n");
+    integration_test::Check(original, "", "v0=3");
 }
 
 TEST_CASE("Forward-reference oracle preserves source global-before-local binding", "[Fuzz][ForwardRef][Regression]") {
@@ -105,6 +126,7 @@ TEST_CASE("Forward-reference oracle preserves source global-before-local binding
 
     CHECK_FALSE(fuzz::UsesGeneratedLocalBeforeDeclared(source, &source));
     CHECK(fuzz::ClassifyForwardRef(source, &source) == "OTHER");
+    integration_test::Check(source, "", "v0=9");
 }
 
 TEST_CASE("Nested generated local does not capture later global read", "[Fuzz][ForwardRef][Semantic]") {

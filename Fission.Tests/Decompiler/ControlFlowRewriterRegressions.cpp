@@ -3,14 +3,12 @@
 //
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "AbstractSyntaxTree/ASTNode.hpp"
-#include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "ControlFlowRewriterTestSupport.hpp"
 #include "Decompiler.hpp"
 #include "IntegrationTestSupport.hpp"
+#include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "SourceGenerator/Generator.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <limits>
@@ -19,6 +17,34 @@
 #include <string>
 
 namespace control_flow_regression {
+    const std::string kNamingEnvironment = R"LUA(
+        game = {GetService = function(_, name)
+            print("service", name)
+            return {Core={Widget="Core.Widget",Dup="Core.Dup",task="Core.task",Inventory="Core.Inventory"},Other={Dup="Other.Dup"}}
+        end}
+        __integration_cache = {alpha={},beta={}}
+        local lookup = {TableLookup=function(id,entry,name) print("lookup",id,name); return name=="hit" and entry or nil end}
+        require = function(path)
+            print("require",path)
+            if path=="../Internal/Cache" then return __integration_cache end
+            if string.find(path,"Lookup",1,true) then return lookup end
+            return path
+        end
+        Instance = {new=function(name) print("new",name); return {ClassName=name} end}
+        Color3 = {fromRGB=function(r,g,b) return vector.create(r/255,g/255,b/255) end}
+        MyClass = {new=function() return {init=function(self) print("init"); self.initialized=true end} end}
+        local player = {GetMouse=function() print("mouse"); return "mouse" end}
+        game.Players = {LocalPlayer=player, GetPropertyChangedSignal=function() print("signal"); return player end}
+        workspace = {clones={}}
+        workspace.Part = {Clone=function()
+            local value={}
+            workspace.clones[#workspace.clones+1]=value
+            print("clone",#workspace.clones)
+            return value
+        end}
+        send = function(value) print("send",value.Identity,value.indexkey,value.dataValue) end
+        math.randomseed(0)
+    )LUA";
 
     void EnableLuauFFlagsOnce() {
         static bool enabled = false;
@@ -30,7 +56,7 @@ namespace control_flow_regression {
                 flag->value = true;
     }
 
-    std::string DecompileOrFail(const std::string &source, int optLevel, int debugLevel) {
+    std::string DecompileOrFail(const std::string &source, int optLevel, int debugLevel, const std::string &driver, const std::string &environment) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         Luau::CompileOptions opts{};
@@ -38,6 +64,7 @@ namespace control_flow_regression {
         opts.debugLevel = debugLevel;
         auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), opts);
         REQUIRE(result.resultCode == DecompileResult::Success);
+        integration_test::CheckSource(source, result.decompilationOutput, opts, driver, environment);
         return std::move(result.decompilationOutput);
     }
 
@@ -203,25 +230,32 @@ TEST_CASE("Integration: temporary phases preserve table identity", "[Decompiler]
     integration_test::Check(source);
 }
 
-TEST_CASE("Source: non-finite numbers preserve their values", "[Decompiler][Source][Regression]") {
-    auto result = std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{
-        std::make_shared<NumberLiteralNode>(std::numeric_limits<double>::infinity()),
-        std::make_shared<NumberLiteralNode>(-std::numeric_limits<double>::infinity()),
-        std::make_shared<NumberLiteralNode>(std::numeric_limits<double>::quiet_NaN()),
-    });
-    RootNode root{{result}};
-    SourceGenerator generator{};
-    const std::string source = generator.GenerateSource(&root);
-
-    INFO("rendered source:\n" << source);
-    REQUIRE(Recompiles(source));
-    const auto verdict = fuzz::CompareSemantics(Luau::compile("return 1 / 0, -1 / 0, 0 / 0"), Luau::compile(source), {Luau::compile("")});
-    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+TEST_CASE("Source: non-finite numbers preserve their values", "[Decompiler][Source][Integration]") {
+    fuzz::EnableLuauFlags();
+    Luau::BytecodeBuilder builder;
+    const auto main = builder.beginFunction(0, false);
+    const auto positive = builder.addConstantNumber(std::numeric_limits<double>::infinity());
+    const auto negative = builder.addConstantNumber(-std::numeric_limits<double>::infinity());
+    const auto nan = builder.addConstantNumber(std::numeric_limits<double>::quiet_NaN());
+    builder.emitAD(LOP_LOADK, 0, static_cast<int16_t>(positive));
+    builder.emitAD(LOP_LOADK, 1, static_cast<int16_t>(negative));
+    builder.emitAD(LOP_LOADK, 2, static_cast<int16_t>(nan));
+    builder.emitABC(LOP_RETURN, 0, 4, 0);
+    builder.endFunction(3, 0);
+    builder.setMainFunction(main);
+    builder.finalize();
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(builder.getBytecode());
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(
+        builder.getBytecode(), result.decompilationOutput, Luau::CompileOptions{1, 2}, "",
+        "local positive,negative,nan=__integration_subject(); print(positive==math.huge,negative==-math.huge,nan~=nan)"
+    );
 }
 
 TEST_CASE("Source: constant overflow preserves call argument errors", "[Decompiler][Source][Regression]") {
     const std::string source = "select(893 ^ 373, {})";
-    const auto output = DecompileOrFail(source);
+    const auto output = DecompileOrFail(source, 1, 2, "print(pcall(__integration_subject))");
     INFO("rendered source:\n" << output);
     REQUIRE(Recompiles(source));
     REQUIRE(Recompiles(output));
@@ -236,7 +270,8 @@ TEST_CASE("Source: constant overflow preserves call argument errors", "[Decompil
 
 // End-to-end: with the pass on, a real decompile of register-reuse-shaped code recompiles.
 TEST_CASE("Scope: pass keeps decompiled output recompilable", "[Decompiler][Scope][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f()
             local keep = workspace.Part
             local a = keep:Clone()
@@ -246,7 +281,9 @@ TEST_CASE("Scope: pass keeps decompiled output recompilable", "[Decompiler][Scop
             return keep
         end
         return f
-    )");
+    )",
+        1, 2, "local f=__integration_subject(); print(f()==workspace.Part,workspace.clones[1].Parent==workspace,workspace.clones[2].Parent==workspace)"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(Contains(out, "return"));
@@ -254,7 +291,8 @@ TEST_CASE("Scope: pass keeps decompiled output recompilable", "[Decompiler][Scop
 }
 
 TEST_CASE("Scope: module initializer keeps crossing locals outside later scopes", "[Decompiler][Scope][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local service = game:GetService("ReplicatedStorage")
         local cache = require("../Internal/Cache")
         local lookups = {
@@ -277,7 +315,10 @@ TEST_CASE("Scope: module initializer keeps crossing locals outside later scopes"
             send({Identity = id, indexkey = tostring(key), dataValue = value})
         end
         return module
-    )");
+    )",
+        1, 2,
+        R"DRIVER(local m=__integration_subject(); m.Create("alpha","x",7,{Table=true,Name="hit"},false); print(__integration_cache.alpha.x); m.Create("beta","x",9,{Value=true,Name="miss"},true); print(__integration_cache.beta.x); m.Create("alpha","x",11,nil,true); print(__integration_cache.alpha.x))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(out.starts_with("--[["));

@@ -4,20 +4,10 @@
 //
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "AbstractSyntaxTree/ASTNode.hpp"
-#include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "ControlFlowRewriterTestSupport.hpp"
 #include "Decompiler.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeadLocalEliminator.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/PropertyRenamer.hpp"
-#include "Rewriters/ReverseFieldRenamer.hpp"
-#include "Rewriters/ScopeAwareRenamer.hpp"
-#include "Rewriters/ScopeBlockIntroducer.hpp"
-#include "Rewriters/SelfAssignmentEliminator.hpp"
-#include "SourceGenerator/Generator.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <limits>
@@ -26,41 +16,54 @@
 #include <string>
 
 using namespace control_flow_regression;
-using namespace scope_regression;
 
 TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][Return][Regression]") {
     SECTION("multret call tail: return 1, 2, g()") {
-        const auto out = DecompileOrFail("local function f(g) return 1, 2, g() end return f");
+        const auto out = DecompileOrFail(
+            "local function f(g) return 1, 2, g() end return f", 1, 2,
+            R"DRIVER(local f=__integration_subject(); print(f(function() print("g"); return 3,nil,5 end,7)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+1,\s*2,\s*g\(\))")));
         CHECK(Recompiles(out));
     }
     SECTION("vararg tail: return 1, ...") {
-        const auto out = DecompileOrFail("local function f(...) return 1, ... end return f");
+        const auto out = DecompileOrFail(
+            "local function f(...) return 1, ... end return f", 1, 2, R"DRIVER(local f=__integration_subject(); print(f(3,nil,5)); print(f()))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+1,\s*\.\.\.)")));
         CHECK(Recompiles(out));
     }
     SECTION("pure multret: return g()") {
-        const auto out = DecompileOrFail("local function f(g) return g() end return f");
+        const auto out = DecompileOrFail(
+            "local function f(g) return g() end return f", 1, 2,
+            R"DRIVER(local f=__integration_subject(); print(f(function() print("g"); return 3,nil,5 end,7)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+g\(\))")));
         CHECK(Recompiles(out));
     }
     SECTION("pure vararg: return ...") {
-        const auto out = DecompileOrFail("local function f(...) return ... end return f");
+        const auto out = DecompileOrFail(
+            "local function f(...) return ... end return f", 1, 2, R"DRIVER(local f=__integration_subject(); print(f(3,nil,5)); print(f()))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+\.\.\.)")));
         CHECK(Recompiles(out));
     }
     SECTION("fixed multi-return unaffected: return a, b, c") {
-        const auto out = DecompileOrFail("local function f(a, b, c) return a, b, c end return f");
+        const auto out =
+            DecompileOrFail("local function f(a, b, c) return a, b, c end return f", 1, 2, R"DRIVER(local f=__integration_subject(); print(f(3,nil,5)))DRIVER");
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+a,\s*b,\s*c)")));
         CHECK(Recompiles(out));
     }
     SECTION("multret in non-tail position is truncated to one value: return g(), b") {
-        const auto out = DecompileOrFail("local function f(g, b) return g(), b end return f");
+        const auto out = DecompileOrFail(
+            "local function f(g, b) return g(), b end return f", 1, 2,
+            R"DRIVER(local f=__integration_subject(); print(f(function() print("g"); return 3,nil,5 end,7)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(return\s+g\(\),\s*b)")));
         CHECK(Recompiles(out));
@@ -72,12 +75,17 @@ TEST_CASE("Regress: variadic RETURN keeps every value", "[Decompiler][Variadic][
 // overwritten by a `local v6`, and on recompile later reads of the global would rebind to the local.
 // GetVarName prefixes the register's local (`_v6`) so the global is preserved, and emits a FISSION INFO.
 TEST_CASE("Regress: register auto-name does not overwrite a same-named global", "[Decompiler][Naming][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local a, b, c, d, e, f = tonumber(), tonumber(), tonumber(), tonumber(), tonumber(), tonumber()
         local g = not v6()
         v681(631)
         return #("a-b"), select(nil, 31)[{ ["data"] = g }], g, a, b, c, d, e, f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(print(__integration_subject()))DRIVER",
+        kNamingEnvironment +
+            R"ENV(tonumber=function() print("tonumber"); return 1 end; v6=function() print("v6"); return false end; v681=function(n) print("v681",n) end; select=function() return setmetatable({}, {__index=function(_,key) print("index",key.data); return key.data end}) end)ENV"
+    );
 
     INFO("decompile:\n" << out);
     // the colliding register local is prefixed (the global `v6` is referenced as a bare call).
@@ -91,7 +99,8 @@ TEST_CASE("Regress: register auto-name does not overwrite a same-named global", 
 // A local stored into a global (SETGLOBAL) is named after the global, lower-first-cased so it cannot
 // shadow it: `BlahBlah = v0` -> `local blahBlah = ...; BlahBlah = blahBlah`.
 TEST_CASE("Regress: SETGLOBAL back-propagates a lower-first global name", "[Decompiler][Naming][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(o)
             local a = o:compute()
             BlahBlah = a
@@ -99,7 +108,9 @@ TEST_CASE("Regress: SETGLOBAL back-propagates a lower-first global name", "[Deco
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); print(f({compute=function() print("compute"); return 7 end}),BlahBlah))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+blahBlah\b)"))); // lower-first local
@@ -111,7 +122,8 @@ TEST_CASE("Regress: SETGLOBAL back-propagates a lower-first global name", "[Deco
 
 // A local stored into a capitalized field is named after it, lower-first-cased.
 TEST_CASE("Regress: reverse-field back-prop lowers a capitalized field name", "[Decompiler][Naming][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(o)
             local a = o:compute()
             o.Health = a
@@ -119,7 +131,9 @@ TEST_CASE("Regress: reverse-field back-prop lowers a capitalized field name", "[
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); local o={compute=function() print("compute"); return 9 end}; print(f(o),o.Health))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+health\b)")));      // lower-first const
@@ -130,7 +144,8 @@ TEST_CASE("Regress: reverse-field back-prop lowers a capitalized field name", "[
 // Shadow safety: a global that is already lower-first must NOT be back-propagated; a `local score`
 // would shadow the `score` global on its later reads. The engine's used-name gate must refuse it.
 TEST_CASE("Regress: lower-first global is not back-propagated (would shadow)", "[Decompiler][Naming][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(o)
             local a = o:compute()
             score = a
@@ -138,7 +153,9 @@ TEST_CASE("Regress: lower-first global is not back-propagated (would shadow)", "
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); print(f({compute=function() return 11 end}),score))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(\blocal\s+score\b)"))); // would shadow the global `score`
@@ -151,30 +168,36 @@ TEST_CASE("Regress: lower-first global is not back-propagated (would shadow)", "
 // the class string; any other `Type.new(...)` / `Type.from*(...)` names after the type. Lower-first so
 // the local never shadows the type/global. Only the lifter's auto-names are retargeted.
 TEST_CASE("Feature: Instance.new names the local after the class string", "[Decompiler][Naming][Constructor]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f()
             local a = Instance.new("Part")
             a.Anchored = true
-            print(a)
+            print(a.ClassName, a.Anchored)
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(print(__integration_subject()()))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+part\s*=\s*Instance\.new)")));
     CHECK(Recompiles(out));
 }
 
 TEST_CASE("Feature: Instance.new lower-firsts a PascalCase class string", "[Decompiler][Naming][Constructor]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f()
             local a = Instance.new("ScreenGui")
             a.Enabled = true
-            print(a)
+            print(a.ClassName, a.Enabled)
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(print(__integration_subject()()))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+screenGui\b)")));
     CHECK(Recompiles(out));
@@ -182,40 +205,49 @@ TEST_CASE("Feature: Instance.new lower-firsts a PascalCase class string", "[Deco
 
 TEST_CASE("Feature: datatype constructor names the local after the type", "[Decompiler][Naming][Constructor]") {
     SECTION("Vector3.new") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(x)
                 local a = Vector3.new(x, x, x)
                 print(a)
                 return a + a
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1, R"DRIVER(local f=__integration_subject(); print(f(2),f(-3)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+vector3\s*=\s*Vector3\.new)")));
         CHECK(Recompiles(out));
     }
     SECTION("Color3.fromRGB (from* factory)") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f()
                 local a = Color3.fromRGB(1, 2, 3)
                 print(a)
                 return a, a
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1, R"DRIVER(print(__integration_subject()()))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+color3\s*=\s*Color3\.fromRGB)")));
         CHECK(Recompiles(out));
     }
     SECTION("user OOP class .new()") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f()
                 local a = MyClass.new()
                 a:init()
                 return a
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1, R"DRIVER(local obj=__integration_subject()(); print(obj.initialized))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+myClass\s*=\s*MyClass\.new)")));
         CHECK(Recompiles(out));
@@ -225,7 +257,8 @@ TEST_CASE("Feature: datatype constructor names the local after the type", "[Deco
 // Loop-variable naming (nesting-aware)
 // Numeric-for loop vars become i / j / k by nesting depth; siblings reuse i (disjoint scopes).
 TEST_CASE("Feature: nested numeric for loops use i, j, k", "[Decompiler][Naming][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(a, b, c)
             for x = 1, a do
                 for y = 1, b do
@@ -237,7 +270,9 @@ TEST_CASE("Feature: nested numeric for loops use i, j, k", "[Decompiler][Naming]
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); print(f(0,2,2)); print(f(2,2,2)))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+i\s*=)")));
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+j\s*=)")));
@@ -247,14 +282,17 @@ TEST_CASE("Feature: nested numeric for loops use i, j, k", "[Decompiler][Naming]
 }
 
 TEST_CASE("Feature: sibling numeric for loops both reuse i", "[Decompiler][Naming][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(a, b)
             for x = 1, a do print(x) end
             for y = 1, b do print(y) end
             return a
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); print(f(0,2)); print(f(2,0)); print(f(2,3)))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(CountOccurrences(out, "for i =") == 2); // both siblings -> i
     CHECK(Recompiles(out));
@@ -262,26 +300,32 @@ TEST_CASE("Feature: sibling numeric for loops both reuse i", "[Decompiler][Namin
 
 // Generic-for: ipairs -> i, v; pairs (and others) -> k, v.
 TEST_CASE("Feature: generic for ipairs uses i, v", "[Decompiler][Naming][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(t)
             for a, b in ipairs(t) do print(a, b) end
             return t
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); f({2,3}); f({}); print("done"))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+i,\s*v\s+in\s+ipairs\b)")));
     CHECK(Recompiles(out));
 }
 
 TEST_CASE("Feature: generic for pairs uses k, v", "[Decompiler][Naming][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(t)
             for a, b in pairs(t) do print(a, b) end
             return t
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); f({a=2,b=3}); f({}); print("done"))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfor\s+k,\s*v\s+in\s+pairs\b)")));
     CHECK(Recompiles(out));
@@ -290,7 +334,8 @@ TEST_CASE("Feature: generic for pairs uses k, v", "[Decompiler][Naming][Loop]") 
 // Collision safety: a loop var must not be renamed to a name the body already uses (a global `i`),
 // which it would otherwise capture. Bump past it; the global write survives.
 TEST_CASE("Feature: loop var does not capture a same-named global in its body", "[Decompiler][Naming][Loop]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(a)
             for x = 1, a do
                 i = x
@@ -298,7 +343,9 @@ TEST_CASE("Feature: loop var does not capture a same-named global in its body", 
             return a
         end
         return f
-    )");
+    )",
+        1, 2, R"DRIVER(local f=__integration_subject(); i=17; print(f(0),i); print(f(3),i))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK_FALSE(ContainsRegex(out, std::regex(R"(\bfor\s+i\s*=)"))); // would capture the global `i`
     CHECK(ContainsRegex(out, std::regex(R"(\bi\s*=\s*\w)")));        // the global assignment survives
@@ -310,7 +357,8 @@ TEST_CASE("Feature: loop var does not capture a same-named global in its body", 
 // method: emit colon syntax with `self` (`function T:m(...)`). A free function (first param not a
 // receiver) stays dot syntax with its parameters intact.
 TEST_CASE("Feature: module-table method recovers self (colon form)", "[Decompiler][Naming][Self]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local T = {}
         function T:setValue(v)
             self.value = v
@@ -322,7 +370,9 @@ TEST_CASE("Feature: module-table method recovers self (colon form)", "[Decompile
             return a + b
         end
         return T
-    )");
+    )",
+        1, 2, R"DRIVER(local t=__integration_subject(); t:setValue(7); print(t:getValue(),t.freeFn(2,3)); t:setValue(9); print(t:getValue()))DRIVER"
+    );
     INFO("decompile:\n" << out);
     // member-write method -> colon + self
     CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+\w+:setValue\b)")));
@@ -338,14 +388,17 @@ TEST_CASE("Feature: module-table method recovers self (colon form)", "[Decompile
 
 // Class methods (the `X.__index = X` pattern) already recover self; guard it stays that way.
 TEST_CASE("Feature: class method keeps self", "[Decompiler][Naming][Self]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local C = {}
         C.__index = C
         function C:setX(v)
             self.x = v
         end
         return C
-    )");
+    )",
+        1, 2, R"DRIVER(local C=__integration_subject(); local a,b=setmetatable({},C),setmetatable({},C); a:setX(3); b:setX(7); print(a.x,b.x))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bfunction\s+\w+:setX\b)"))); // table keeps auto-name under flags=0
     CHECK(ContainsRegex(out, std::regex(R"(\bself\.x\s*=)")));
@@ -355,14 +408,17 @@ TEST_CASE("Feature: class method keeps self", "[Decompiler][Naming][Self]") {
 // Length / count naming
 // A local bound to a `#expr` length is named `count`.
 TEST_CASE("Feature: length operator names the local count", "[Decompiler][Naming][Length]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f(t)
             local n = #t
             print(n)
             return n + n
         end
         return f
-    )", 1, 1);
+    )",
+        1, 1, R"DRIVER(local f=__integration_subject(); print(f({}),f({2,3}),f({7})))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+count\s*=\s*#)")));
     CHECK(Recompiles(out));
@@ -378,18 +434,21 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
     const std::regex leak(R"((?:^|\n)[ \t]*v\d+[ \t]*=[ \t]*\{)");
 
     SECTION("if-branch temp then merge-block table") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(c, obj)
                 if c then
                     obj:Method("temparg")
                 end
                 local t = {}
                 t.x = 1
-                print(t)
+                print(t.x)
                 return t
             end
             return f
-        )");
+        )",
+            1, 2, R"DRIVER(local f=__integration_subject(); local obj={Method=function(_,v) print("method",v) end}; print(f(true,obj),f(false,obj)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK_FALSE(ContainsRegex(out, leak));                               // no global leak
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+\w+\s*=\s*\{)"))); // table is a local
@@ -398,13 +457,17 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
     }
 
     SECTION("`or` with namecall arg then table (MouseOverModule shape)") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local v = game.Players.LocalPlayer or game.Players:GetPropertyChangedSignal("LocalPlayer")
             local mouse = v:GetMouse()
             local t = {}
             t.handler = function() end
             return t
-        )");
+        )",
+            1, 2,
+            R"DRIVER(local p=game.Players.LocalPlayer; for _,active in {false,true} do game.Players.LocalPlayer=active and p or nil; local t=__integration_subject(); t.handler(); print(type(t.handler)) end)DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK_FALSE(ContainsRegex(out, leak));
         CHECK(NoForwardReference(out));
@@ -419,45 +482,58 @@ TEST_CASE("Regress: reused branch-temp slot is re-declared local after the merge
 // collapse to one name.
 TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall]") {
     SECTION("multi-return pcall") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(g)
                 local a, b = pcall(g, 1, 2)
                 if a then print(b) end
                 return a
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1,
+            R"DRIVER(local f=__integration_subject(); local ok=function(a,b) print("ok",a,b); return 9 end; local bad=function() error("stop") end; local handler=function(msg) return "handled:"..msg end; print(f(ok,handler)); print(f(bad,handler)); print(f(ok,bad)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*,\s*result\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("single-return pcall") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(g)
                 local a = pcall(g)
                 if a then print("y") end
                 return a
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1,
+            R"DRIVER(local f=__integration_subject(); local ok=function(a,b) print("ok",a,b); return 9 end; local bad=function() error("stop") end; local handler=function(msg) return "handled:"..msg end; print(f(ok,handler)); print(f(bad,handler)); print(f(ok,bad)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*=\s*pcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("xpcall names the same way") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(g, h)
                 local a, b = xpcall(g, h)
                 return a, b
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1,
+            R"DRIVER(local f=__integration_subject(); local ok=function(a,b) print("ok",a,b); return 9 end; local bad=function() error("stop") end; local handler=function(msg) return "handled:"..msg end; print(f(ok,handler)); print(f(bad,handler)); print(f(ok,bad)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*,\s*result\s*=\s*xpcall\b)")));
         CHECK(Recompiles(out));
     }
     SECTION("two pcalls in one scope stay distinct (no aliasing)") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(g, h)
                 local a = pcall(g)
                 local b = pcall(h)
@@ -466,7 +542,10 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
                 return a, b
             end
             return f
-        )", 1, 1);
+        )",
+            1, 1,
+            R"DRIVER(local f=__integration_subject(); local ok=function(a,b) print("ok",a,b); return 9 end; local bad=function() error("stop") end; local handler=function(msg) return "handled:"..msg end; print(f(ok,handler)); print(f(bad,handler)); print(f(ok,bad)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok\s*=\s*pcall\b)")));
         CHECK(ContainsRegex(out, std::regex(R"(\bconst\s+ok2\s*=\s*pcall\b)")));
@@ -475,14 +554,18 @@ TEST_CASE("Feature: pcall result names ok / result", "[Decompiler][Naming][Pcall
         CHECK(Recompiles(out));
     }
     SECTION("existing ok in scope is not captured") {
-        const auto out = DecompileOrFail(R"(
+        const auto out = DecompileOrFail(
+            R"(
             local function f(g)
                 local ok = 5
                 local a, b = pcall(g)
                 return ok, a, b
             end
             return f
-        )");
+        )",
+            1, 2,
+            R"DRIVER(local f=__integration_subject(); local ok=function(a,b) print("ok",a,b); return 9 end; local bad=function() error("stop") end; local handler=function(msg) return "handled:"..msg end; print(f(ok,handler)); print(f(bad,handler)); print(f(ok,bad)))DRIVER"
+        );
         INFO("decompile:\n" << out);
         CHECK(Recompiles(out));
         CHECK(NoForwardReference(out));
@@ -494,7 +577,8 @@ TEST_CASE("Tail-duplicated table re-inlines consumed elements", "[Decompiler][Re
     // duplicate the tail region, lifting the table-literal instructions twice. The first lift
     // inlines the nil/select elements and marks their defs processed. A second lift must re-inline
     // pure element defs instead of emitting undeclared register names.
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         repeat
             next ..= (-(-select));
             tonumber = ((if 168.75 then string else 296) == { data = "hello", [529] = false, k = math, y = 852 });
@@ -510,7 +594,9 @@ TEST_CASE("Tail-duplicated table re-inlines consumed elements", "[Decompiler][Re
             end
         end
         t.field(f0[{ nil, x = math, ["hello"] = false, select }], ipairs(false));
-    )");
+    )",
+        1, 2, R"DRIVER(print(pcall(__integration_subject)))DRIVER"
+    );
     INFO("decompile:\n" << out);
     // every lifted copy of the constructor must carry the literal elements, never a register name
     const std::regex faithful(R"(\{\s*nil,\s*x\s*=\s*math,\s*hello\s*=\s*false,\s*select\s*\})");
@@ -521,7 +607,8 @@ TEST_CASE("Tail-duplicated table re-inlines consumed elements", "[Decompiler][Re
 }
 
 TEST_CASE("Regress: numeric-for body cannot poison its start closure", "[Decompiler][Loop][Regression][ForwardReference]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         for g1_0 in pairs.field() do
         end
         for i0 = function(p0)
@@ -538,7 +625,9 @@ TEST_CASE("Regress: numeric-for body cannot poison its start closure", "[Decompi
             tostring(82, math)
             table = math(nil, next)
         end
-    )");
+    )",
+        1, 2, R"DRIVER(print(pcall(__integration_subject)))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK_FALSE(Contains(out, "for i = v2, ..., 1"));
@@ -546,7 +635,8 @@ TEST_CASE("Regress: numeric-for body cannot poison its start closure", "[Decompi
 }
 
 TEST_CASE("Regress: numeric-for conditional step closure is merged", "[Decompiler][Loop][Regression][ForwardReference]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local function f0(p1, p2, p3)
             f0(print, next)
             return true, string
@@ -558,7 +648,9 @@ TEST_CASE("Regress: numeric-for conditional step closure is merged", "[Decompile
                 break
             end
         end
-    )");
+    )",
+        1, 2, R"DRIVER(print(pcall(__integration_subject)))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(const\s+v\d+\b)")));
@@ -574,7 +666,8 @@ TEST_CASE("Regress: numeric-for conditional step closure is merged", "[Decompile
 // unbound global. The forward read-scan alone missed the backward capture; the fix adds
 // an IsIdentifierReadBetween check over (decl, assignment).
 TEST_CASE("Regress: module dot-sugar keeps closure captured by an earlier function", "[Decompiler][Class][Regression]") {
-    const auto out = DecompileOrFail(R"(
+    const auto out = DecompileOrFail(
+        R"(
         local t = {}
         local function helper(x)
             return x + 1
@@ -584,7 +677,9 @@ TEST_CASE("Regress: module dot-sugar keeps closure captured by an earlier functi
         end
         t.run = helper
         return t, wrapper
-    )");
+    )",
+        1, 2, R"DRIVER(local t,wrapper=__integration_subject(); print(t.run(7),wrapper(),t.run(9),wrapper()))DRIVER"
+    );
 
     INFO("decompile:\n" << out);
     // Preserve helper as a local function instead of consuming it into `t.run`.
@@ -605,7 +700,10 @@ TEST_CASE("Regress: deep truthiness OR chain lifts without native recursion", "[
     }
     source += " then return true end\nreturn false";
 
-    const auto out = DecompileOrFail(source);
+    const auto out = DecompileOrFail(
+        source, 1, 2,
+        R"DRIVER(print(__integration_subject("pattern0"),__integration_subject("pattern48"),__integration_subject("pattern95"),__integration_subject("none")))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(Contains(out, " or "));
     CHECK(Recompiles(out));
@@ -617,7 +715,9 @@ TEST_CASE("SSA: deep dominator tree renames iteratively", "[SSA][Regression][Sta
         source += "if x == " + std::to_string(i) + " then x += 1 end\n";
     source += "return x";
 
-    const auto out = DecompileOrFail(source);
+    const auto out = DecompileOrFail(
+        source, 1, 2, R"DRIVER(print(__integration_subject(0),__integration_subject(159),__integration_subject(319),__integration_subject(500)))DRIVER"
+    );
     INFO("decompile:\n" << out);
     CHECK(Recompiles(out));
 }

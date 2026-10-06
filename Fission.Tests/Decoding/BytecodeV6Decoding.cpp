@@ -2,7 +2,9 @@
 // Created by Dottik on 04/17/2026.
 //
 
+#include "../Decompiler/IntegrationTestSupport.hpp"
 #include "Deserializer.hpp"
+#include "Luau/BytecodeBuilder.h"
 #include <catch2/catch_test_macros.hpp>
 
 TEST_CASE("V6 - constants check", "[BytecodeDecoder]") {
@@ -60,6 +62,11 @@ TEST_CASE("V6 - constants check", "[BytecodeDecoder]") {
     REQUIRE(lpMain->constants[8].kType == LUA_TNUMBER);
     REQUIRE(lpMain->constants[8].GetValue<double>() <= 0.2 + std::numeric_limits<double>::epsilon());
     REQUIRE(lpMain->constants[8].GetValue<double>() >= 0.2 - std::numeric_limits<double>::epsilon());
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(bytecode, result.decompilationOutput, Luau::CompileOptions{1, 2});
 }
 
 TEST_CASE("V6 - metadata check", "[BytecodeDecoder]") {
@@ -112,25 +119,50 @@ TEST_CASE("V6 - metadata check", "[BytecodeDecoder]") {
     REQUIRE(deserialized->lpMainFunction->nups == 0);
     REQUIRE(deserialized->lpMainFunction->numparams == 0);
     REQUIRE(deserialized->lpMainFunction->upvalueNames.empty());
+    fuzz::EnableLuauFlags();
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(bytecode, result.decompilationOutput, Luau::CompileOptions{1, 2});
 }
 
-// GetBytecodeTypeName strings are emitted verbatim into the decompiled source as Luau type
-// annotations, so they must parse as Luau -- never a C-style `/* */` comment.
-TEST_CASE("Type names are Luau, not C-style comments", "[BytecodeDecoder]") {
-    // an unmapped tagged-userdata type falls back to `any` with an inline note.
-    const std::string ud = Deserializer::GetBytecodeTypeName(LBC_TYPE_TAGGED_USERDATA_BASE);
-    INFO("userdata type name: " << ud);
-    CHECK(ud.find("/*") == std::string::npos); // no C-style block comment
-    CHECK(ud.find("*/") == std::string::npos);
-    CHECK(ud.find("--[[") != std::string::npos); // Luau inline block comment
-    CHECK(ud.rfind("any", 0) == 0);              // still resolves to `any`
-
-    // the optional bit keeps the `?` attached to the type.
-    const std::string udOpt = Deserializer::GetBytecodeTypeName(LBC_TYPE_TAGGED_USERDATA_BASE | LBC_TYPE_OPTIONAL_BIT);
-    CHECK(udOpt.find("/*") == std::string::npos);
-    CHECK(udOpt.back() == '?');
-
-    // plain scalar types are unaffected.
-    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_NUMBER) == "number");
-    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_STRING) == "string");
+TEST_CASE("Type metadata emits executable Luau annotations", "[BytecodeDecoder][Integration]") {
+    fuzz::EnableLuauFlags();
+    for (uint8_t type :
+         {uint8_t(LBC_TYPE_TAGGED_USERDATA_BASE), uint8_t(LBC_TYPE_TAGGED_USERDATA_BASE | LBC_TYPE_OPTIONAL_BIT), uint8_t(LBC_TYPE_NUMBER),
+          uint8_t(LBC_TYPE_STRING)}) {
+        INFO("type byte " << int(type));
+        Luau::BytecodeBuilder builder;
+        const auto child = builder.beginFunction(1, false);
+        builder.setFunctionTypeInfo(std::string{char(LBC_TYPE_FUNCTION), char(1), char(type)});
+        builder.emitABC(LOP_RETURN, 0, 2, 0);
+        builder.endFunction(1, 0);
+        const auto main = builder.beginFunction(0, false);
+        const auto childIndex = builder.addChildFunction(child);
+        builder.emitAD(LOP_NEWCLOSURE, 0, static_cast<int16_t>(childIndex));
+        builder.emitABC(LOP_RETURN, 0, 2, 0);
+        builder.endFunction(1, 0);
+        builder.setMainFunction(main);
+        builder.finalize();
+        Decompiler decompiler;
+        const auto result = decompiler.DecompileVanillaBytecode(builder.getBytecode(), DecompilerFlags::InferTypes);
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        CHECK(result.decompilationOutput.find("/*") == std::string::npos);
+        Deserializer deserializer;
+        auto decoded = deserializer.Deserialize(builder.getBytecode());
+        REQUIRE(decoded.has_value());
+        const auto &metadata = decoded->functions.at(0).typeinfo;
+        REQUIRE_FALSE(metadata.empty());
+        REQUIRE(static_cast<uint8_t>(metadata.back()) == type);
+        const auto annotation = Deserializer::GetBytecodeTypeName(static_cast<uint8_t>(metadata.back()));
+        if ((type & ~LBC_TYPE_OPTIONAL_BIT) == LBC_TYPE_TAGGED_USERDATA_BASE) {
+            CHECK(annotation.find("any --[[ userdata, unmapped ]]") != std::string::npos);
+            if (type & LBC_TYPE_OPTIONAL_BIT)
+                CHECK(annotation.back() == '?');
+        }
+        integration_test::CheckSource(
+            "return function(value: " + annotation + ") return value end", result.decompilationOutput, Luau::CompileOptions{1, 2},
+            "local f=__integration_subject(); print(f(7),f('value'),f(nil))"
+        );
+    }
 }

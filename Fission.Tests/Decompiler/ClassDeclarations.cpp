@@ -2,9 +2,15 @@
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
+#include <boost/json.hpp>
+#pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
 #include <catch2/generators/catch_generators.hpp>
 #include <cstring>
@@ -19,15 +25,17 @@ namespace {
             return;
         enabled = true;
         for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
-            if (std::strncmp(flag->name, "Luau", 4) == 0)
+            if (std::strncmp(flag->name, "Luau", 4) == 0 || std::strcmp(flag->name, "DebugLuauUserDefinedClasses") == 0 ||
+                std::strcmp(flag->name, "DebugLuauUserDefinedClassesRuntime") == 0)
                 flag->value = true;
     }
 
     // Decompile already-compiled, non-Roblox (identity-decoder) Luau bytecode.
-    std::string DecompileVanillaOrFail(const std::string &bytecode) {
+    std::string DecompileVanillaOrFail(const std::string &bytecode, const std::string &driver = "") {
         Decompiler decompiler{};
         auto result = decompiler.DecompileVanillaBytecode(bytecode, static_cast<DecompilerFlags>(0));
         REQUIRE(result.resultCode == DecompileResult::Success);
+        integration_test::CheckOutput(bytecode, result.decompilationOutput, Luau::CompileOptions{1, 2}, "", driver);
         return std::move(result.decompilationOutput);
     }
 
@@ -45,33 +53,9 @@ namespace {
         return !bc.empty() && bc[0] != '\0';
     }
 
-    // Hand-assemble bytecode for a v10 class-member registration:
-    //   local C = {}              -- class table (NEWTABLE)
-    //   C.greet = function() end  -- NEWCLASSMEMBER (A = class, C = closure, AUX = member name)
-    //   return C
     std::string BuildClassMemberBytecode() {
         EnableLuauFFlagsOnce();
-        Luau::BytecodeBuilder bb{};
-        const std::string sGreet = "greet";
-        const auto sref = [](const std::string &s) { return Luau::BytecodeBuilder::StringRef{s.data(), s.size()}; };
-
-        const uint32_t child = bb.beginFunction(0, /*isvararg*/ false); // the method body
-        bb.emitABC(LOP_RETURN, 0, 1, 0);
-        bb.endFunction(/*maxstacksize*/ 1, /*numupvalues*/ 0);
-
-        const uint32_t main = bb.beginFunction(0, /*isvararg*/ true);
-        const int16_t childIdx = bb.addChildFunction(child);
-        const int32_t cGreet = bb.addConstantString(sref(sGreet));
-        bb.emitABC(LOP_NEWTABLE, 0, 0, 0); // R0 = {} (class table)
-        bb.emitAux(0);
-        bb.emitAD(LOP_NEWCLOSURE, 1, childIdx);  // R1 = function() end
-        bb.emitABC(LOP_NEWCLASSMEMBER, 0, 0, 1); // R0.greet = R1
-        bb.emitAux(static_cast<uint32_t>(cGreet));
-        bb.emitABC(LOP_RETURN, 0, 2, 0); // return R0
-        bb.endFunction(/*maxstacksize*/ 2, /*numupvalues*/ 0);
-        bb.setMainFunction(main);
-        bb.finalize();
-        return bb.getBytecode();
+        return Luau::compile("local C={} function C.greet() return 42 end return C", Luau::CompileOptions{1, 2});
     }
 
     // Hand-assemble bytecode for a full V10 class:
@@ -93,13 +77,16 @@ namespace {
         bb.endFunction(/*maxstacksize*/ 1, /*numupvalues*/ 0);
 
         const uint32_t main = bb.beginFunction(0, /*isvararg*/ true);
+        bb.emitABC(LOP_PREPVARARGS, 0, 0, 0);
         const int32_t cName = bb.addConstantString(sref(sName));
         const int32_t cLegs = bb.addConstantString(sref(sLegs));
         const int32_t cSpeak = bb.addConstantString(sref(sSpeak));
         Luau::BytecodeBuilder::ClassShape shape;
         shape.className = cName;
         shape.propertyNames = {cLegs};
-        shape.methodNames = {cSpeak};
+        const std::string newName = "new", initName = "__init";
+        const auto cNew = bb.addConstantString(sref(newName)), cInit = bb.addConstantString(sref(initName));
+        shape.methodNames = {cNew, cInit, cSpeak};
         const int32_t cShape = bb.addClassShape(std::move(shape));
         const int16_t childIdx = bb.addChildFunction(child);
 
@@ -130,6 +117,7 @@ namespace {
         bb.endFunction(1, 0);
 
         const uint32_t main = bb.beginFunction(0, true);
+        bb.emitABC(LOP_PREPVARARGS, 0, 0, 0);
         const int32_t cName = bb.addConstantString(sref(sName));
         const int32_t cLegs = bb.addConstantString(sref(sLegs));
         const int32_t cNm = bb.addConstantString(sref(sNm));
@@ -138,7 +126,9 @@ namespace {
         Luau::BytecodeBuilder::ClassShape shape;
         shape.className = cName;
         shape.propertyNames = {cLegs, cNm};
-        shape.methodNames = {cSpeak, cWalk};
+        const std::string newName = "new", initName = "__init";
+        const auto cNew = bb.addConstantString(sref(newName)), cInit = bb.addConstantString(sref(initName));
+        shape.methodNames = {cNew, cInit, cSpeak, cWalk};
         const int32_t cShape = bb.addClassShape(std::move(shape));
         const int16_t iSpeak = bb.addChildFunction(speakFn);
         const int16_t iWalk = bb.addChildFunction(walkFn);
@@ -166,13 +156,16 @@ namespace {
         const auto sref = [](const std::string &s) { return Luau::BytecodeBuilder::StringRef{s.data(), s.size()}; };
 
         const uint32_t main = bb.beginFunction(0, true);
+        bb.emitABC(LOP_PREPVARARGS, 0, 0, 0);
         const int32_t cName = bb.addConstantString(sref(sName));
         const int32_t cHost = bb.addConstantString(sref(sHost));
         const int32_t cPort = bb.addConstantString(sref(sPort));
         Luau::BytecodeBuilder::ClassShape shape;
         shape.className = cName;
         shape.propertyNames = {cHost, cPort};
-        shape.methodNames = {};
+        const std::string newName = "new", initName = "__init";
+        const auto cNew = bb.addConstantString(sref(newName)), cInit = bb.addConstantString(sref(initName));
+        shape.methodNames = {cNew, cInit};
         const int32_t cShape = bb.addClassShape(std::move(shape));
         bb.emitAD(LOP_LOADKX, 0, 0);
         bb.emitAux(static_cast<uint32_t>(cShape));
@@ -199,12 +192,16 @@ namespace {
         bb.endFunction(2, 0);
 
         const uint32_t main = bb.beginFunction(0, true);
+        bb.emitABC(LOP_PREPVARARGS, 0, 0, 0);
         const int32_t cName = bb.addConstantString(sref(sName));
         const int32_t cGet = bb.addConstantString(sref(sGet));
         Luau::BytecodeBuilder::ClassShape shape;
         shape.className = cName;
-        shape.propertyNames = {};
-        shape.methodNames = {cGet};
+        const auto cProperty = bb.addConstantString(sref(sValue));
+        const std::string newName = "new", initName = "__init";
+        const auto cNew = bb.addConstantString(sref(newName)), cInit = bb.addConstantString(sref(initName));
+        shape.propertyNames = {cProperty};
+        shape.methodNames = {cNew, cInit, cGet};
         const int32_t cShape = bb.addClassShape(std::move(shape));
         const int16_t iGet = bb.addChildFunction(getFn);
         bb.emitAD(LOP_LOADKX, 0, 0);
@@ -263,39 +260,16 @@ end
         return static_cast<size_t>(std::distance(std::sregex_iterator(s.begin(), s.end(), re), std::sregex_iterator()));
     }
 
-    // Every {/[ closes with a matching }/]; strings are skipped. Enough to reject truncated/unbalanced JSON.
-    bool BracesBalanced(const std::string &json) {
-        int depth = 0;
-        bool inStr = false, esc = false;
-        for (char c : json) {
-            if (inStr) {
-                if (esc)
-                    esc = false;
-                else if (c == '\\')
-                    esc = true;
-                else if (c == '"')
-                    inStr = false;
-                continue;
-            }
-            if (c == '"')
-                inStr = true;
-            else if (c == '{' || c == '[')
-                ++depth;
-            else if (c == '}' || c == ']') {
-                if (--depth < 0)
-                    return false;
-            }
-        }
-        return depth == 0 && !inStr;
+    bool ParsesJson(const std::string &json) {
+        boost::system::error_code error;
+        (void)boost::json::parse(json, error);
+        return !error;
     }
 
 } // namespace
 
-// NEWCLASSMEMBER (v10) registers a method on a class table. When the class register is a plain table (no
-// class shape), it must decompile to a member assignment `<class>.greet = function ... end`, not be
-// silently dropped.
-TEST_CASE("Class: bare NEWCLASSMEMBER renders as a class member assignment", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildClassMemberBytecode());
+TEST_CASE("Class: ordinary table member remains callable", "[Decompiler][Class][Integration]") {
+    const auto out = DecompileVanillaOrFail(BuildClassMemberBytecode(), "print(__integration_subject().greet())");
 
     INFO("decompile:\n" << out);
     // Rendered with method-definition sugar: `function <class>.greet() ... end` (equivalent to
@@ -306,9 +280,10 @@ TEST_CASE("Class: bare NEWCLASSMEMBER renders as a class member assignment", "[D
 
 // A LOADKX of a class-shape constant plus its NEWCLASSMEMBER methods must reconstruct a full
 // `class Name ... end` declaration: the class name, its declared `public` properties, and each method.
-// (No Recompiles() check: `class` is contextual syntax gated behind an experimental parser flag.)
-TEST_CASE("Class: V10 class shape reconstructs a class declaration", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildClassDeclarationBytecode());
+TEST_CASE("Class: legacy class shape reconstructs an executable declaration", "[Decompiler][Class]") {
+    const auto out = DecompileVanillaOrFail(
+        BuildClassDeclarationBytecode(), "local C=__integration_subject(); local a=C.new({legs=4}); print(a.legs,select('#',a:speak()))"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(class\s+Animal)")));
@@ -320,7 +295,10 @@ TEST_CASE("Class: V10 class shape reconstructs a class declaration", "[Decompile
 // Every property AND every method of a class must be reconstructed, in declaration order, all inside the
 // class body; none dropped and none leaked back out as a top-level `local function` (the earlier defect).
 TEST_CASE("Class: all properties and methods are reconstructed in order", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildMultiMemberClassBytecode());
+    const auto out = DecompileVanillaOrFail(
+        BuildMultiMemberClassBytecode(), "local C=__integration_subject(); local a=C.new({legs=4,name='cat'}); "
+                                         "print(a.legs,a.name,select('#',a:speak()),select('#',a:walk()))"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(class\s+Animal)")));
@@ -344,7 +322,9 @@ TEST_CASE("Class: all properties and methods are reconstructed in order", "[Deco
 // A class with only properties (no NEWCLASSMEMBER) still reconstructs a `class ... end` with each
 // `public` line and no methods.
 TEST_CASE("Class: properties-only class reconstructs with no methods", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildPropertiesOnlyClassBytecode());
+    const auto out = DecompileVanillaOrFail(
+        BuildPropertiesOnlyClassBytecode(), "local C=__integration_subject(); local a=C.new({host='localhost',port=80}); print(a.host,a.port)"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(class\s+Config)")));
@@ -358,7 +338,9 @@ TEST_CASE("Class: properties-only class reconstructs with no methods", "[Decompi
 // consistent identifier. Guards the desync where only the parameter was renamed while the body still read
 // the raw register name.
 TEST_CASE("Class: method receiver is `self` in both the signature and the body", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildClassMethodSelfBodyBytecode());
+    const auto out = DecompileVanillaOrFail(
+        BuildClassMethodSelfBodyBytecode(), "local C=__integration_subject(); local a=C.new({value=7}); print(a:get()); a.value=9; print(a:get())"
+    );
 
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(function\s+get\s*\(\s*self\s*\))"))); // parameter is `self`
@@ -369,7 +351,9 @@ TEST_CASE("Class: method receiver is `self` in both the signature and the body",
 }
 
 TEST_CASE("Class: NEWCLASS opcode decompiles compiler-emitted classes", "[Decompiler][Class]") {
-    const auto out = DecompileVanillaOrFail(BuildNewClassBytecode());
+    const auto out = DecompileVanillaOrFail(
+        BuildNewClassBytecode(), "local m=__integration_subject(); local a=m.Cat.new({species='cat',breed='tabby'}); print(a:live(),a:describe())"
+    );
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(open\s+class\s+Animal)")));
     CHECK(ContainsRegex(out, std::regex(R"(class\s+Cat\s+extends\s+Animal)")));
@@ -401,17 +385,20 @@ TEST_CASE("Class: NEWCLASS preserves table exports and captured values", "[Decom
     const int debug = GENERATE(0, 2);
     std::string source;
     std::string expected;
+    std::string driver;
     SECTION("ordinary class table member") {
         source = "class C end local t = {} t.C = C t.answer = 42 return t.answer";
         expected = "return: 42\n";
     }
     SECTION("mixed module exports") {
-        source = "export class C end export local answer = 42";
-        expected = "return: {\"C\"=<class>,\"answer\"=42}\n";
+        source = "export class C function get(self) return 7 end end export local answer = 42";
+        driver = "local m=__integration_subject(); print(m.answer,m.C.new({}):get())";
+        expected = "42\t7\n";
     }
     SECTION("multiple classes and value exports") {
-        source = "export class C end export class D end export local answer = 42";
-        expected = "return: {\"C\"=<class>,\"D\"=<class>,\"answer\"=42}\n";
+        source = "export class C function get(self) return 7 end end export class D function get(self) return 9 end end export local answer = 42";
+        driver = "local m=__integration_subject(); print(m.answer,m.C.new({}):get(),m.D.new({}):get(),m.C~=m.D)";
+        expected = "42\t7\t9\ttrue\n";
     }
     SECTION("method captures table") {
         source = "local state = {} class C function get(self) return state end end return C.new({}):get()";
@@ -445,16 +432,19 @@ TEST_CASE("Class: NEWCLASS preserves table exports and captured values", "[Decom
     const auto bytecode = Luau::compile(source, options);
     REQUIRE(!bytecode.empty());
     REQUIRE(bytecode.front() != '\0');
-    const auto output = DecompileVanillaOrFail(bytecode);
+    const auto output = DecompileVanillaOrFail(bytecode, driver);
     INFO(output);
     const auto compiled = Luau::compile(output, options);
     REQUIRE(!compiled.empty());
     REQUIRE(compiled.front() != '\0');
     const auto prelude = Luau::compile("");
-    const auto original = fuzz::RunLuauTrace(bytecode, prelude);
-    const auto reconstructed = fuzz::RunLuauTrace(compiled, prelude);
+    const auto driverBytecode = driver.empty() ? std::string{} : Luau::compile(driver, options);
+    const auto original = fuzz::RunLuauTrace(bytecode, prelude, std::chrono::milliseconds(1000), driverBytecode);
+    const auto reconstructed = fuzz::RunLuauTrace(compiled, prelude, std::chrono::milliseconds(1000), driverBytecode);
     REQUIRE(original.status == fuzz::SemTrace::Status::Ok);
     REQUIRE(original.trace == expected);
+    REQUIRE(original.comparable);
+    REQUIRE(reconstructed.comparable);
     CHECK(reconstructed.status == original.status);
     CHECK(reconstructed.trace == original.trace);
 }
@@ -468,6 +458,13 @@ TEST_CASE("Class: reused decompiler does not retain previous class registrations
     INFO(second.decompilationOutput);
     CHECK(ContainsRegex(second.decompilationOutput, std::regex(R"(function\s+\w+\.greet\s*\()")));
     CHECK(Recompiles(second.decompilationOutput));
+    integration_test::CheckOutput(
+        BuildClassDeclarationBytecode(), first.decompilationOutput, Luau::CompileOptions{1, 2}, "",
+        "local C=__integration_subject(); local a=C.new({legs=4}); print(a.legs,select('#',a:speak()))"
+    );
+    integration_test::CheckOutput(
+        BuildClassMemberBytecode(), second.decompilationOutput, Luau::CompileOptions{1, 2}, "", "print(__integration_subject().greet())"
+    );
 }
 
 // The reconstructed class must serialize through the AST-JSON path: a ClassDeclaration node with its name,
@@ -480,11 +477,15 @@ TEST_CASE("Class: class node serializes to well-formed AST JSON", "[Decompiler][
 
     INFO("astJson:\n" << json);
     REQUIRE_FALSE(json.empty());
-    CHECK(BracesBalanced(json));
+    CHECK(ParsesJson(json));
     CHECK(Contains(json, R"("kind":"ClassDeclaration")"));
     CHECK(Contains(json, R"("Animal")"));
     CHECK(Contains(json, R"("properties":)"));
     CHECK(Contains(json, R"("legs")"));
     CHECK(Contains(json, R"("methods":)"));
     CHECK(Contains(json, R"("kind":"FunctionDeclaration")"));
+    integration_test::CheckOutput(
+        BuildClassDeclarationBytecode(), result.decompilationOutput, Luau::CompileOptions{1, 2}, "",
+        "local C=__integration_subject(); local a=C.new({legs=4}); print(a.legs,select('#',a:speak()))"
+    );
 }

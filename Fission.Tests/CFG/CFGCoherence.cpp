@@ -1,5 +1,6 @@
 // Assert graph invariants after the full control-flow analysis pipeline.
 
+#include "../Decompiler/IntegrationTestSupport.hpp"
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
@@ -7,6 +8,7 @@
 #include "Luau/Common.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
+#include "Luau/BytecodeBuilder.h"
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 
@@ -766,44 +768,38 @@ TEST_CASE("CFG: triple-nested loops", "[CFG]") {
     CHECK(CountBlocksByType(f, BlockType::Return) >= 1);
 }
 
-TEST_CASE("CFG: unreachable trailing instructions do not fall past the function", "[CFG][Regression]") {
-    LiftedFunction function{};
-    function.instructions = {{LiftedOperation::RETURN, 0}, {LiftedOperation::NOP, 1}};
-
-    SECTION("Dead predecessor cycle") {
-        LiftedInstruction branch{LiftedOperation::JUMPIF, 1};
-        branch.operands.resize(2);
-        branch.operands[0].type = LiftedOperandType::Register;
-        branch.operands[0].value.reg = 0;
-        branch.operands[1].type = LiftedOperandType::ImmediateInteger;
-        branch.operands[1].value.imm.n = -1;
-        function.instructions.insert(function.instructions.begin() + 1, branch);
-        function.instructions.back().instructionIndex = 2;
-    }
+TEST_CASE("CFG: unreachable trailing instructions preserve returned value", "[CFG][Regression][Integration]") {
+    EnableLuauFFlagsOnce();
+    Luau::BytecodeBuilder builder;
+    const auto main = builder.beginFunction(0, false);
+    builder.emitAD(LOP_LOADN, 0, 7);
+    builder.emitABC(LOP_RETURN, 0, 2, 0);
+    SECTION("Dead predecessor cycle") { builder.emitAD(LOP_JUMPIF, 0, -1); }
     SECTION("Dead cleanup after return") {}
-
-    ControlFlowAnalyzer analyzer{};
-    auto analyzed = analyzer.DetermineBasicBlocks(&function);
-    analyzer.PruneUnreachable(analyzed);
-    CHECK(analyzed.basicBlocks.front().bType == BlockType::Return);
-    CHECK(analyzed.basicBlocks.back().bType == BlockType::Dead);
-    CHECK(analyzed.basicBlocks.back().successors.empty());
-    CheckEdgeSymmetry(analyzed);
+    builder.emitAD(LOP_LOADN, 0, 9);
+    builder.endFunction(1, 0);
+    builder.setMainFunction(main);
+    builder.finalize();
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(builder.getBytecode());
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(builder.getBytecode(), result.decompilationOutput, Luau::CompileOptions{1, 2});
 }
 
-TEST_CASE("CFG: reachable fallthrough past the function is rejected", "[CFG][Safety]") {
-    LiftedFunction function{};
-    function.instructions = {{LiftedOperation::NOP, 0}};
-
+TEST_CASE("CFG: reachable fallthrough is rejected through decompiler API", "[CFG][Safety][Integration]") {
+    EnableLuauFFlagsOnce();
+    Luau::BytecodeBuilder builder;
+    const auto main = builder.beginFunction(0, false);
     SECTION("Entry falls through") {}
     SECTION("Jump bypasses return") {
-        LiftedInstruction jump{LiftedOperation::JUMP, 0};
-        jump.operands.resize(1);
-        jump.operands[0].type = LiftedOperandType::ImmediateInteger;
-        jump.operands[0].value.imm.n = 2;
-        function.instructions = {jump, {LiftedOperation::RETURN, 1}, {LiftedOperation::NOP, 2}};
+        builder.emitAD(LOP_JUMP, 0, 1);
+        builder.emitABC(LOP_RETURN, 0, 1, 0);
     }
-
-    ControlFlowAnalyzer analyzer{};
-    CHECK_THROWS(analyzer.DetermineBasicBlocks(&function));
+    builder.emitAD(LOP_LOADN, 0, 9);
+    builder.endFunction(1, 0);
+    builder.setMainFunction(main);
+    builder.finalize();
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(builder.getBytecode());
+    CHECK(result.resultCode == DecompileResult::FailedToDecompile);
 }

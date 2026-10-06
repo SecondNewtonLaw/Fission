@@ -614,7 +614,7 @@ TEST_CASE("Lift: nested auto names do not shadow visible locals", "[Decompiler][
             local callback = function()
                 return enabled
             end
-            return callback, screen
+            return callback, screen, v2
         end
         return v0, v2
     )";
@@ -631,9 +631,10 @@ TEST_CASE("Lift: nested auto names do not shadow visible locals", "[Decompiler][
     CHECK_FALSE(std::regex_search(function, std::regex(R"(for\s+\w+\s*,\s*v2\s+in)")));
     CHECK(CompilesOk(out));
 
-    AnalyzedFunction names{};
-    names.nameSuffix = "_4";
-    names.enclosingNames = {"v2", "v2_4"};
-    CHECK(names.DisambiguateOwnName("v2") == "v2_4_2");
-    CHECK(names.DisambiguateOwnName("v2") == "v2_4_2");
+    integration_test::CheckSource(
+        source, out, opts,
+        "local m,other=__integration_subject(); local row={x=3,y=7}; local callback,screen,visible=m.start({row}); "
+        "print(callback(),screen==row,visible==other); local nextCallback,nextScreen,nextVisible=m.start({}); "
+        "print(nextCallback(),nextScreen==nil,nextVisible==other)"
+    );
 }

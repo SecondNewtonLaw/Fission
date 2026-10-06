@@ -1,10 +1,9 @@
-// Require recompilable Luau, plus an IR fixpoint for constructs represented losslessly.
+// Exercise reconstructed programs and public capture contracts.
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "BytecodeLifter.hpp"
 #include "Decompiler.hpp"
 #include "Deserializer.hpp"
-#include "InstructionDecoder.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
@@ -12,12 +11,15 @@
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wlanguage-extension-token"
+#pragma clang diagnostic ignored "-Wgnu-anonymous-struct"
+#include <boost/json.hpp>
+#pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
-#include <functional>
 #include <iostream>
 #include <map>
-#include <optional>
 #include <regex>
 #include <sstream>
 #include <string>
@@ -50,45 +52,9 @@ namespace {
         return !bc.empty() && bc[0] != '\0';
     }
 
-    // Compile + lift `source`, flattening every function's opcode stream depth-first
-    // (main, then each nested closure in declaration order). nullopt if it does not compile.
-    std::optional<std::vector<LiftedOperation>> LiftOpcodes(const std::string &source) {
-        EnableLuauFFlagsOnce();
-        std::string bc;
-        if (!LuauCompiles(source, &bc))
-            return std::nullopt;
-
-        Deserializer deserializer{};
-        auto des = deserializer.Deserialize(bc);
-        if (!des || des->functions.empty())
-            return std::nullopt;
-
-        Fission::InstructionDecoder decoder{};
-        BytecodeLifter lifter{&decoder};
-        const LiftedFunction lifted = lifter.LiftDeserializedBytecode(*des);
-
-        std::vector<LiftedOperation> ops;
-        std::function<void(const LiftedFunction &)> walk = [&](const LiftedFunction &f) {
-            for (const auto &inst : f.instructions)
-                ops.push_back(inst.operation);
-            for (const auto &sub : f.subfunctions)
-                walk(sub);
-        };
-        walk(lifted);
-        return ops;
-    }
-
-    std::string OpcodesToString(const std::vector<LiftedOperation> &ops) {
-        std::ostringstream out;
-        for (size_t i = 0; i < ops.size(); ++i) {
-            if (i)
-                out << ' ';
-            out << OperationToString(ops[i]);
-        }
-        return out.str();
-    }
-
-    std::string Decompile(const std::string &source, DecompileResult &code) {
+    std::string Decompile(
+        const std::string &source, DecompileResult &code, const std::string &driver = "", const std::string &environment = "math.randomseed(0); t = {1, 2, 3}"
+    ) {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         // suppress the generator's stdout echo so a snippet does not spam the test log.
@@ -97,33 +63,20 @@ namespace {
         auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{kOptLevel, kDebugLevel});
         std::cout.rdbuf(coutBuf);
         code = result.resultCode;
+        REQUIRE(code == DecompileResult::Success);
+        integration_test::CheckSource(source, result.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel}, driver, environment);
         return result.decompilationOutput;
     }
 
     // Floor: decompiles, and the produced source is valid Luau.
-    std::string RequireValidRoundtrip(const std::string &source) {
+    std::string
+    RequireValidRoundtrip(const std::string &source, const std::string &driver = "", const std::string &environment = "math.randomseed(0); t = {1, 2, 3}") {
         DecompileResult code{};
-        const std::string out = Decompile(source, code);
+        const std::string out = Decompile(source, code, driver, environment);
         INFO("decompiled source:\n" << out);
         REQUIRE(code == DecompileResult::Success);
         REQUIRE(LuauCompiles(out));
         return out;
-    }
-
-    // Checks opcode order only; register operands and constants need semantic tests.
-    void RequireSameIR(const std::string &source) {
-        const auto before = LiftOpcodes(source);
-        REQUIRE(before.has_value());
-
-        const std::string out = RequireValidRoundtrip(source);
-
-        const auto after = LiftOpcodes(out);
-        REQUIRE(after.has_value());
-
-        INFO("original IR : " << OpcodesToString(*before));
-        INFO("relifted IR : " << OpcodesToString(*after));
-        INFO("decompiled source:\n" << out);
-        CHECK(*before == *after);
     }
 
     // Split `source` into lines for the structural malformation checks below.
@@ -172,7 +125,7 @@ namespace {
     }
 
     // Decompile with the API-consumer captures (CFG DOT + AST JSON) turned on; returns the full result.
-    DecompilationResult DecompileWithCaptures(const std::string &source) {
+    DecompilationResult DecompileWithCaptures(const std::string &source, const std::string &driver = "") {
         EnableLuauFFlagsOnce();
         Decompiler decompiler{};
         std::ostringstream sink;
@@ -182,39 +135,15 @@ namespace {
             Luau::CompileOptions{kOptLevel, kDebugLevel}
         );
         std::cout.rdbuf(coutBuf);
+        REQUIRE(result.resultCode == DecompileResult::Success);
+        integration_test::CheckSource(source, result.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel}, driver);
         return result;
     }
 
-    // String-aware structural check: every {/[ closes with the matching }/] and every "string" terminates.
-    // Not a full JSON validator; enough to catch a serializer emitting unbalanced or truncated output.
     bool IsWellFormedJson(const std::string &json) {
-        std::vector<char> stack;
-        bool inString = false, escaped = false;
-        for (char c : json) {
-            if (inString) {
-                if (escaped)
-                    escaped = false;
-                else if (c == '\\')
-                    escaped = true;
-                else if (c == '"')
-                    inString = false;
-                continue;
-            }
-            if (c == '"')
-                inString = true;
-            else if (c == '{' || c == '[')
-                stack.push_back(c);
-            else if (c == '}') {
-                if (stack.empty() || stack.back() != '{')
-                    return false;
-                stack.pop_back();
-            } else if (c == ']') {
-                if (stack.empty() || stack.back() != '[')
-                    return false;
-                stack.pop_back();
-            }
-        }
-        return stack.empty() && !inString;
+        boost::system::error_code error;
+        (void)boost::json::parse(json, error);
+        return !error;
     }
 
     // Decompile already-compiled, non-Roblox (identity-decoder) Luau bytecode.
@@ -222,6 +151,7 @@ namespace {
         Decompiler decompiler{};
         auto result = decompiler.DecompileVanillaBytecode(bytecode, static_cast<DecompilerFlags>(0));
         REQUIRE(result.resultCode == DecompileResult::Success);
+        integration_test::CheckOutput(bytecode, result.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel}, fuzz::kSemPreludes[3]);
         return std::move(result.decompilationOutput);
     }
 
@@ -250,6 +180,7 @@ namespace {
         const int32_t c383 = withExtraField ? bb.addConstantInteger(383) : -1;
 
         bb.beginFunction(0, /*isvararg*/ true);
+        bb.emitABC(LOP_PREPVARARGS, 0, 0, 0);
 
         bb.emitABC(LOP_NEWTABLE, 0, 0, 0); // R0 = {} (outer `a`)
         bb.emitAux(0);
@@ -288,8 +219,10 @@ namespace {
 
 // Lossless IR fixpoint
 
-TEST_CASE("IR: integer arithmetic round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a + b * 2 - 1 end");
+TEST_CASE("Integration: integer arithmetic preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a + b * 2 - 1 end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3,4),f(-2,5),f(0,-1)))DRIVER"
+    );
 }
 
 TEST_CASE("Semantic oracle preserves observable values and reports incomplete execution", "[Fuzz][SemanticOracle]") {
@@ -346,15 +279,15 @@ TEST_CASE("Semantic oracle preserves observable values and reports incomplete ex
     }
     SECTION("fixture compilation failure cannot silently reduce coverage") {
         size_t compiled = 0;
-        const auto preludes = fuzz::CompilePreludes([&](const std::string &, std::string *out) {
-            *out = "bytecode";
-            return ++compiled != 2;
+        const auto preludes = fuzz::CompilePreludes([&](const std::string &source, std::string *out) {
+            *out = Luau::compile(++compiled == 2 ? "local =" : source);
+            return !out->empty() && out->front() != '\0';
         });
         CHECK(preludes.empty());
     }
 }
 
-TEST_CASE("IR: constant folding is stable across round-trip", "[Decompiler][IREquivalence]") { RequireSameIR("return 1 + 2 * 3"); }
+TEST_CASE("Integration: constant folding is stable across decompilation", "[Decompiler][Integration]") { integration_test::Check(R"LUA(return 1 + 2 * 3)LUA"); }
 
 TEST_CASE("Nested repeat and while sharing a header preserve execution order", "[Decompiler][Regression][Fuzz][SemanticLoops]") {
     EnableLuauFFlagsOnce();
@@ -386,129 +319,188 @@ TEST_CASE("Nested repeat and while sharing a header preserve execution order", "
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
 }
 
-TEST_CASE("IR: string concatenation round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a .. \"-\" .. b end");
+TEST_CASE("Integration: string concatenation preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a .. "-" .. b end)LUA", R"DRIVER(local f = __integration_subject(); print(f("a","b"),f("","z"),f("x","")))DRIVER"
+    );
 }
 
-TEST_CASE("IR: array table literal round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return { 1, 2, 3, 4, 5 }"); }
+TEST_CASE("Integration: array table literal preserves execution", "[Decompiler][Integration]") { integration_test::Check(R"LUA(return { 1, 2, 3, 4, 5 })LUA"); }
 
-TEST_CASE("IR: length and unary minus round-trip to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(t, n) return #t + (-n) end");
+TEST_CASE("Integration: length and unary minus preserve execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(t, n) return #t + (-n) end)LUA", R"DRIVER(local f = __integration_subject(); print(f({1,2},4),f({},-3)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: builtin fastcall round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b, c) return math.max(a, math.min(b, c)) end");
+TEST_CASE("Integration: builtin fastcall preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b, c) return math.max(a, math.min(b, c)) end)LUA",
+        R"DRIVER(local f = __integration_subject(); print(f(1,2,3),f(4,2,3),f(-4,-2,-3)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: field get/set round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(t) t.x = t.y + t.z return t.x end");
+TEST_CASE("Integration: field get/set preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(t) t.x = t.y + t.z return t.x end)LUA",
+        R"DRIVER(local f = __integration_subject(); local t={x=0,y=2,z=3}; print(f(t),t.x); print(f({y=-4,z=7})))DRIVER"
+    );
 }
 
-TEST_CASE("IR: method call round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(s) return s:upper() end"); }
-
-TEST_CASE("IR: nested closure round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("local function add(a, b) return a + b end return add(1, 2)");
+TEST_CASE("Integration: method call preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(s) return s:upper() end)LUA", R"DRIVER(local f = __integration_subject(); print(f("abC"),f("")))DRIVER");
 }
 
-TEST_CASE("IR: vararg forwarding round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(...) return select(\"#\", ...) end");
+TEST_CASE("Integration: nested closure preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(local function add(a, b) return a + b end return add(1, 2))LUA");
 }
 
-// Lossless IR probes
-
-TEST_CASE("IR: multiple return values round-trip to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a, b, a + b end");
+TEST_CASE("Integration: vararg forwarding preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(...) return select("#", ...) end)LUA", R"DRIVER(local f = __integration_subject(); print(f(),f(1),f(1,nil,3)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: equality comparison as a value round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a == b end");
+TEST_CASE("Integration: multiple return values preserve execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a, b, a + b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3,4)); print(f(-1,2)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: relational comparison as a value round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a < b end");
+TEST_CASE("Integration: equality comparison as a value preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a == b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2,2),f(2,3),f(nil,false),f(false,false)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: logical not round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(a) return not a end"); }
-
-TEST_CASE("IR: numeric index get round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(t) return t[1] + t[2] end");
+TEST_CASE("Integration: relational comparison as a value preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a < b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2,2),f(2,3),f(3,2),f(0/0,2)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: global call round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(x) print(x) return x end"); }
-
-TEST_CASE("IR: mixed array/hash table literal round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return { 1, 2, x = 3, y = 4 }");
+TEST_CASE("Integration: logical not preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a) return not a end)LUA", R"DRIVER(local f = __integration_subject(); print(f(nil),f(false),f(0),f(""),f(true)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: string.format fastcall round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(n) return string.format(\"%d\", n) end");
+TEST_CASE("Integration: numeric index get preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(t) return t[1] + t[2] end)LUA", R"DRIVER(local f = __integration_subject(); print(f({3,4}),f({-2,8})))DRIVER"
+    );
 }
 
-TEST_CASE("IR: multiple locals feeding an expression round-trip to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b, c) local x = a + b local y = b + c return x * y end");
+TEST_CASE("Integration: global call preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(x) print(x) return x end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3)); print(f("x")))DRIVER"
+    );
 }
 
-TEST_CASE("IR: floor division (reg/reg) round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a // b end");
+TEST_CASE("Integration: mixed array/hash table literal preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return { 1, 2, x = 3, y = 4 })LUA");
 }
 
-TEST_CASE("IR: floor division by constant round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a) return a // 2 end");
+TEST_CASE("Integration: string.format fastcall preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(n) return string.format("%d", n) end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3),f(-7),f(0)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: constant-minus-register round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a) return 10 - a end");
+TEST_CASE("Integration: multiple locals feeding an expression preserve execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b, c) local x = a + b local y = b + c return x * y end)LUA",
+        R"DRIVER(local f = __integration_subject(); print(f(1,2,3),f(-3,4,0)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: constant-over-register round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a) return 10 / a end");
+TEST_CASE("Integration: floor division (reg/reg) preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a // b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(7,2),f(-7,2),f(7,-2)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: modulo round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(a, b) return a % b end"); }
-
-TEST_CASE("IR: power round-trips to identical opcodes", "[Decompiler][IREquivalence]") { RequireSameIR("return function(a, b) return a ^ b end"); }
-
-TEST_CASE("IR: negative constant base of a power keeps its parentheses", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a) return (-401) ^ a, (-1.5) ^ a end");
+TEST_CASE("Integration: floor division by constant preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(a) return a // 2 end)LUA", R"DRIVER(local f = __integration_subject(); print(f(7),f(-7),f(0)))DRIVER");
 }
 
-TEST_CASE("IR: not-equal comparison round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(a, b) return a ~= b end");
+TEST_CASE("Integration: constant-minus-register preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(a) return 10 - a end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2),f(-3),f(10)))DRIVER");
 }
 
-TEST_CASE("IR: non-constant upvalue capture round-trips to identical opcodes", "[Decompiler][IREquivalence]") {
-    RequireSameIR("return function(n) local x = n + 1 return function() return x end end");
+TEST_CASE("Integration: constant-over-register preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(a) return 10 / a end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2),f(-4),f(0)))DRIVER");
 }
 
-TEST_CASE("IR: table literal with self-referential element does not forward-reference", "[Decompiler][IREquivalence]") {
-    // `t[3] = t[1] + t[2]` reads the table being built; coalescing it into the `{...}` literal
-    // would emit `t` before its own declaration (a nil global), changing behaviour.
-    RequireSameIR("return function(a, b) local t = { a, b } t[3] = t[1] + t[2] return t end");
+TEST_CASE("Integration: modulo preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a % b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(7,3),f(-7,3),f(7,-3)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: self-referential method-call table element stays a post-declaration statement", "[Decompiler][IREquivalence]") {
-    // RotatedRegion3 getAxis shape: `t[2] = t[1]:Cross(a[2])` reads the table mid-build.
-    RequireSameIR("return function(a) local t = { a[1], a[2] } t[3] = t[1]:Cross(t[2]) return t end");
+TEST_CASE("Integration: power preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a ^ b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2,3),f(-2,4),f(3,0)))DRIVER"
+    );
 }
 
-TEST_CASE("IR: nested array-table value in a keyed literal does not forward-reference", "[Decompiler][IREquivalence]") {
-    // mirrors RotatedRegion3's `{ [v[1]] = { v[3], v[2], v[5] } }`: the inner array's elements are
-    // table-index reads consumed by SETLIST; they must inline, not leak as later `local` decls.
-    RequireSameIR("return function(v) return { [v[1]] = { v[3], v[2], v[5] } } end");
+TEST_CASE("Integration: negative constant base of a power keeps its parentheses", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a) return (-401) ^ a, (-1.5) ^ a end)LUA",
+        R"DRIVER(local f = __integration_subject(); print(f(1)); print(f(2)); print(f(0.5)))DRIVER"
+    );
+}
+
+TEST_CASE("Integration: not-equal comparison preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) return a ~= b end)LUA", R"DRIVER(local f = __integration_subject(); print(f(2,2),f(2,3),f(nil,false)))DRIVER"
+    );
+}
+
+TEST_CASE("Integration: non-constant upvalue capture preserves execution", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(n) local x = n + 1 return function() return x end end)LUA",
+        R"DRIVER(local f = __integration_subject(); local a,b=f(3),f(7); print(a(),b(),a()))DRIVER"
+    );
+}
+
+TEST_CASE("Integration: table literal with self-referential element does not forward-reference", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a, b) local t = { a, b } t[3] = t[1] + t[2] return t end)LUA",
+        R"DRIVER(local f = __integration_subject(); print(f(3,4)[3],f(-2,5)[3]))DRIVER"
+    );
+}
+
+TEST_CASE("Integration: self-referential method-call table element stays a post-declaration statement", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(a) local t = { a[1], a[2] } t[3] = t[1]:Cross(t[2]) return t end)LUA",
+        R"DRIVER(local f = __integration_subject(); local x={n=2,Cross=function(self,other) return self.n*10+other.n end}; local y={n=3}; print(f({x,y})[3]))DRIVER"
+    );
+}
+
+TEST_CASE("Integration: nested array-table value in a keyed literal does not forward-reference", "[Decompiler][Integration]") {
+    integration_test::Check(
+        R"LUA(return function(v) return { [v[1]] = { v[3], v[2], v[5] } } end)LUA",
+        R"DRIVER(local f = __integration_subject(); local t=f({"key",2,3,4,5}); print(t.key[1],t.key[2],t.key[3]))DRIVER"
+    );
 }
 
 TEST_CASE("IR: single-use method-call result inlines into a field read (no shadowed temp)", "[Decompiler][IREquivalence]") {
     // RotatedRegion3 getAxis: `t[4] = t[1]:Cross(t[2]).unit` must inline the call into the `.unit`
     // read, not emit a `local vN = t[1]:Cross(...)` reused (shadowed) across each sibling.
-    RequireSameIR(
+    integration_test::Check(
         "return function(a) local t = { a[1], a[2], a[3] } "
-        "t[4] = t[1]:Cross(t[2]).unit t[5] = t[1]:Cross(t[3]).unit t[6] = t[2]:Cross(t[3]).unit return t end"
+        "t[4] = t[1]:Cross(t[2]).unit t[5] = t[1]:Cross(t[3]).unit t[6] = t[2]:Cross(t[3]).unit return t end",
+        "local f = __integration_subject(); local function v(n) return {n=n,Cross=function(self,other) print('cross',self.n,other.n); "
+        "return {unit=self.n*10+other.n} end} end; local t=f({v(1),v(2),v(3)}); print(t[4],t[5],t[6])"
     );
     DecompileResult code{};
     const std::string out = Decompile(
         "return function(a) local t = { a[1], a[2], a[3] } "
         "t[4] = t[1]:Cross(t[2]).unit t[5] = t[1]:Cross(t[3]).unit t[6] = t[2]:Cross(t[3]).unit return t end",
-        code
+        code,
+        "local f = __integration_subject(); local function v(n) return {n=n,Cross=function(self,other) print('cross',self.n,other.n); "
+        "return {unit=self.n*10+other.n} end} end; local t=f({v(1),v(2),v(3)}); print(t[4],t[5],t[6])"
     );
     INFO(out);
     CHECK(out.find(":Cross(") != std::string::npos); // the method call survived
@@ -519,7 +511,9 @@ TEST_CASE("IR: single-use method-call result inlines into a field read (no shado
 
 TEST_CASE("Regress: self-referential table element is never forward-referenced", "[Decompiler][Regression][TableForwardRef]") {
     DecompileResult code{};
-    const std::string out = Decompile("return function(a, b) local t = { a, b } t[3] = t[1] + t[2] return t end", code);
+    const std::string out = Decompile(
+        "return function(a, b) local t = { a, b } t[3] = t[1] + t[2] return t end", code, "local f = __integration_subject(); print(f(2,3)[3],f(-4,7)[3])"
+    );
     INFO(out);
     REQUIRE(code == DecompileResult::Success);
     CHECK_FALSE(UsesGeneratedLocalBeforeDeclared(out));
@@ -531,7 +525,9 @@ TEST_CASE("Regress: getAxis cross-product chain has no forward-ref and no shadow
     const std::string out = Decompile(
         "return function(a) local t = { a[1], a[2], a[3] } "
         "t[4] = t[1]:Cross(t[2]).unit t[5] = t[1]:Cross(t[3]).unit t[6] = t[2]:Cross(t[3]).unit return t end",
-        code
+        code,
+        "local f = __integration_subject(); local function v(n) return {n=n,Cross=function(self,other) print('cross',self.n,other.n); "
+        "return {unit=self.n*10+other.n} end} end; local t=f({v(1),v(2),v(3)}); print(t[4],t[5],t[6])"
     );
     INFO(out);
     REQUIRE(code == DecompileResult::Success);
@@ -542,7 +538,10 @@ TEST_CASE("Regress: getAxis cross-product chain has no forward-ref and no shadow
 
 TEST_CASE("Regress: nested array element in a keyed literal is never forward-referenced", "[Decompiler][Regression][TableForwardRef]") {
     DecompileResult code{};
-    const std::string out = Decompile("return function(v) return { [v[1]] = { v[3], v[2], v[5] } } end", code);
+    const std::string out = Decompile(
+        "return function(v) return { [v[1]] = { v[3], v[2], v[5] } } end", code,
+        "local f = __integration_subject(); local t=f({'key',2,3,4,5}); print(t.key[1],t.key[2],t.key[3])"
+    );
     INFO(out);
     REQUIRE(code == DecompileResult::Success);
     CHECK_FALSE(UsesGeneratedLocalBeforeDeclared(out));
@@ -576,7 +575,10 @@ TEST_CASE("Regress: reused-register nested table keeps a sound declaration order
 
 TEST_CASE("Regress: escaping reused local is not hidden in a synthetic do block", "[Decompiler][Regression][Scope]") {
     DecompileResult code{};
-    const std::string out = Decompile("local v0 = next[true] local v0 = v0:set(\"key\", false) return v0.field", code);
+    const std::string out = Decompile(
+        "local v0 = next[true] local v0 = v0:set(\"key\", false) return v0.field", code, "print(__integration_subject())",
+        "next = {[true] = {set=function(self,key,value) print(key,value); return {field=7} end}}"
+    );
     INFO(out);
     REQUIRE(code == DecompileResult::Success);
     CHECK(LuauCompiles(out));
@@ -585,14 +587,12 @@ TEST_CASE("Regress: escaping reused local is not hidden in a synthetic do block"
 
 // Fuzz regressions
 
-TEST_CASE("Regress: double unary minus does not collapse into a comment", "[Decompiler][Regression][Fuzz]") {
-    // `-(-x)` must emit `- -x`, never `--x`; the latter lexes as a line comment, silently
-    // eating the rest of the line (the negate is dropped -> behaviour changes, often unparseable).
-    RequireSameIR("return function(x) return - -x end");
+TEST_CASE("Regress: double unary minus does not collapse into a comment", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(x) return - -x end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3),f(-4),f(0)))DRIVER");
 }
 
-TEST_CASE("Regress: double unary minus inside a table element stays separated", "[Decompiler][Regression][Fuzz]") {
-    RequireSameIR("return function(x) return { 1, - -x } end");
+TEST_CASE("Regress: double unary minus inside a table element stays separated", "[Decompiler][Integration]") {
+    integration_test::Check(R"LUA(return function(x) return { 1, - -x } end)LUA", R"DRIVER(local f = __integration_subject(); print(f(3)[2],f(-4)[2]))DRIVER");
 }
 
 TEST_CASE("Regress: a parenthesised first statement does not get a leading semicolon", "[Decompiler][Regression][Fuzz]") {
@@ -600,13 +600,13 @@ TEST_CASE("Regress: a parenthesised first statement does not get a leading semic
     // statement is a call whose callee needs parentheses (`(true)(x)`), the disambiguating `;`
     // must be suppressed (the header comment is not a statement it can terminate).
     // (found by Fission.Fuzzing; the constant `true` inlines into the call -> `(true)(...)`.)
-    RequireValidRoundtrip("local a = true a(nil) return 1");
-    RequireValidRoundtrip("local n = -(-5) n() return 0");
+    RequireValidRoundtrip("local a = true a(nil) return 1", "print(pcall(__integration_subject))");
+    RequireValidRoundtrip("local n = -(-5) n() return 0", "print(pcall(__integration_subject))");
     // same bug inside a nested block: an info-comment precedes the first real statement, so the
     // block's first paren-call must still suppress the `;`. (the expanded fuzzer surfaced this in
     // function and loop bodies; Visit(BlockStatementNode) keeps firstStmt true across comments.)
-    RequireValidRoundtrip("local a = true local function f() a(nil) return 1 end return f");
-    RequireValidRoundtrip("local a = true for i = 1, 3 do a(i) end return 0");
+    RequireValidRoundtrip("local a = true local function f() a(nil) return 1 end return f", "print(pcall(__integration_subject()))");
+    RequireValidRoundtrip("local a = true for i = 1, 3 do a(i) end return 0", "print(pcall(__integration_subject))");
 }
 
 TEST_CASE("Regress: deeply-nested table literal does not hang source-gen", "[Decompiler][Regression][Fuzz]") {
@@ -618,16 +618,16 @@ TEST_CASE("Regress: deeply-nested table literal does not hang source-gen", "[Dec
     for (int i = 0; i < 150; ++i)
         deep += "}";
     deep += " return x";
-    RequireValidRoundtrip(deep);
+    RequireValidRoundtrip(deep, "local t=__integration_subject(); local depth=0; while type(t)=='table' do depth+=1; t=t[1] end print(depth,t)");
 }
 
 TEST_CASE("Regress: string-constant left operand in a table element is not a computed key", "[Decompiler][Regression][Fuzz]") {
     // a table array element `"hi" * x` (binop with a string-literal left) must render as
     // `"hi" * x`, not the keyed-entry shape `["hi"] * x`; the latter is an unparseable
     // computed key with no `=`. Recompiling the output catches the malformation.
-    RequireSameIR("return function(x) return { 1, \"hi\" * x } end");
-    RequireValidRoundtrip("return function(x) return { 1, \"\" // x } end");
-    RequireValidRoundtrip("return function(x) return { 1, \"hi\" / x } end");
+    RequireValidRoundtrip("return function(x) return { 1, \"hi\" * x } end", "print(pcall(__integration_subject(),2))");
+    RequireValidRoundtrip("return function(x) return { 1, \"\" // x } end", "print(pcall(__integration_subject(),2))");
+    RequireValidRoundtrip("return function(x) return { 1, \"hi\" / x } end", "print(pcall(__integration_subject(),2))");
 }
 
 TEST_CASE("Regress: reserved-word string table key stays bracketed", "[Decompiler][Regression][Fuzz]") {
@@ -635,7 +635,7 @@ TEST_CASE("Regress: reserved-word string table key stays bracketed", "[Decompile
     // as `[\"end\"] = v`, never the bare `end = v` (a syntax error). MakeTableKey now treats reserved
     // words as non-identifiers so the table-constructor path brackets them.
     RequireValidRoundtrip("return { [\"end\"] = 1, [\"function\"] = 2, [\"while\"] = 3, x = 4 }");
-    RequireValidRoundtrip("return function(t) t[\"end\"] = 1 t[\"for\"] = 2 return t end");
+    RequireValidRoundtrip("return function(t) t[\"end\"] = 1 t[\"for\"] = 2 return t end", "local t=__integration_subject()({}); print(t['end'],t['for'])");
 }
 
 // Saved fuzz corpus
@@ -650,7 +650,8 @@ TEST_CASE("Regress: deeply-nested table does not blow up source generation", "[D
     for (int i = 0; i < depth; ++i)
         src += "}";
     DecompileResult code{};
-    const std::string out = Decompile(src, code);
+    const std::string out =
+        Decompile(src, code, "local t=__integration_subject(); local depth=0; while type(t)=='table' do depth+=1; t=t[1] end print(depth,t)");
     INFO(out.substr(0, 160));
     REQUIRE(code == DecompileResult::Success);
     REQUIRE(LuauCompiles(out));
@@ -666,36 +667,40 @@ TEST_CASE("Regress: empty repeat-until body does not crash source generation", "
     // Found by Fission.Fuzzing (segfault). A `repeat ... until cond` with an empty body takes the
     // "condition in the latch" path, which set the condition but never the RepeatStatementNode body :
     // a null body the source generator then dereferenced. The body is now an (empty) block.
-    RequireValidRoundtrip("return function(x) repeat until x end");
-    RequireValidRoundtrip("return function(x, y) repeat until x and y end");
+    RequireValidRoundtrip("return function(x) repeat until x end", "local f=__integration_subject(); f(true); f(0); print('done')");
+    RequireValidRoundtrip("return function(x, y) repeat until x and y end", "local f=__integration_subject(); f(true,true); f(0,''); print('done')");
 }
 
 TEST_CASE("Regress: a break in a loop nested in repeat-until does not leak outside", "[Decompiler][Regression][Fuzz]") {
     // Found by Fission.Fuzzing. `repeat for ... do break end continue until c` mis-structured: the
     // control-flow analyzer recorded the nested for's break block as the outer repeat's exit, so the
     // break was emitted at top level (`break` outside a loop). The output must stay valid Luau.
-    RequireValidRoundtrip("local x = false repeat for i = 1, 2 do break end continue until x return 0");
+    RequireValidRoundtrip("local x = 0 repeat for i = 1, 2 do break end x += 1 continue until x >= 2 return x");
 }
 
 TEST_CASE("Regress: generic-for loop variables are identifiers, never inlined expressions", "[Decompiler][Regression][Fuzz]") {
     // Found by Fission.Fuzzing. Generic-for loop variables were emitted via LiftExpression, which
     // inlines a reused register's value -> `for <expr> in ...` / `for v, <expr> in ...` (syntax errors).
     // They must always render as their own identifier name (mirrors the numeric-for handling).
-    RequireValidRoundtrip("return function(t) for k, v in pairs(t) do print(k, v) end end");
-    RequireValidRoundtrip("return function(t) for a, b, c in next, t, nil do for x, y in pairs(a) do print(x) end end end");
+    RequireValidRoundtrip("return function(t) for k, v in pairs(t) do print(k, v) end end", "local f=__integration_subject(); f({3,4}); f({})");
+    RequireValidRoundtrip(
+        "return function(t) for a, b, c in next, t, nil do for x, y in pairs(a) do print(x) end end end",
+        "local f=__integration_subject(); f({[{3,4}]=7}); f({})"
+    );
 }
 
 // Guards the GETTABLEN-as-a-statement path: the numeric index must be a declared local, never a
 // dangling `vN` (which would silently read a nil global instead of the table element).
 TEST_CASE("Valid: reused numeric index declares a real local", "[Decompiler][IREquivalence][ValidLuau]") {
-    const auto out = RequireValidRoundtrip("return function(t) local a = t[1] return a + a + t[2] end");
+    const auto out =
+        RequireValidRoundtrip("return function(t) local a = t[1] return a + a + t[2] end", "local f=__integration_subject(); print(f({3,4}),f({-4,7}))");
     CHECK_FALSE(UsesGeneratedLocalBeforeDeclared(out));
 }
 
 // A never-mutated constant upvalue is folded through the capture (`x=5; ()->x+1` -> `()->6`):
 // behaviour-identical, but the capture opcodes vanish, so this is a floor case.
 TEST_CASE("Valid: constant upvalue folds through capture", "[Decompiler][IREquivalence][ValidLuau]") {
-    const auto out = RequireValidRoundtrip("local x = 5 return function() return x + 1 end");
+    const auto out = RequireValidRoundtrip("local x = 5 return function() return x + 1 end", "local f=__integration_subject(); print(f(),f())");
     CHECK(out.find("return 6") != std::string::npos);
 }
 
@@ -787,7 +792,7 @@ TEST_CASE("Capture: AST stays well-formed JSON across varied constructs", "[Deco
                                "    t:method(s, ...)\n"
                                "    return s and t or nil\n"
                                "end";
-    const auto result = DecompileWithCaptures(source);
+    const auto result = DecompileWithCaptures(source, "print(pcall(__integration_subject(),1,nil,3))");
     REQUIRE(result.resultCode == DecompileResult::Success);
     REQUIRE_FALSE(result.astJson.empty());
     CHECK(IsWellFormedJson(result.astJson));
@@ -814,6 +819,7 @@ TEST_CASE("Capture: no captures unless the flags are set", "[Decompiler][Capture
     CHECK(result.cfgGraph.empty());
     CHECK(result.astJson.empty());
     CHECK(result.debugNotes.empty());
+    integration_test::CheckSource("return 1", result.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel});
 }
 
 TEST_CASE("Debug notes do not change decompiled source", "[Decompiler][DebugNotes]") {
@@ -829,4 +835,6 @@ TEST_CASE("Debug notes do not change decompiled source", "[Decompiler][DebugNote
     CHECK(plain.debugNotes.empty());
     CHECK_FALSE(debug.debugNotes.empty());
     CHECK(debug.debugNotes.size() < 65536);
+    integration_test::CheckSource(source, plain.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel});
+    integration_test::CheckSource(source, debug.decompilationOutput, Luau::CompileOptions{kOptLevel, kDebugLevel});
 }

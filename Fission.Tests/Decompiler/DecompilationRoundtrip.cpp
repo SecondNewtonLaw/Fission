@@ -18,13 +18,14 @@ static void EnableLuauFFlagsOnce() {
             flag->value = true;
 }
 
-static std::string DecompileOrFail(const std::string &source) {
+static std::string DecompileOrFail(const std::string &source, const std::string &driver = "") {
     EnableLuauFFlagsOnce();
 
     Decompiler decompiler{};
     auto result = decompiler.DecompileTestCode(source);
 
     REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckSource(source, result.decompilationOutput, Luau::CompileOptions{1, 2}, driver);
     return std::move(result.decompilationOutput);
 }
 
@@ -55,6 +56,8 @@ TEST_CASE("Roundtrip: omitted IR preserves source and captures", "[Decompiler][R
     CHECK(actual.astJson == expected.astJson);
     CHECK(actual.cfgGraph == expected.cfgGraph);
     CHECK(actual.debugNotes == expected.debugNotes);
+    integration_test::CheckSource(source, expected.decompilationOutput, Luau::CompileOptions{1, 2});
+    integration_test::CheckSource(source, actual.decompilationOutput, Luau::CompileOptions{1, 2});
 }
 
 TEST_CASE("Roundtrip: while loop", "[Decompiler][Roundtrip]") {
@@ -72,7 +75,9 @@ TEST_CASE("Roundtrip: while loop", "[Decompiler][Roundtrip]") {
 }
 
 TEST_CASE("Roundtrip: nested calls", "[Decompiler][Roundtrip]") {
-    const auto out = DecompileOrFail("return function(a, b, c) return math.max(a, math.min(b, c)) end");
+    const auto out = DecompileOrFail(
+        "return function(a, b, c) return math.max(a, math.min(b, c)) end", "local f = __integration_subject(); print(f(1, 2, 3), f(4, 2, 3), f(-4, -2, -3))"
+    );
     INFO("decompile:\n" << out);
     // the inner multret call is the last argument of the outer call, so it inlines directly; the
     // faithful reconstruction keeps both nested and needs no argument spilled to a local. (An earlier
@@ -115,7 +120,7 @@ TEST_CASE("Roundtrip: numeric for loop", "[Decompiler][Roundtrip]") {
 }
 
 TEST_CASE("Roundtrip: variable assignment with binary expression", "[Decompiler][Roundtrip]") {
-    const auto out = DecompileOrFail("return function(a, b) return a + b end");
+    const auto out = DecompileOrFail("return function(a, b) return a + b end", "local f = __integration_subject(); print(f(1, 2), f(-3, 4), f(0, 0))");
     INFO("decompile:\n" << out);
     CHECK(ContainsRegex(out, std::regex(R"(return\s+a\s*\+\s*b)")));
 }
@@ -172,15 +177,26 @@ TEST_CASE("Type inference: function annotations use valid Luau syntax", "[Decomp
     const auto bytecode = Luau::compile(result.decompilationOutput);
     REQUIRE(!bytecode.empty());
     CHECK(bytecode.front() != '\0');
+    integration_test::CheckSource(
+        "local f = string.gmatch('abc', '.'); return f, f", result.decompilationOutput, Luau::CompileOptions{1, 2},
+        "local first, second = __integration_subject(); print(first(), second(), first(), second())"
+    );
 }
 
 TEST_CASE("Deserializer: function bytecode types emit valid annotations", "[Decompiler][Deserializer]") {
-    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_FUNCTION) == "(...any) -> ...any");
-    CHECK(Deserializer::GetBytecodeTypeName(LBC_TYPE_FUNCTION | LBC_TYPE_OPTIONAL_BIT) == "((...any) -> ...any)?");
-    const auto bytecode =
-        Luau::compile("return function(callback: " + Deserializer::GetBytecodeTypeName(LBC_TYPE_FUNCTION | LBC_TYPE_OPTIONAL_BIT) + ") return callback end");
-    REQUIRE(!bytecode.empty());
-    CHECK(bytecode.front() != '\0');
+    EnableLuauFFlagsOnce();
+    const std::string source = "return function(callback: ((...any) -> ...any)?) return callback and callback(7) or 0 end";
+    Luau::CompileOptions options{};
+    options.typeInfoLevel = 1;
+    options.debugLevel = 2;
+    const auto bytecode = Luau::compile(source, options);
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode, DecompilerFlags::InferTypes);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    CHECK(result.decompilationOutput.find("(...any) -> ...any") != std::string::npos);
+    integration_test::CheckSource(
+        source, result.decompilationOutput, options, "local f = __integration_subject(); print(f(nil), f(function(value) return value * 2 end))"
+    );
 }
 
 TEST_CASE("Integration: adjacent initializers preserve dependency order", "[Decompiler][Rewriter][Integration]") {

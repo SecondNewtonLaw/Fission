@@ -29,6 +29,7 @@
 #include "Luau/Common.h"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wunused-parameter"
+#include "Luau/BytecodeBuilder.h"
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
@@ -591,37 +592,36 @@ TEST_CASE("SSA: FORNLOOP defines only a fresh control-variable version", "[SSA][
     REQUIRE(sawNumericLoop);
 }
 
-TEST_CASE("CFG: coincident branch targets create one edge", "[SSA][Invariant][CFG]") {
-    const auto reg = [](uint8_t value) {
-        LiftedOperand operand{};
-        operand.type = LiftedOperandType::Register;
-        operand.value.reg = value;
-        return operand;
-    };
-    const auto imm = [](int32_t value) {
-        LiftedOperand operand{};
-        operand.type = LiftedOperandType::ImmediateInteger;
-        operand.value.imm.n = value;
-        return operand;
-    };
-    LiftedFunction lifted{};
-    lifted.instructions = {
-        {LiftedOperation::LOAD, 0, {reg(0), imm(1)}},
-        {LiftedOperation::JUMPIF, 1, {reg(0), imm(0)}},
-        {LiftedOperation::LOAD, 2, {reg(1), imm(7)}},
-        {LiftedOperation::RETURN, 3, {reg(1), imm(2)}},
-    };
+TEST_CASE("CFG: coincident branch targets preserve execution", "[SSA][Invariant][CFG][Integration]") {
+    fuzz::EnableLuauFlags();
+    Luau::BytecodeBuilder builder;
+    const auto main = builder.beginFunction(0, false);
+    builder.emitAD(LOP_LOADN, 0, 1);
+    builder.emitAD(LOP_JUMPIF, 0, 0);
+    builder.emitAD(LOP_LOADN, 1, 7);
+    builder.emitABC(LOP_RETURN, 1, 2, 0);
+    builder.endFunction(2, 0);
+    builder.setMainFunction(main);
+    builder.finalize();
+    Deserializer deserializer;
+    const auto bytecode = deserializer.Deserialize(builder.getBytecode());
+    REQUIRE(bytecode.has_value());
+    Fission::InstructionDecoder decoder;
+    BytecodeLifter lifter{&decoder};
+    auto lifted = lifter.LiftDeserializedBytecode(*bytecode);
     ControlFlowAnalyzer cfa{};
     auto analyzed = cfa.DetermineBasicBlocks(&lifted);
 
-    bool sawBranch = false;
+    REQUIRE(bytecode->lpMainFunction->instructions.at(1).GetOpCode() == LOP_JUMPIF);
     for (const auto &block : analyzed.basicBlocks) {
         if (block.lpTail && block.lpTail->operation == LiftedOperation::JUMPIF) {
-            sawBranch = true;
             CHECK(block.successors.size() == 1);
         }
         CHECK(std::set<uint32_t>(block.successors.begin(), block.successors.end()).size() == block.successors.size());
         CHECK(std::set<uint32_t>(block.predecessors.begin(), block.predecessors.end()).size() == block.predecessors.size());
     }
-    REQUIRE(sawBranch);
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(builder.getBytecode());
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(builder.getBytecode(), result.decompilationOutput, Luau::CompileOptions{1, 2});
 }

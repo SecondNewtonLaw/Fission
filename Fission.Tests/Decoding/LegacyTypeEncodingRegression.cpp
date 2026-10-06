@@ -2,6 +2,7 @@
 // Co-Created using Codex.
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
+#include "../Decompiler/IntegrationTestSupport.hpp"
 #include "Deserializer.hpp"
 #include "Luau/Bytecode.h"
 #pragma clang diagnostic push
@@ -31,6 +32,10 @@ TEST_CASE("Deserializer: legacy type metadata leaves instruction cursor intact",
     REQUIRE(decoded.has_value());
     REQUIRE(decoded->lpMainFunction->instructions.size() == 1);
     CHECK(decoded->lpMainFunction->instructions[0].GetOpCode() == LOP_RETURN);
+    Decompiler decompiler;
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode);
+    REQUIRE(result.resultCode == DecompileResult::Success);
+    integration_test::CheckOutput(bytecode, result.decompilationOutput, Luau::CompileOptions{1, 2}, "", "print(select('#',__integration_subject()))");
 }
 
 TEST_CASE("Deserializer: normalized v1 function signature exposes parameter type", "[BytecodeDecoder][Types][Regression]") {
@@ -53,4 +58,7 @@ TEST_CASE("Deserializer: normalized v1 function signature exposes parameter type
     REQUIRE(decoded->lpMainFunction->uTypeVersion == 1);
     REQUIRE_FALSE(decoded->lpMainFunction->typeinfo.empty());
     CHECK(Deserializer::TryGetTypeName(decoded->lpMainFunction, 0) == "number");
+    const auto type = Deserializer::TryGetTypeName(decoded->lpMainFunction, 0);
+    REQUIRE(type.has_value());
+    integration_test::Check("return function(value: " + *type + ") return value+1 end", "local f=__integration_subject(); print(f(7),f(-3))");
 }

@@ -4,61 +4,16 @@
 
 // Complex control-flow stress tests (deep if/elseif chains, nested loops, break/continue).
 
-#include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "Decompiler.hpp"
-#include "Luau/Common.h"
-#include "Luau/Compiler.h"
-#include <catch2/catch_test_macros.hpp>
-#include <cstring>
-#include <regex>
-#include <string>
+#include "IntegrationTestSupport.hpp"
 
-namespace {
+static const std::string kComplexEnvironment =
+    R"ENV(for _,name in {"fa","fb","fc","fd","use","pickCustom","pickTrack","legacy","warn","doMode","doOcclusion","doZoom","lock","classic","zoom","leaf1","leaf2","leaf3","leaf4","leaf5","leaf6","p","q","r","s","inner","outer","done","step","body","tail","mark","work","more","after","a","b","c","d","tick","visit","finish"} do _G[name]=function(...) print(name,...); return name end end
+cond=function(i,j) print("cond",i,j); return j==1 end
+stop=function() print("stop"); return stopEarly end)ENV";
 
-    void EnableLuauFFlagsOnce() {
-        static bool enabled = false;
-        if (enabled)
-            return;
-        enabled = true;
-        for (Luau::FValue<bool> *flag = Luau::FValue<bool>::list; flag; flag = flag->next)
-            if (std::strncmp(flag->name, "Luau", 4) == 0)
-                flag->value = true;
-    }
-
-    std::string DecompileOrFail(const std::string &source, int optLevel = 1) {
-        EnableLuauFFlagsOnce();
-        Decompiler decompiler{};
-        Luau::CompileOptions opts{};
-        opts.optimizationLevel = optLevel;
-        opts.debugLevel = 2;
-        auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), opts);
-        REQUIRE(result.resultCode == DecompileResult::Success);
-        return std::move(result.decompilationOutput);
-    }
-
-    bool ContainsRegex(const std::string &haystack, const std::regex &pattern) { return std::regex_search(haystack, pattern); }
-
-    size_t CountSubstr(const std::string &hay, const std::string &needle) {
-        size_t n = 0;
-        for (size_t p = hay.find(needle); p != std::string::npos; p = hay.find(needle, p + needle.size()))
-            ++n;
-        return n;
-    }
-
-    // Count statement keywords as whole words (rough, but good enough for body checks).
-    size_t CountWord(const std::string &hay, const std::string &word) {
-        size_t n = 0;
-        std::regex re("\\b" + word + "\\b");
-        for (auto it = std::sregex_iterator(hay.begin(), hay.end(), re); it != std::sregex_iterator(); ++it)
-            ++n;
-        return n;
-    }
-
-} // namespace
-
-// A store after a terminating branch join must remain one store.
-TEST_CASE("CCF: terminating branch join does not duplicate property store", "[Decompiler][ControlFlow][Regression]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: terminating branch join does not duplicate property store", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local t = { value = false }
         local function f(flag)
             local value
@@ -71,17 +26,14 @@ TEST_CASE("CCF: terminating branch join does not duplicate property store", "[De
             return t
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "t.value =") == 1);
-    CHECK(CountSubstr(out, "return t") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); print(f(true).value,f(false).value,f(nil).value))DRIVER", kComplexEnvironment
+    );
 }
 
-// if / elseif chains
-
-// Plain 4-way `==` chain: every body present exactly once, else present.
-TEST_CASE("CCF: four-way elseif chain preserves every branch once", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: four-way elseif chain preserves every branch once", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(x)
             if x == 1 then
                 fa()
@@ -94,56 +46,41 @@ TEST_CASE("CCF: four-way elseif chain preserves every branch once", "[Decompiler
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "fa(") == 1);
-    CHECK(CountSubstr(out, "fb(") == 1);
-    CHECK(CountSubstr(out, "fc(") == 1);
-    CHECK(CountSubstr(out, "fd(") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for x=0,4 do f(x) end)DRIVER", kComplexEnvironment
+    );
 }
 
-// `local v = a and b or c` lowers to a diamond (`if not a then v=c else v=b; if v
-// then ... end end`). Fold it back to one short-circuit expression.
-TEST_CASE("CCF: a-and-b-or-c folds to a short-circuit expression", "[Decompiler][ShortCircuit]") {
-    const auto out = DecompileOrFail(
-        R"(
+TEST_CASE("CCF: a-and-b-or-c preserves short-circuit values", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(a, b, c)
             local x = a and b or c
             print(x)
         end
         return f
-    )",
-        2
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,a in {false,true} do for _,b in {false,true} do f(a,b,"fallback") end end; f(nil,7,9); f(0,nil,11))DRIVER",
+        kComplexEnvironment
     );
-    INFO("decompile:\n" << out);
-    // One folded expression, not a staircase of ifs assigning x.
-    CHECK(ContainsRegex(out, std::regex(R"(=\s*\w+\s+and\s+\w+\s+or\s+\w+)")));
-    CHECK(CountWord(out, "if") == 0);
 }
 
-// The same, with a method-call middle term (the ShouldUseVehicleCamera isSubj
-// shape): `cs and cs:IsA("X") or false`.
-TEST_CASE("CCF: and-call-or folds with a namecall middle term", "[Decompiler][ShortCircuit]") {
-    const auto out = DecompileOrFail(
-        R"(
+TEST_CASE("CCF: and-call-or preserves namecall effects", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(self, cs)
             self.x = cs and cs:IsA("VehicleSeat") or false
         end
         return f
-    )",
-        2
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); local self={}; f(self,nil); print(self.x); for _,answer in {false,true} do f(self,{IsA=function(_,name) print(name); return answer end}); print(self.x) end)DRIVER",
+        kComplexEnvironment
     );
-    INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(and\s+\w+:IsA\("VehicleSeat"\)\s+or\s+false)")));
 }
 
-// staircase of `if v ~= A then if v ~= B then ...`.
-TEST_CASE("CCF: assignment elseif chain is flattened to elseif", "[Decompiler][ControlFlow][If]") {
-    // A movement-mode-style chain: branches assign a local consumed by a LATER
-    // conditional block (mirrors ActivateCameraController). This yields the nested
-    // negated-if shape the flattener targets, without tail-duplicating post-chain
-    // code into every branch.
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: assignment elseif chain preserves branch values", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(x, flag)
             local mode = 0
             if x == 1 then
@@ -162,22 +99,14 @@ TEST_CASE("CCF: assignment elseif chain is flattened to elseif", "[Decompiler][C
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    // The chain is surfaced as `elseif` rather than a staircase of nested ifs
-    // (without flattening there would be zero `elseif`s).
-    CHECK(CountWord(out, "elseif") >= 2);
-    // The leading links use positive equality (`== 1`, `== 2`), not negated tests.
-    CHECK(ContainsRegex(out, std::regex(R"(elseif\s+\w+\s*==\s*2)")));
-    for (const char *v : {"10", "20", "30", "40", "99"})
-        CHECK(CountSubstr(out, v) >= 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for x=0,5 do f(x,true); f(x,false) end)DRIVER", kComplexEnvironment
+    );
 }
 
-// The report's ActivateCameraController dispatch: an `or`-grouped elseif must
-// only fire for its three values, NOT become a fallthrough that also runs for
-// the unhandled `else` (warn) case.
-TEST_CASE("CCF: or-grouped elseif does not leak into the else branch", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: or-grouped elseif does not leak into the else branch", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(t)
             local creator = nil
             if t == "Scriptable" then
@@ -194,24 +123,15 @@ TEST_CASE("CCF: or-grouped elseif does not leak into the else branch", "[Decompi
             use(creator)
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    // legacy() is reachable only from the or-group, so it appears exactly once
-    // and warn() exactly once; neither duplicated nor merged.
-    CHECK(CountSubstr(out, "legacy(") == 1);
-    CHECK(CountSubstr(out, "warn(") == 1);
-    CHECK(CountSubstr(out, "pickCustom(") == 1);
-    CHECK(CountSubstr(out, "pickTrack(") == 1);
-    // The or-group's three string comparisons all survive.
-    CHECK(ContainsRegex(out, std::regex(R"("Attach")")));
-    CHECK(ContainsRegex(out, std::regex(R"("Watch")")));
-    CHECK(ContainsRegex(out, std::regex(R"("Fixed")")));
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,kind in {"Scriptable","Custom","Track","Attach","Watch","Fixed","Unknown"} do f(kind) end)DRIVER",
+        kComplexEnvironment
+    );
 }
 
-// elseif chain with trailing NO-OP branches (report cat 10: DevTouchMovementMode
-// etc.). The no-ops must not steal the action from a sibling branch.
-TEST_CASE("CCF: elseif chain with no-op tail branches", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: elseif chain with no-op tail branches", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(name)
             if name == "Mode" then
                 doMode()
@@ -225,18 +145,14 @@ TEST_CASE("CCF: elseif chain with no-op tail branches", "[Decompiler][ControlFlo
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "doMode(") == 1);
-    CHECK(CountSubstr(out, "doOcclusion(") == 1);
-    CHECK(CountSubstr(out, "doZoom(") == 1);
-    // The Occlusion action must be guarded by its own name, not run for "Mode".
-    CHECK(ContainsRegex(out, std::regex(R"("Occlusion")")));
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,kind in {"Mode","Occlusion","Zoom","A","B","C","Unknown"} do f(kind) end)DRIVER", kComplexEnvironment
+    );
 }
 
-// Preserve a nested if with its own elseif and else inside an outer elseif arm.
-TEST_CASE("CCF: nested if inside an elseif arm", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: nested if inside an elseif arm", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(prop, mode)
             if prop == "CameraMode" then
                 if mode == "LockFirstPerson" then
@@ -251,17 +167,15 @@ TEST_CASE("CCF: nested if inside an elseif arm", "[Decompiler][ControlFlow][If]"
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "lock(") == 1);
-    CHECK(CountSubstr(out, "classic(") == 1);
-    CHECK(CountSubstr(out, "warn(") == 1);
-    CHECK(CountSubstr(out, "zoom(") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,prop in {"CameraMode","Zoom","Other"} do for _,mode in {"LockFirstPerson","Classic","Other"} do f(prop,mode) end end)DRIVER",
+        kComplexEnvironment
+    );
 }
 
-// Three-deep nested if/else, each level branching both ways.
-TEST_CASE("CCF: three-deep nested if/else keeps all leaves", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: three-deep nested if/else keeps all leaves", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(a, b, c)
             if a then
                 if b then
@@ -274,15 +188,15 @@ TEST_CASE("CCF: three-deep nested if/else keeps all leaves", "[Decompiler][Contr
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    for (int i = 1; i <= 6; ++i)
-        CHECK(CountSubstr(out, "leaf" + std::to_string(i) + "(") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,a in {false,true} do for _,b in {false,true} do for _,c in {false,true} do f(a,b,c) end end end)DRIVER",
+        kComplexEnvironment
+    );
 }
 
-// elseif chain that returns a different value per branch (phi at the join).
-TEST_CASE("CCF: elseif chain returning per-branch values", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: elseif chain returning per-branch values", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(x)
             local r
             if x == 1 then
@@ -297,19 +211,14 @@ TEST_CASE("CCF: elseif chain returning per-branch values", "[Decompiler][Control
             return r
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"("one")")));
-    CHECK(ContainsRegex(out, std::regex(R"("two")")));
-    CHECK(ContainsRegex(out, std::regex(R"("three")")));
-    CHECK(ContainsRegex(out, std::regex(R"("other")")));
-    // Each value assigned/returned exactly once (no duplicated branch).
-    CHECK(CountSubstr(out, "\"three\"") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for x=0,4 do print(f(x)) end)DRIVER", kComplexEnvironment
+    );
 }
 
-// Mixed `and`/`or` compound conditions across elseif arms.
-TEST_CASE("CCF: compound boolean conditions in elseif arms", "[Decompiler][ControlFlow][If]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: compound boolean conditions in elseif arms", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(a, b, c)
             if a and b then
                 p()
@@ -322,21 +231,15 @@ TEST_CASE("CCF: compound boolean conditions in elseif arms", "[Decompiler][Contr
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    // Each branch body must be reachable. (An `or` condition may legitimately
-    // emit its body once per disjunct, so assert presence, not an exact count.)
-    CHECK(CountSubstr(out, "p(") >= 1);
-    CHECK(CountSubstr(out, "q(") >= 1);
-    CHECK(CountSubstr(out, "r(") >= 1);
-    CHECK(CountSubstr(out, "s(") >= 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); for _,a in {false,true} do for _,b in {false,true} do for _,c in {false,true} do f(a,b,c) end end end)DRIVER",
+        kComplexEnvironment
+    );
 }
 
-// Loops with nested control flow
-
-// Nested while inside while; inner break exits only the inner loop.
-TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(n, m)
             local i = 0
             while i < n do
@@ -354,17 +257,14 @@ TEST_CASE("CCF: nested while with inner break", "[Decompiler][ControlFlow][Loop]
             done()
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "inner(") == 1);
-    CHECK(CountSubstr(out, "outer(") == 1);
-    CHECK(CountSubstr(out, "done(") == 1);
-    // Exactly one break (the inner one); it must not be duplicated to the outer.
-    CHECK(CountWord(out, "break") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); f(0,3); f(2,0); f(2,3))DRIVER", kComplexEnvironment
+    );
 }
 
-TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow][Loop]") {
-    const std::string source = R"(
+TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f()
             local x = 0
             repeat
@@ -377,26 +277,14 @@ TEST_CASE("CCF: repeat-until with conditional break", "[Decompiler][ControlFlow]
             return x
         end
         return f()
-    )";
-    const auto out = DecompileOrFail(source);
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "step(") == 1);
-    const bool emittedRepeat = ContainsRegex(out, std::regex(R"(repeat[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*until\s+\(?x\s*>=\s*10\)?)"));
-    const bool emittedWhile = ContainsRegex(out, std::regex(R"(while\s+true[\s\S]*==\s*5[\s\S]*break[\s\S]*step\([\s\S]*if\s+x\s*>=\s*10\s+then\s+break)"));
-    CHECK((emittedRepeat || emittedWhile));
-    CHECK(CountWord(out, "break") == (emittedRepeat ? 1 : 2));
-    const auto verdict = fuzz::CompareSemantics(Luau::compile(source), Luau::compile(out), {Luau::compile("step = function() end")});
-    INFO("original: " << verdict.original.trace << " decompiled: " << verdict.decompiled.trace);
-    CHECK(verdict.original.trace == "return: 5\n");
-    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+    )LUA",
+        R"DRIVER(print(__integration_subject()))DRIVER", kComplexEnvironment
+    );
 }
 
-// while containing a nested repeat-until.
-// The statements after the inner `repeat ... until` (`tail(i)`, `i = i + 1`) must
-// stay in the while body, after the repeat; not be pulled into the repeat body.
-// (Was a degenerate loopExit==latch making the exit block look like the body.)
-TEST_CASE("CCF: while with a nested repeat-until", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: while with a nested repeat-until", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(n)
             local i = 0
             while i < n do
@@ -410,17 +298,14 @@ TEST_CASE("CCF: while with a nested repeat-until", "[Decompiler][ControlFlow][Lo
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(repeat)")));
-    CHECK(ContainsRegex(out, std::regex(R"(\bbody\b)")));
-    // `tail` (a post-repeat statement) must appear AFTER the `until`, not before.
-    CHECK(ContainsRegex(out, std::regex(R"(until[\s\S]*tail)")));
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); f(0); f(2))DRIVER", kComplexEnvironment
+    );
 }
 
-// numeric for with a nested while and a conditional continue/return.
-TEST_CASE("CCF: numeric-for with nested while and early return", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: numeric-for with nested while and early return", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(t)
             for i = 1, #t do
                 local v = t[i]
@@ -435,16 +320,14 @@ TEST_CASE("CCF: numeric-for with nested while and early return", "[Decompiler][C
             return -1
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(for\s+\w+\s*=)")));
-    CHECK(ContainsRegex(out, std::regex(R"(while)")));
-    CHECK(CountSubstr(out, "mark(") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); print(f({}),f({0,2}),f({14,1}),f({1,13})))DRIVER", kComplexEnvironment
+    );
 }
 
-// while-true with two break conditions (compound loop exit).
-TEST_CASE("CCF: while-true with multiple break conditions", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: while-true with multiple break conditions", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(a, b)
             while true do
                 work()
@@ -459,20 +342,15 @@ TEST_CASE("CCF: while-true with multiple break conditions", "[Decompiler][Contro
             after()
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "work(") == 1);
-    CHECK(CountSubstr(out, "more(") == 1);
-    // after() is post-loop and must appear exactly once (not inlined per break).
-    CHECK(CountSubstr(out, "after(") == 1);
-    // At least one real break survives; the canonical form may fold the first exit
-    // into the loop condition (`while not a() do`), leaving the rest as `break`.
-    CHECK(CountWord(out, "break") >= 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); local count=0; f(function() count+=1; print("a",count); return count==2 end,function() print("b",count); return false end); count=0; f(function() count+=1; print("a",count); return false end,function() print("b",count); return count==2 end))DRIVER",
+        kComplexEnvironment
+    );
 }
 
-// Deeply nested loop + conditionals: for > while > if/elseif with break.
-TEST_CASE("CCF: for over while over elseif with break", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: for over while over elseif with break", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(rows)
             for i = 1, rows do
                 local j = 0
@@ -491,18 +369,14 @@ TEST_CASE("CCF: for over while over elseif with break", "[Decompiler][ControlFlo
             end
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(CountSubstr(out, "a(") == 1);
-    CHECK(CountSubstr(out, "b(") == 1);
-    CHECK(CountSubstr(out, "c(") == 1);
-    CHECK(CountSubstr(out, "d(") == 1);
-    CHECK(CountWord(out, "break") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); f(0); f(2))DRIVER", kComplexEnvironment
+    );
 }
 
-// repeat-until with a compound `or` exit condition.
-TEST_CASE("CCF: repeat-until with compound or condition", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: repeat-until with compound or condition", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f()
             local x = 0
             repeat
@@ -512,18 +386,14 @@ TEST_CASE("CCF: repeat-until with compound or condition", "[Decompiler][ControlF
             return x
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    // A `repeat ... until A or B` may come back as an equivalent `while` form;
-    // accept either as long as it is a loop and the body and exit survive.
-    CHECK(ContainsRegex(out, std::regex(R"(repeat|while)")));
-    CHECK(CountSubstr(out, "tick(") == 1);
-    CHECK(CountSubstr(out, "stop(") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); stopEarly=false; print(f()); stopEarly=true; print(f()))DRIVER", kComplexEnvironment
+    );
 }
 
-// Generic for (pairs) with a nested if that conditionally continues.
-TEST_CASE("CCF: generic-for with conditional skip", "[Decompiler][ControlFlow][Loop]") {
-    const auto out = DecompileOrFail(R"(
+TEST_CASE("CCF: generic-for with conditional skip", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(
         local function f(t)
             for k, v in pairs(t) do
                 if v == nil then
@@ -537,30 +407,16 @@ TEST_CASE("CCF: generic-for with conditional skip", "[Decompiler][ControlFlow][L
             finish()
         end
         return f
-    )");
-    INFO("decompile:\n" << out);
-    CHECK(ContainsRegex(out, std::regex(R"(pairs\()")));
-    CHECK(CountSubstr(out, "visit(") == 1);
-    CHECK(CountSubstr(out, "finish(") == 1);
-    CHECK(CountWord(out, "break") == 1);
+    )LUA",
+        R"DRIVER(local f=__integration_subject(); f({}); f({"a","b"}); f({"first","stop","last"}))DRIVER", kComplexEnvironment
+    );
 }
 
-// At O0 Luau lowers a short-circuit `or`/`and` chain feeding a table index into a ladder of
-// register-rewrites with a duplicated merge consumer. The chain must fold back into a single index
-// expression, not explode into if/return arms (which also duplicate the consumer N times). At O1+ the
-// leading concat constant-folds and the whole chain collapses, so the bug is O0-only.
-TEST_CASE("Regress: or/and short-circuit chain feeding a table index folds at O0", "[Decompiler][ShortCircuit][Regression]") {
-    const std::string source = "local t = { [\"hello\"] = 1 }\n"
-                               "print(t[(\"h\" .. \"e\" .. \"ll\" .. \"o\") or #t or #(\"halo\" .. \"halo\") and _])\n";
-    const std::string out = DecompileOrFail(source, 0);
-    INFO("decompiled:\n" << out);
-    CHECK(CountWord(out, "if") == 0);     // no exploded if-ladder
-    CHECK(CountWord(out, "return") == 0); // no duplicated early returns
-    CHECK(CountSubstr(out, "print") == 1);
-    CHECK(ContainsRegex(out, std::regex(R"(\bor\b)")));
-    CHECK(ContainsRegex(out, std::regex(R"(\band\b)")));
-    CHECK(ContainsRegex(out, std::regex(R"(\b\w+\([^\n]*\[)"))); // the chain feeds a table index
-    // O0 IR fixpoint: re-decompiling the decompiled source is stable (a wrong fold would diverge).
-    const std::string out2 = DecompileOrFail(out, 0);
-    CHECK(out == out2);
+TEST_CASE("Regress: or/and short-circuit chain feeding a table index preserves execution at O0", "[Decompiler][ControlFlow][Integration]") {
+    integration_test::Check(
+        R"LUA(local t = {["hello"] = 1}
+print(t[("h" .. "e" .. "ll" .. "o") or #t or #("halo" .. "halo") and _])
+)LUA",
+        R"DRIVER()DRIVER", kComplexEnvironment
+    );
 }

@@ -280,8 +280,10 @@ namespace fuzz {
 
     // Execute one bytecode blob in a fresh sandboxed state; capture prints, returns, and errors.
     // preludeBc must be the compiled kSemPrelude (same compiler settings; callers reuse one blob).
-    inline SemTrace
-    RunLuauTrace(const std::string &bytecode, const std::string &preludeBc, std::chrono::milliseconds budget = std::chrono::milliseconds(1000)) {
+    inline SemTrace RunLuauTrace(
+        const std::string &bytecode, const std::string &preludeBc, std::chrono::milliseconds budget = std::chrono::milliseconds(1000),
+        const std::string &driverBc = ""
+    ) {
         SemTrace result{};
         lua_State *L = luaL_newstate();
         if (!L)
@@ -353,7 +355,16 @@ namespace fuzz {
         lua_pushnil(L);
         lua_setglobal(L, "__fuzz_setmt");
 
-        const int status = runChunk(bytecode, true);
+        int status;
+        if (driverBc.empty()) {
+            status = runChunk(bytecode, true);
+        } else if (luau_load(L, "=chunk", bytecode.data(), bytecode.size(), 0) != 0) {
+            lua_pop(L, 1);
+            status = -1;
+        } else {
+            lua_setglobal(L, "__integration_subject");
+            status = runChunk(driverBc, true);
+        }
         if (status == -1) {
             result.status = SemTrace::Status::LoadFailed;
         } else if (status != 0) {
