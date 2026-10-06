@@ -4,20 +4,11 @@
 //
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "AbstractSyntaxTree/ASTNode.hpp"
-#include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "ControlFlowRewriterTestSupport.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeadLocalEliminator.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/PropertyRenamer.hpp"
-#include "Rewriters/ReverseFieldRenamer.hpp"
-#include "Rewriters/ScopeAwareRenamer.hpp"
-#include "Rewriters/ScopeBlockIntroducer.hpp"
-#include "Rewriters/SelfAssignmentEliminator.hpp"
-#include "SourceGenerator/Generator.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <limits>
@@ -260,90 +251,37 @@ TEST_CASE("Regress: attribute name that stays illegal after folding is not renam
 
 // PropertyRenamer: local = obj.Property -> property
 
-namespace property_regression {
-    std::shared_ptr<MemberExpressionNode> MemberRead(const std::string &tbl, const std::string &key) {
-        return std::make_shared<MemberExpressionNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(tbl)), key);
-    }
-    std::string DeclName(const std::shared_ptr<Statement> &s) {
-        auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(s);
-        if (!vd)
-            return {};
-        auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(vd->identifier);
-        return (id && id->identifier) ? id->identifier->name : std::string{};
-    }
-} // namespace property_regression
-
-using namespace property_regression;
-
-// A local with a single source that is a property read is renamed to the
-// property (first letter lower-cased), references included.
-TEST_CASE("Regress: single-source property local renamed to property", "[Decompiler][Property][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(
-        std::make_shared<VariableDeclarationNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), MemberRead("plr", "Character")
-        )
-    ); // local v0 = plr.Character
-    stmts.push_back(UseStmt("v0"));
-
-    PropertyRenamer{}.Run(stmts);
-
-    CHECK(DeclName(stmts[0]) == "character");
-    auto use = std::dynamic_pointer_cast<IdentifierExpressionNode>(std::dynamic_pointer_cast<ExpressionStatementNode>(stmts[1])->expression);
-    REQUIRE(use);
-    CHECK(use->identifier->name == "character");
+TEST_CASE("Integration: property aliases preserve reads and mutations", "[Decompiler][Property][Regression][Integration]") {
+    integration_test::Check(R"LUA(local player = { Character = { id = 8 } }
+local value = player.Character
+print(value.id)
+value.id += 1
+print(value.id, player.Character.id))LUA");
 }
 
-// A local that is reassigned (more than one value source) keeps its auto-name --
-// the property name would no longer describe its contents.
-TEST_CASE("Regress: reassigned property local is not renamed", "[Decompiler][Property][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(
-        std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), MemberRead("plr", "First"))
-    ); // local v0 = plr.First
-    stmts.push_back(UseStmt("v0"));
-    stmts.push_back(
-        std::make_shared<AssignmentStatementNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), MemberRead("plr", "Second"))
-    ); // v0 = plr.Second
-    stmts.push_back(UseStmt("v0"));
-
-    PropertyRenamer{}.Run(stmts);
-
-    CHECK(DeclName(stmts[0]) == "v0"); // untouched: two sources
+TEST_CASE("Integration: reassigned property values retain each observation", "[Decompiler][Property][Regression][Integration]") {
+    integration_test::Check(R"LUA(local player = { First = 3, Second = 9 }
+local value = player.First
+print(value)
+value = player.Second
+print(value))LUA");
 }
 
-TEST_CASE("Regress: class marker does not rename its owner to __index", "[Decompiler][Class][Naming][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(
-        std::make_shared<VariableDeclarationNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), std::make_shared<TableLiteralNode>()
-        )
-    );
-    stmts.push_back(
-        std::make_shared<AssignmentStatementNode>(MemberRead("v0", "__index"), std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")))
-    );
-
-    ReverseFieldRenamer{}.Run(stmts);
-
-    CHECK(DeclName(stmts[0]) == "v0");
+TEST_CASE("Integration: metatable owners retain method identity", "[Decompiler][Class][Naming][Regression][Integration]") {
+    integration_test::Check(R"LUA(local Owner = {}
+Owner.__index = Owner
+function Owner:Get() return self.value end
+local item = setmetatable({ value = 3 }, Owner)
+print(item:Get(), rawequal(getmetatable(item), Owner)))LUA");
 }
 
-TEST_CASE("Regress: scoped rename updates method receiver", "[Decompiler][Class][Naming][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(
-        std::make_shared<VariableDeclarationNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), std::make_shared<TableLiteralNode>()
-        )
-    );
-    auto method = std::make_shared<FunctionDeclarationNode>(
-        "v0:initialize", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, std::make_shared<BlockStatementNode>(), false
-    );
-    stmts.push_back(method);
-
-    ScopeAwareRenamer::Run(stmts, [](const auto &) { return std::vector<std::pair<std::string, std::string>>{{"v0", "controller"}}; });
-
-    CHECK(DeclName(stmts[0]) == "controller");
-    CHECK(method->functionName == "controller:initialize");
+TEST_CASE("Integration: method aliases preserve receiver mutations", "[Decompiler][Class][Naming][Regression][Integration]") {
+    integration_test::Check(R"LUA(local controller = { count = 0 }
+function controller:initialize(n) self.count += n; return self end
+local alias = controller
+alias:initialize(4)
+controller:initialize(3)
+print(rawequal(alias, controller), controller.count))LUA");
 }
 
 // End-to-end: a chain of single-source property reads is renamed.
@@ -367,24 +305,19 @@ TEST_CASE("Regress: property reads are renamed end-to-end", "[Decompiler][Proper
 
 // Output-quality cleanups
 
-// A no-op `x = x` reassignment is dropped; surrounding statements survive.
-TEST_CASE("Regress: self-assignment is eliminated", "[Decompiler][Cleanup][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    auto keepL = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("keep"));
-    auto keepR = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("src"));
-    stmts.push_back(std::make_shared<AssignmentStatementNode>(keepL, keepR)); // keep = src
-    auto selfL = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("foo"));
-    auto selfR = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("foo"));
-    stmts.push_back(std::make_shared<AssignmentStatementNode>(selfL, selfR)); // foo = foo  (dropped)
-
-    SelfAssignmentEliminator{}.Run(stmts);
-
-    REQUIRE(stmts.size() == 1);
-    auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmts[0]);
-    REQUIRE(asn);
-    auto l = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
-    REQUIRE(l);
-    CHECK(l->identifier->name == "keep");
+TEST_CASE("Integration: self assignments retain index callbacks", "[Decompiler][Cleanup][Regression][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local function nextValue() calls += 1; return calls end
+local value = nextValue()
+value = value
+print(value, calls)
+local log = {}
+local object = setmetatable({}, {
+    __index = function() log[#log + 1] = "read"; return 7 end,
+    __newindex = function(_, _, value) log[#log + 1] = "write:" .. value end,
+})
+object.x = object.x
+print(table.concat(log, ",")))LUA");
 }
 
 // A literal call-callee gets exactly one wrapping paren layer, not two.

@@ -1,10 +1,7 @@
-#include "AbstractSyntaxTree/ASTNode.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeclarationHoister.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/IfExpressionFolder.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <regex>
@@ -153,53 +150,15 @@ TEST_CASE("Roundtrip: repeat-until loop", "[Decompiler][Roundtrip]") {
     CHECK(CountRegex(out, std::regex(R"((?:^|\n)\s*return\b)")) == 1u);
 }
 
-TEST_CASE("IfExpressionFolder: descends into inline function expressions", "[Decompiler][Rewriter]") {
-    auto makeFunction = [] {
-        auto body = std::make_shared<BlockStatementNode>();
-        auto x = std::make_shared<Identifier>("x");
-        body->body.push_back(std::make_shared<VariableDeclarationNode>(x));
-        auto branch = std::make_shared<IfStatementNode>();
-        branch->condition = std::make_shared<BooleanLiteralNode>(true);
-        branch->thenBranch = std::make_shared<BlockStatementNode>();
-        branch->elseBranch = std::make_shared<BlockStatementNode>();
-        auto lhs = std::make_shared<IdentifierExpressionNode>(x);
-        branch->thenBranch->body.push_back(std::make_shared<AssignmentStatementNode>(lhs, std::make_shared<NilLiteralNode>()));
-        branch->elseBranch->body.push_back(
-            std::make_shared<AssignmentStatementNode>(std::make_shared<IdentifierExpressionNode>(x), std::make_shared<BooleanLiteralNode>(false))
-        );
-        body->body.push_back(branch);
-        return std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
-    };
-
-    auto localFn = makeFunction();
-    std::vector<std::shared_ptr<Statement>> localStatements{
-        std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("f")), localFn)
-    };
-    IfExpressionFolder{}.Run(localStatements);
-    auto folded = std::dynamic_pointer_cast<IfExpressionNode>(std::dynamic_pointer_cast<VariableDeclarationNode>(localFn->lpFunctionBody->body.front())->value);
-    REQUIRE(folded);
-    CHECK(std::dynamic_pointer_cast<NilLiteralNode>(folded->thenExpr));
-    CHECK(std::dynamic_pointer_cast<BooleanLiteralNode>(folded->elseExpr)->value == false);
-
-    auto callback = makeFunction();
-    auto call = std::make_shared<CallExpressionNode>(
-        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("run")), std::vector<std::shared_ptr<Expression>>{callback},
-        std::vector<std::shared_ptr<Expression>>{}, false, false
-    );
-    std::vector<std::shared_ptr<Statement>> callStatements{std::make_shared<ExpressionStatementNode>(call)};
-    IfExpressionFolder{}.Run(callStatements);
-    CHECK(std::dynamic_pointer_cast<IfExpressionNode>(std::dynamic_pointer_cast<VariableDeclarationNode>(callback->lpFunctionBody->body.front())->value));
-
-    auto returned = makeFunction();
-    std::vector<std::shared_ptr<Statement>> returnStatements{std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{returned})};
-    IfExpressionFolder{}.Run(returnStatements);
-    CHECK(std::dynamic_pointer_cast<IfExpressionNode>(std::dynamic_pointer_cast<VariableDeclarationNode>(returned->lpFunctionBody->body.front())->value));
-
-    auto indexed = makeFunction();
-    auto index = std::make_shared<IndexExpressionNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("t")), indexed);
-    std::vector<std::shared_ptr<Statement>> indexStatements{std::make_shared<AssignmentStatementNode>(index, std::make_shared<NilLiteralNode>())};
-    IfExpressionFolder{}.Run(indexStatements);
-    CHECK(std::dynamic_pointer_cast<IfExpressionNode>(std::dynamic_pointer_cast<VariableDeclarationNode>(indexed->lpFunctionBody->body.front())->value));
+TEST_CASE("Integration: inline closures retain conditional results", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check(R"LUA(local function choose(flag)
+    return (function()
+        local value
+        if flag then value = nil else value = false end
+        return value
+    end)()
+end
+print(choose(true), choose(false)))LUA");
 }
 
 TEST_CASE("Type inference: function annotations use valid Luau syntax", "[Decompiler][TypeInference]") {
@@ -224,196 +183,82 @@ TEST_CASE("Deserializer: function bytecode types emit valid annotations", "[Deco
     CHECK(bytecode.front() != '\0');
 }
 
-TEST_CASE("DeclarationHoister: coalesces only safe adjacent assignments", "[Decompiler][Rewriter]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    auto run = [](std::vector<std::shared_ptr<Statement>> statements) {
-        DeclarationHoister{}.Run(statements);
-        return statements;
-    };
-    {
-        auto x = id("v40");
-        auto s = run(
-            {std::make_shared<VariableDeclarationNode>(x, nullptr),
-             std::make_shared<AssignmentStatementNode>(id("v40"), std::make_shared<NumberLiteralNode>(1))}
-        );
-        auto d = std::dynamic_pointer_cast<VariableDeclarationNode>(s.front());
-        REQUIRE(d);
-        CHECK(d->value);
-        CHECK(s.size() == 1);
-    }
-    {
-        auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), nullptr), std::make_shared<AssignmentStatementNode>(id("v40"), id("v40"))});
-        CHECK(s.size() == 2);
-    }
-    {
-        auto fnBody = std::make_shared<BlockStatementNode>();
-        fnBody->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v40")}));
-        auto fn =
-            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, fnBody, false);
-        auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), nullptr), std::make_shared<AssignmentStatementNode>(id("v40"), fn)});
-        CHECK(s.size() == 2);
-    }
-    {
-        auto s = run(
-            {std::make_shared<VariableDeclarationNode>(id("v40"), nullptr), std::make_shared<ExpressionStatementNode>(std::make_shared<NilLiteralNode>()),
-             std::make_shared<AssignmentStatementNode>(id("v40"), std::make_shared<NumberLiteralNode>(1))}
-        );
-        CHECK(s.size() == 3);
-    }
-    {
-        auto loop = std::make_shared<WhileStatementNode>();
-        loop->body = std::make_shared<BlockStatementNode>();
-        loop->body->body = {
-            std::make_shared<VariableDeclarationNode>(id("v40"), nullptr),
-            std::make_shared<AssignmentStatementNode>(id("v40"), std::make_shared<NumberLiteralNode>(1))
-        };
-        std::vector<std::shared_ptr<Statement>> s{loop};
-        DeclarationHoister{}.Run(s);
-        auto d = std::dynamic_pointer_cast<VariableDeclarationNode>(loop->body->body.front());
-        REQUIRE(d);
-        CHECK(d->value);
-    }
-    {
-        auto value = std::make_shared<IfExpressionNode>(std::make_shared<BooleanLiteralNode>(true), id("v40"), std::make_shared<NumberLiteralNode>(1));
-        auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), nullptr), std::make_shared<AssignmentStatementNode>(id("v40"), value)});
-        CHECK(s.size() == 2);
-    }
-    {
-        auto body = std::make_shared<BlockStatementNode>();
-        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v40")}));
-        auto fn =
-            std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
-        fn->capturedNames.insert("v40");
-        auto s = run({std::make_shared<VariableDeclarationNode>(id("v40"), fn)});
-        REQUIRE(s.size() == 2);
-        auto d = std::dynamic_pointer_cast<VariableDeclarationNode>(s.front());
-        REQUIRE(d);
-        CHECK_FALSE(d->value);
-        CHECK(std::dynamic_pointer_cast<AssignmentStatementNode>(s.back()));
-    }
+TEST_CASE("Integration: adjacent initializers preserve dependency order", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check({
+        R"LUA(local x, y
+x = tonumber("1")
+y = x + 2
+print(x, y))LUA",
+        R"LUA(local x = tonumber("1")
+local y = tonumber("2")
+x = x + y
+y = x + y
+print(x, y))LUA",
+        R"LUA(local value = tonumber("4")
+do local value = value + 1; print(value) end
+print(value))LUA",
+        R"LUA(local value
+print(value)
+value = false
+print(value))LUA",
+        R"LUA(local calls = 0
+local function nextValue() calls += 1; return calls end
+local x, y = nextValue(), nextValue()
+print(x, y, calls))LUA"
+    });
 }
 
-TEST_CASE("DeclarationHoister: a loop arm's own temporary is declared in the arm", "[Decompiler][Rewriter]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    auto call = [&](std::shared_ptr<Expression> argument) {
-        auto print = std::make_shared<Identifier>("print");
-        print->bIsGlobal = true;
-        return std::make_shared<ExpressionStatementNode>(std::make_shared<CallExpressionNode>(
-            std::make_shared<IdentifierExpressionNode>(print), std::vector<std::shared_ptr<Expression>>{std::move(argument)},
-            std::vector<std::shared_ptr<Expression>>{}, false, false
-        ));
-    };
-    // returns whether the loop's parent declares `v5_9`, and the arm's first statement
-    auto run = [&](std::vector<std::shared_ptr<Statement>> armBody) {
-        auto arm = std::make_shared<IfStatementNode>();
-        arm->condition = std::make_shared<BooleanLiteralNode>(true);
-        arm->thenBranch = std::make_shared<BlockStatementNode>();
-        arm->thenBranch->body = std::move(armBody);
-        auto loop = std::make_shared<WhileStatementNode>();
-        loop->condition = std::make_shared<BooleanLiteralNode>(true);
-        loop->body = std::make_shared<BlockStatementNode>();
-        loop->body->body.push_back(arm);
-        std::vector<std::shared_ptr<Statement>> statements{loop};
-        DeclarationHoister{}.Run(statements);
-        const bool outside = std::ranges::any_of(statements, [](const auto &stmt) { return std::dynamic_pointer_cast<VariableDeclarationNode>(stmt) != nullptr; });
-        return std::pair{outside, arm->thenBranch->body.front()};
-    };
-
-    auto [outside, first] = run({std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1)), call(id("v5_9"))});
-    CHECK_FALSE(outside);
-    const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(first);
-    REQUIRE(declaration);
-    CHECK(declaration->value);
-
-    CHECK(run({call(id("v5_9")), std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1))}).first);
-    CHECK(run({std::make_shared<AssignmentStatementNode>(
-                  id("v5_9"), std::make_shared<BinaryExpressionNode>("+", id("v5_9"), std::make_shared<NumberLiteralNode>(1))
-              )})
-              .first);
-
-    auto body = std::make_shared<BlockStatementNode>();
-    body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v5_9")}));
-    auto closure =
-        std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
-    closure->capturedNames.insert("v5_9");
-    CHECK(run({std::make_shared<AssignmentStatementNode>(id("v5_9"), std::make_shared<NumberLiteralNode>(1)), call(closure)}).first);
+TEST_CASE("Integration: loop arm closures retain per-iteration bindings", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check({
+        R"LUA(local readers = {}
+for i = 1, 3 do
+    if i % 2 == 1 then
+        local value = i * 2
+        readers[#readers + 1] = function() return value end
+    end
+end
+print(readers[1](), readers[2]()))LUA",
+        R"LUA(local readers = {}
+for i = 1, 3 do
+    local value
+    readers[i] = function() return value end
+    print(value)
+    value = i
+end
+print(readers[1](), readers[2](), readers[3]()))LUA"
+    });
 }
 
-TEST_CASE("DeclarationHoister: hoists branch writes with suffixed register names", "[Decompiler][Rewriter]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-
-    auto branch = std::make_shared<IfStatementNode>();
-    branch->condition = std::make_shared<BooleanLiteralNode>(true);
-    branch->thenBranch = std::make_shared<BlockStatementNode>();
-    branch->elseBranch = std::make_shared<BlockStatementNode>();
-    branch->thenBranch->body.push_back(std::make_shared<VariableDeclarationNode>(id("v11"), std::make_shared<NumberLiteralNode>(1)));
-    branch->thenBranch->body.push_back(std::make_shared<VariableDeclarationNode>(id("v12_62"), std::make_shared<NumberLiteralNode>(1)));
-    branch->elseBranch->body.push_back(std::make_shared<AssignmentStatementNode>(id("v11"), std::make_shared<NumberLiteralNode>(2)));
-    branch->elseBranch->body.push_back(std::make_shared<VariableDeclarationNode>(id("v12_62"), std::make_shared<NumberLiteralNode>(2)));
-    std::vector<std::shared_ptr<Statement>> statements{
-        std::make_shared<VariableDeclarationNode>(id("v7_62"), std::make_shared<NumberLiteralNode>(0)), branch,
-        std::make_shared<AssignmentStatementNode>(id("v7_62"), std::make_shared<NumberLiteralNode>(3)),
-        std::make_shared<AssignmentStatementNode>(id("v12_62"), std::make_shared<NumberLiteralNode>(3)),
-        std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v11"), id("v7_62"), id("v12_62")})
-    };
-
-    DeclarationHoister{}.Run(statements);
-
-    std::unordered_set<std::string> rootDeclarations;
-    for (const auto &stmt : statements)
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
-            if (auto name = std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier); name && name->identifier)
-                rootDeclarations.insert(name->identifier->name);
-    CHECK(rootDeclarations.contains("v11"));
-    CHECK(rootDeclarations.contains("v7_62"));
-    CHECK(rootDeclarations.contains("v12_62"));
-    CHECK(std::dynamic_pointer_cast<AssignmentStatementNode>(branch->thenBranch->body.front()));
+TEST_CASE("Integration: branch joins retain suffixed binding values", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check(R"LUA(local function choose(flag)
+    local v7_62, v12_62
+    if flag then v7_62, v12_62 = 7, 12 else v7_62, v12_62 = 3, 4 end
+    return v7_62, v12_62
+end
+print(choose(true))
+print(choose(false)))LUA");
 }
 
-TEST_CASE("IfExpressionFolder: preserves initializer scope and prefers positive conditions", "[Decompiler][Rewriter]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    for (bool readsSelf : {false, true}) {
-        auto condition = id("flag");
-        auto branch = std::make_shared<IfStatementNode>();
-        branch->condition = std::make_shared<UnaryExpressionNode>("not ", condition);
-        branch->thenBranch = std::make_shared<BlockStatementNode>();
-        branch->elseBranch = std::make_shared<BlockStatementNode>();
-        auto thenValue = readsSelf ? std::static_pointer_cast<Expression>(id("value")) : std::make_shared<NilLiteralNode>();
-        auto elseValue = std::make_shared<BooleanLiteralNode>(false);
-        branch->thenBranch->body.push_back(std::make_shared<AssignmentStatementNode>(id("value"), thenValue));
-        branch->elseBranch->body.push_back(std::make_shared<AssignmentStatementNode>(id("value"), elseValue));
-        auto declaration = std::make_shared<VariableDeclarationNode>(id("value"), nullptr);
-        std::vector<std::shared_ptr<Statement>> statements{declaration, branch};
-        IfExpressionFolder{}.Run(statements);
-        CHECK(statements.size() == (readsSelf ? 2 : 1));
-        auto value = readsSelf ? std::dynamic_pointer_cast<AssignmentStatementNode>(statements.back())->right
-                               : std::dynamic_pointer_cast<VariableDeclarationNode>(statements.front())->value;
-        auto folded = std::dynamic_pointer_cast<IfExpressionNode>(value);
-        REQUIRE(folded);
-        CHECK(folded->condition == condition);
-        CHECK(folded->thenExpr == elseValue);
-        CHECK(folded->elseExpr == thenValue);
-    }
+TEST_CASE("Integration: conditional initializers read enclosing binding", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check(R"LUA(local function choose(flag)
+    local value = tonumber("4")
+    do local value = if flag then value + 1 else value + 2; print(value) end
+    print(value)
+end
+choose(true)
+choose(false))LUA");
 }
 
-TEST_CASE("ASTRewriter: reaches closures under indexed assignment targets", "[Decompiler][Rewriter]") {
-    auto condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("flag"));
-    auto branch = std::make_shared<IfStatementNode>();
-    branch->condition = std::make_shared<UnaryExpressionNode>("not ", condition);
-    branch->thenBranch = std::make_shared<BlockStatementNode>();
-    branch->elseBranch = std::make_shared<BlockStatementNode>();
-    branch->elseBranch->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{}));
-    auto body = std::make_shared<BlockStatementNode>();
-    body->body.push_back(branch);
-    auto fn = std::make_shared<FunctionDeclarationNode>("", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, false);
-    auto call = std::make_shared<CallExpressionNode>(fn, std::vector<std::shared_ptr<Expression>>{}, std::vector<std::shared_ptr<Expression>>{}, false, true);
-    auto lhs = std::make_shared<IndexExpressionNode>(call, std::make_shared<StringLiteralNode>("key"));
-    auto block = std::make_shared<BlockStatementNode>();
-    block->body.push_back(std::make_shared<AssignmentStatementNode>(lhs, std::make_shared<NilLiteralNode>()));
-    std::vector<std::shared_ptr<Statement>> statements{block};
-    IfChainSimplifier{}.Run(statements);
-    CHECK(branch->condition == condition);
-    CHECK_FALSE(branch->elseBranch);
-    REQUIRE(branch->thenBranch);
-    CHECK(branch->thenBranch->body.size() == 1);
+TEST_CASE("Integration: indexed assignment closures retain their branches", "[Decompiler][Rewriter][Integration]") {
+    integration_test::Check(R"LUA(local target = {}
+local function store(flag)
+    target[(function()
+        local key
+        if flag then key = 1 else key = 2 end
+        return key
+    end)()] = if flag then 7 else 9
+end
+store(true)
+store(false)
+print(target[1], target[2]))LUA");
 }

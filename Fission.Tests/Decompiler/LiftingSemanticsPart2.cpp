@@ -6,14 +6,12 @@
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
 #include "Deserializer.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "LiftingSemanticsTestSupport.hpp"
 #include "Luau/Bytecode.h"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeclarationHoister.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/LoopVariableRenamer.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cctype>
 #include <cstring>
@@ -481,102 +479,36 @@ return read()
     );
 }
 
-TEST_CASE("DeclarationHoister: loop binding only covers its body", "[Decompiler][DeclarationHoister][Rewriter]") {
-    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    const auto makeLoop = [&] {
-        auto loop = std::make_shared<ForNumericNode>();
-        loop->loopVariable = identifier("v0");
-        loop->startVariable = std::make_shared<NumberLiteralNode>(1);
-        loop->maxIncreased = std::make_shared<NumberLiteralNode>(2);
-        loop->increaseBy = std::make_shared<NumberLiteralNode>(1);
-        loop->lpLoopBody = std::make_shared<BlockStatementNode>();
-        loop->lpLoopBody->body.push_back(std::make_shared<AssignmentStatementNode>(identifier("v0"), std::make_shared<NumberLiteralNode>(3)));
-        return loop;
-    };
-
-    SECTION("later read remains global") {
-        auto loop = makeLoop();
-        std::vector<std::shared_ptr<Statement>> statements{
-            loop, std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v0")})
-        };
-
-        DeclarationHoister{}.Run(statements);
-
-        CHECK(statements.size() == 2);
-        CHECK(statements.front() == loop);
-    }
-
-    SECTION("later orphan assignment still gets a local") {
-        auto loop = makeLoop();
-        std::vector<std::shared_ptr<Statement>> statements{
-            loop, std::make_shared<AssignmentStatementNode>(identifier("v0"), std::make_shared<NumberLiteralNode>(4)),
-            std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v0")})
-        };
-
-        DeclarationHoister{}.Run(statements);
-
-        REQUIRE(statements.size() == 4);
-        const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statements.front());
-        REQUIRE(declaration);
-        const auto declarationIdentifier = std::dynamic_pointer_cast<IdentifierExpressionNode>(declaration->identifier);
-        REQUIRE(declarationIdentifier);
-        CHECK(declarationIdentifier->identifier->name == "v0");
-        CHECK(statements[1] == loop);
-    }
+TEST_CASE("Integration: loop bindings do not replace outside bindings", "[Decompiler][DeclarationHoister][Rewriter][Integration]") {
+    integration_test::Check({
+        R"LUA(local value = tonumber("10")
+for value = 1, 2 do print(value) end
+print(value))LUA",
+        R"LUA(value = 7
+for value = 1, 2 do print(value) end
+print(value)
+value = 9
+print(value))LUA"
+    });
 }
 
-TEST_CASE("DeclarationHoister: a closure's own same-named local is not an earlier use", "[Decompiler][DeclarationHoister][Rewriter]") {
-    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    const auto run = [&](bool captured) {
-        auto body = std::make_shared<BlockStatementNode>();
-        if (!captured)
-            body->body.push_back(std::make_shared<VariableDeclarationNode>(identifier("v5"), std::make_shared<NumberLiteralNode>(1)));
-        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v5")}));
-        auto fn = std::make_shared<FunctionDeclarationNode>("f", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, body, true);
-        if (captured)
-            fn->capturedNames.insert("v5");
-        std::vector<std::shared_ptr<Statement>> statements{
-            fn, std::make_shared<VariableDeclarationNode>(identifier("v5"), std::make_shared<NumberLiteralNode>(2)),
-            std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v5")})
-        };
-        DeclarationHoister{}.Run(statements);
-        return statements;
-    };
-
-    SECTION("own local leaves the outer declaration in place") {
-        const auto statements = run(false);
-        REQUIRE(statements.size() == 3);
-        const auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(statements[1]);
-        REQUIRE(declaration);
-        CHECK(declaration->value);
-    }
-
-    SECTION("captured name still hoists above the closure") {
-        const auto statements = run(true);
-        REQUIRE(statements.size() == 4);
-        CHECK(std::dynamic_pointer_cast<VariableDeclarationNode>(statements.front()));
-    }
+TEST_CASE("Integration: closure locals stay distinct from captures", "[Decompiler][DeclarationHoister][Rewriter][Integration]") {
+    integration_test::Check({
+        R"LUA(local value = tonumber("3")
+local function read() local value = tonumber("8"); return value end
+print(value, read()))LUA",
+        R"LUA(local value = tonumber("3")
+local function read() return value end
+do local value = tonumber("8"); print(value, read()) end
+print(value, read()))LUA"
+    });
 }
 
-TEST_CASE("DeclarationHoister: disjoint locals cover their own uses", "[Decompiler][DeclarationHoister][Rewriter]") {
-    const auto identifier = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    auto branch = std::make_shared<IfStatementNode>();
-    branch->condition = identifier("flag");
-    branch->thenBranch = std::make_shared<BlockStatementNode>();
-    branch->thenBranch->body = {
-        std::make_shared<VariableDeclarationNode>(identifier("v1"), std::make_shared<NumberLiteralNode>(1)),
-        std::make_shared<ExpressionStatementNode>(identifier("v1"))
-    };
-    auto laterDeclaration = std::make_shared<VariableDeclarationNode>(identifier("v1"), std::make_shared<NumberLiteralNode>(2));
-    std::vector<std::shared_ptr<Statement>> statements{
-        branch, laterDeclaration, std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{identifier("v1")})
-    };
-
-    DeclarationHoister{}.Run(statements);
-
-    CHECK(statements.size() == 3);
-    CHECK(statements.front() == branch);
-    CHECK(statements[1] == laterDeclaration);
+TEST_CASE("Integration: disjoint closures retain separate cells", "[Decompiler][DeclarationHoister][Rewriter][Integration]") {
+    integration_test::Check(R"LUA(local readers = {}
+do local value = tonumber("2"); readers[1] = function() return value end end
+do local value = tonumber("5"); readers[2] = function() return value end end
+print(readers[1](), readers[2]()))LUA");
 }
 
 TEST_CASE("Lift: local initializer reads outer binding", "[Decompiler][DeclarationHoister][Semantic]") {

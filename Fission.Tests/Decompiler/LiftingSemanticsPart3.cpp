@@ -6,14 +6,12 @@
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
 #include "Decompiler.hpp"
 #include "Deserializer.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "LiftingSemanticsTestSupport.hpp"
 #include "Luau/Bytecode.h"
 #include "Luau/BytecodeBuilder.h"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeclarationHoister.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/LoopVariableRenamer.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cctype>
 #include <cstring>
@@ -370,38 +368,16 @@ TEST_CASE("Lift: generated-name shadowing preserves global bindings", "[Decompil
     );
 }
 
-TEST_CASE("Lift: loop variable naming preserves outer header bindings", "[Decompiler][LoopBinding]") {
-    const auto identifier = [](const std::string &name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    for (const bool numeric : {false, true}) {
-        const std::string originalName = numeric ? "i_4" : "v4";
-        auto variable = identifier(originalName);
-        auto header = identifier(originalName);
-        auto bodyUse = identifier(originalName);
-        auto body = std::make_shared<BlockStatementNode>();
-        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{bodyUse}));
-        std::vector<std::shared_ptr<Statement>> statements;
-        if (numeric) {
-            auto loop = std::make_shared<ForNumericNode>();
-            loop->loopVariable = variable;
-            loop->startVariable = header;
-            loop->maxIncreased = identifier(originalName);
-            loop->increaseBy = identifier(originalName);
-            loop->lpLoopBody = body;
-            statements.push_back(loop);
-        } else {
-            auto loop = std::make_shared<ForGeneralNode>();
-            loop->loopVariables = {variable};
-            loop->generator = header;
-            loop->state = identifier(originalName);
-            loop->index = identifier(originalName);
-            loop->body = body;
-            statements.push_back(loop);
-        }
-        LoopVariableRenamer{}.Run(statements);
-        CHECK(header->identifier->name == originalName);
-        CHECK(variable->identifier->name != originalName);
-        CHECK(bodyUse->identifier->name == variable->identifier->name);
-    }
+TEST_CASE("Integration: loop headers read enclosing values", "[Decompiler][LoopBinding][Integration]") {
+    integration_test::Check({
+        R"LUA(local limit = tonumber("3")
+local sum = 0
+for limit = 1, limit do sum += limit end
+print(limit, sum))LUA",
+        R"LUA(local values = { 3, 4 }
+for values, value in ipairs(values) do print(values, value) end
+print(values[1], values[2]))LUA"
+    });
 }
 
 TEST_CASE("Lift: captured anonymous closure keeps one binding", "[Decompiler][ClosureBinding]") {
@@ -495,76 +471,37 @@ TEST_CASE("Lift: empty else block is omitted", "[Decompiler][Readability]") {
     CHECK(Contains(out, "print("));
 }
 
-TEST_CASE("IfChainSimplifier removes only empty else blocks", "[Decompiler][Readability]") {
-    auto condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("value"));
-    auto thenBranch = std::make_shared<BlockStatementNode>();
-    thenBranch->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{}));
-    auto emptyElse = std::make_shared<BlockStatementNode>();
-    auto emptyIf = std::make_shared<IfStatementNode>();
-    emptyIf->condition = condition;
-    emptyIf->thenBranch = thenBranch;
-    emptyIf->elseBranch = emptyElse;
-    std::vector<std::shared_ptr<Statement>> statements{emptyIf};
-    IfChainSimplifier{}.Run(statements);
-    CHECK(emptyIf->elseBranch == nullptr);
-    CHECK(emptyIf->condition == condition);
-    CHECK(emptyIf->thenBranch == thenBranch);
-
-    auto nonemptyElse = std::make_shared<BlockStatementNode>();
-    nonemptyElse->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{}));
-    auto keptIf = std::make_shared<IfStatementNode>();
-    keptIf->condition = condition;
-    keptIf->thenBranch = thenBranch;
-    keptIf->elseBranch = nonemptyElse;
-    statements = {keptIf};
-    IfChainSimplifier{}.Run(statements);
-    CHECK(keptIf->elseBranch == nonemptyElse);
+TEST_CASE("Integration: empty else branches retain conditional effects", "[Decompiler][Readability][Integration]") {
+    integration_test::Check(R"LUA(local log = {}
+for _, value in ipairs({ -1, 0, 2 }) do
+    if value > 0 then log[#log + 1] = "positive" else end
+end
+print(table.concat(log, ","), #log))LUA");
 }
 
-TEST_CASE("IfChainSimplifier inverts empty then without rewriting relational condition", "[Decompiler][Readability]") {
-    auto left = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("value"));
-    auto right = std::make_shared<NumberLiteralNode>(0.0);
-    auto condition = std::make_shared<BinaryExpressionNode>("<", left, right);
-    auto emptyThen = std::make_shared<BlockStatementNode>();
-    auto elseBranch = std::make_shared<BlockStatementNode>();
-    elseBranch->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{}));
-    auto ifNode = std::make_shared<IfStatementNode>();
-    ifNode->condition = condition;
-    ifNode->thenBranch = emptyThen;
-    ifNode->elseBranch = elseBranch;
-    std::vector<std::shared_ptr<Statement>> statements{ifNode};
-    IfChainSimplifier{}.Run(statements);
-    auto inverted = std::dynamic_pointer_cast<UnaryExpressionNode>(ifNode->condition);
-    REQUIRE(inverted);
-    CHECK(inverted->op == "not ");
-    CHECK(inverted->operand == condition);
-    CHECK(ifNode->thenBranch == elseBranch);
-    CHECK(ifNode->elseBranch == nullptr);
+TEST_CASE("Integration: empty then inversion preserves NaN and calls", "[Decompiler][Readability][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local function sample(value) calls += 1; return value end
+local hits = 0
+for _, value in ipairs({ -1, 0, 1, 0 / 0 }) do
+    if sample(value) < 0 then else hits += 1 end
+end
+print(calls, hits))LUA");
 }
 
-TEST_CASE("IfChainSimplifier merges identical elseif arms and keeps trailing else", "[Decompiler][Readability]") {
-    auto makeBody = [] {
-        auto body = std::make_shared<BlockStatementNode>();
-        body->body.push_back(std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{}));
-        return body;
-    };
-    auto outer = std::make_shared<IfStatementNode>();
-    outer->condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("a"));
-    outer->thenBranch = makeBody();
-    auto inner = std::make_shared<IfStatementNode>();
-    inner->condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("b"));
-    inner->thenBranch = makeBody();
-    inner->elseBranch = std::make_shared<BlockStatementNode>();
-    outer->elseBranch = std::make_shared<BlockStatementNode>();
-    outer->elseBranch->body.push_back(inner);
-    std::vector<std::shared_ptr<Statement>> statements{outer};
-    IfChainSimplifier{}.Run(statements);
-    auto condition = std::dynamic_pointer_cast<BinaryExpressionNode>(outer->condition);
-    REQUIRE(condition);
-    CHECK(condition->op == "or");
-    CHECK(std::dynamic_pointer_cast<IdentifierExpressionNode>(condition->left)->identifier->name == "a");
-    CHECK(std::dynamic_pointer_cast<IdentifierExpressionNode>(condition->right)->identifier->name == "b");
-    CHECK(outer->elseBranch == inner->elseBranch);
+TEST_CASE("Integration: merged branch arms preserve order and fallback", "[Decompiler][Readability][Integration]") {
+    integration_test::Check(R"LUA(local log = {}
+local calls = 0
+local function matches(value, expected) calls += 1; return value == expected end
+local function record(value)
+    if matches(value, 1) then log[#log + 1] = "same"
+    elseif matches(value, 2) then log[#log + 1] = "same"
+    else log[#log + 1] = "other" end
+end
+record(1)
+record(2)
+record(3)
+print(table.concat(log, ","), calls))LUA");
 }
 
 TEST_CASE("Lift: FastWait keeps short-circuit duration separate from timer", "[Decompiler][ShortCircuit][Regression]") {

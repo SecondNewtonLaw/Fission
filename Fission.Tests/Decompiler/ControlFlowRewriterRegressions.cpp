@@ -7,15 +7,9 @@
 #include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "ControlFlowRewriterTestSupport.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeadLocalEliminator.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/PropertyRenamer.hpp"
-#include "Rewriters/ReverseFieldRenamer.hpp"
-#include "Rewriters/ScopeAwareRenamer.hpp"
-#include "Rewriters/ScopeBlockIntroducer.hpp"
-#include "Rewriters/SelfAssignmentEliminator.hpp"
 #include "SourceGenerator/Generator.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
@@ -108,287 +102,105 @@ namespace control_flow_regression {
 
 } // namespace control_flow_regression
 
-TEST_CASE("Forward-reference checks include immutable declarations", "[Decompiler][Regression][Const]") {
-    CHECK_FALSE(control_flow_regression::NoForwardReference("print(v1)\nconst v1 = 1\n"));
-    CHECK(control_flow_regression::NoForwardReference("const v1 = 1\nprint(v1)\n"));
-    CHECK_FALSE(control_flow_regression::NoForwardReference("print(v1)\nlocal v1 = 1\n"));
-    CHECK(control_flow_regression::NoForwardReference("local v1 = 1\nprint(v1)\n"));
+TEST_CASE("Integration: initializer reads preserve shadowed bindings", "[Decompiler][Regression][Const][Integration]") {
+    integration_test::Check(R"LUA(local value = tonumber("9")
+local function first() return value end
+do
+    local value = first() + 1
+    local function inner() return value end
+    print(first(), inner(), value)
+end
+print(first(), value))LUA");
 }
 
 using namespace control_flow_regression;
 
-// ScopeBlockIntroducer: do-end scoping of register-reuse phases
-// Register reuse (hence whether the lifter emits a `local vN` redefinition) is too
-// allocation-dependent to force from source reliably, so the wrap/guard logic is unit-tested
-// directly on a hand-built statement list; an end-to-end test then checks recompile-safety.
-namespace scope_regression {
-    std::shared_ptr<VariableDeclarationNode> LocalDecl(const std::string &name, const std::string &valueName) {
-        auto lhs = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
-        auto rhs = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(valueName));
-        return std::make_shared<VariableDeclarationNode>(lhs, rhs);
-    }
-    std::shared_ptr<ExpressionStatementNode> UseStmt(const std::string &name) {
-        return std::make_shared<ExpressionStatementNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)));
-    }
-    bool IsDoBlock(const std::shared_ptr<Statement> &s) {
-        auto b = std::dynamic_pointer_cast<BlockStatementNode>(s);
-        return b && b->bEmitAsDoBlock;
-    }
-} // namespace scope_regression
-
-using namespace scope_regression;
-
-// A redefinition whose prior lifetime is self-contained splits into two `do ... end` scopes.
-TEST_CASE("Scope: self-contained redefinition is split into do-blocks", "[Decompiler][Scope][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(LocalDecl("v0", "x")); // local v0 = x
-    stmts.push_back(UseStmt("v0"));        // v0
-    stmts.push_back(LocalDecl("v0", "y")); // local v0 = y  (redefinition; old v0 dead)
-    stmts.push_back(UseStmt("v0"));        // v0
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    REQUIRE(stmts.size() == 2);
-    CHECK(IsDoBlock(stmts[0]));
-    CHECK(IsDoBlock(stmts[1]));
-    auto b0 = std::dynamic_pointer_cast<BlockStatementNode>(stmts[0]);
-    CHECK(b0->body.size() == 2); // the decl + its use
+TEST_CASE("Integration: reused bindings preserve phase outputs", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local value = tonumber("1")
+print(value)
+do
+    local value = tonumber("2")
+    print(value)
+end
+print(value))LUA");
 }
 
-TEST_CASE("Scope: crossing local moves with the phase that consumes it", "[Decompiler][Scope][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(LocalDecl("v0", "x"));   // local v0 = x
-    stmts.push_back(LocalDecl("keep", "a")); // local keep = a   (escapes the first phase)
-    stmts.push_back(UseStmt("v0"));          // v0
-    stmts.push_back(LocalDecl("v0", "y"));   // local v0 = y     (redefinition)
-    stmts.push_back(UseStmt("keep"));        // keep  <- used AFTER the redefinition
-    stmts.push_back(UseStmt("v0"));          // v0
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    REQUIRE(stmts.size() == 2);
-    CHECK_FALSE(IsDoBlock(stmts[0]));
-    CHECK(IsDoBlock(stmts[1]));
-    auto second = std::dynamic_pointer_cast<BlockStatementNode>(stmts[1]);
-    REQUIRE(second);
-    auto keep = std::dynamic_pointer_cast<VariableDeclarationNode>(second->body[0]);
-    REQUIRE(keep);
-    CHECK(keep->value != nullptr);
+TEST_CASE("Integration: crossing values keep producer order", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local function nextValue() calls += 1; return calls end
+local persistent = nextValue()
+do local value = nextValue(); print(persistent, value) end
+do local value = nextValue(); print(persistent, value) end
+print(persistent, calls))LUA");
 }
 
-TEST_CASE("Scope: crossing result does not exhaust registers across reused temporaries", "[Decompiler][Scope][Regression]") {
-    const auto assign = [](const std::string &left, const std::string &right) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
-        );
-    };
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(LocalDecl("result", "seed"));
-    for (size_t i = 0; i < 205; ++i) {
-        stmts.push_back(LocalDecl("v1", "source"));
-        stmts.push_back(assign("resultSink", "result"));
-        stmts.push_back(assign("valueSink", "v1"));
-    }
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode root{stmts};
-    SourceGenerator generator{};
-    const std::string source = generator.GenerateSource(&root);
-    INFO("rendered source:\n" << source);
-    CHECK(Recompiles(source));
+TEST_CASE("Integration: many temporary phases retain crossing values", "[Decompiler][Scope][Regression][Integration]") {
+    std::string source = "local calls = 0; local function step() calls += 1; return calls end\nlocal saved = step(); local total = 0\n";
+    for (int phase = 0; phase < 205; ++phase)
+        source += "do local temporary = step(); total += saved + temporary end\n";
+    source += "print(saved, total, calls)\n";
+    integration_test::Check(source);
 }
 
-TEST_CASE("Scope: phase boundary keeps a producer with its redeclared consumer", "[Decompiler][Scope][Regression]") {
-    const auto assign = [](const std::string &left, const std::string &right) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
-        );
-    };
-    std::vector<std::shared_ptr<Statement>> stmts{LocalDecl("persistent", "seed"), LocalDecl("v2", "seed")};
-    for (size_t i = 0; i < 205; ++i) {
-        stmts.push_back(LocalDecl("v3", "source"));
-        stmts.push_back(LocalDecl("v2", "v3"));
-        stmts.push_back(assign("persistent", "v2"));
-    }
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode root{stmts};
-    SourceGenerator generator{};
-    const std::string source = generator.GenerateSource(&root);
-    INFO("rendered source:\n" << source);
-    CHECK(Recompiles(source));
+TEST_CASE("Integration: phase consumers use matching producers", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local function nextValue() calls += 1; return calls end
+do local producer = nextValue(); local consumer = producer * 2; print(consumer) end
+do local producer = nextValue(); local consumer = producer * 3; print(consumer) end
+print(calls))LUA");
 }
 
-TEST_CASE("Scope: crossing redeclarations reuse the outer binding", "[Decompiler][Scope][Regression]") {
-    const auto assign = [](const std::string &left, const std::string &right) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
-        );
-    };
-    std::vector<std::shared_ptr<Statement>> stmts{LocalDecl("persistent", "seed"), LocalDecl("v0", "seed"), LocalDecl("v1", "seed")};
-    for (size_t i = 0; i < 205; ++i) {
-        stmts.push_back(LocalDecl("v0", "source"));
-        stmts.push_back(LocalDecl("v1", "other"));
-        stmts.push_back(assign("persistent", "v0"));
-    }
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode root{stmts};
-    SourceGenerator generator{};
-    const std::string source = generator.GenerateSource(&root);
-    INFO("rendered source:\n" << source);
-    CHECK(Recompiles(source));
+TEST_CASE("Integration: phase assignments update surviving binding", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local persistent = 1
+do local value = tonumber("2"); persistent = value; print(persistent) end
+do local value = tonumber("3"); persistent = value; print(persistent) end
+print(persistent))LUA");
 }
 
-TEST_CASE("Scope: demoted redeclaration keeps the original binding visible", "[Decompiler][Scope][Regression]") {
-    std::vector<std::shared_ptr<Statement>> stmts{LocalDecl("v0", "first"),  LocalDecl("v1", "a"), LocalDecl("v1", "b"),
-                                                  LocalDecl("v0", "second"), LocalDecl("v2", "a"), LocalDecl("v2", "b"),
-                                                  LocalDecl("v3", "a"),      LocalDecl("v3", "b"), UseStmt("v0")};
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    REQUIRE_FALSE(stmts.empty());
-    CHECK_FALSE(IsDoBlock(stmts.front()));
-    auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts.front());
-    REQUIRE(declaration);
-    CHECK(std::dynamic_pointer_cast<IdentifierExpressionNode>(declaration->identifier)->identifier->name == "v0");
+TEST_CASE("Integration: later scopes preserve captured values", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local read
+do local value = tonumber("7"); read = function() return value end end
+do local value = tonumber("9"); print(read(), value) end
+print(read()))LUA");
 }
 
-TEST_CASE("Scope: bare crossing redeclaration is not demoted to null assignment", "[Decompiler][Scope][Regression]") {
-    const auto assign = [](const std::string &left, const std::string &right) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(left)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(right))
-        );
-    };
-    std::vector<std::shared_ptr<Statement>> stmts{
-        LocalDecl("v0", "first"),
-        LocalDecl("v1", "a"),
-        std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0")), nullptr),
-        LocalDecl("v1", "b"),
-        LocalDecl("v1", "c"),
-        assign("sink", "v0")
-    };
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    size_t nullAssignments = 0;
-    const auto inspect = [&](const auto &self, const auto &list) -> void {
-        for (const auto &stmt : list) {
-            if (const auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt))
-                nullAssignments += assignment->right == nullptr;
-            if (const auto block = std::dynamic_pointer_cast<BlockStatementNode>(stmt))
-                self(self, block->body);
-        }
-    };
-    inspect(inspect, stmts);
-    CHECK(nullAssignments == 0);
+TEST_CASE("Integration: uninitialized shadowing preserves nil and outer value", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local value = tonumber("23")
+print(value)
+do
+    local value
+    print(value)
+    value = 7
+    print(value)
+end
+print(value))LUA");
 }
 
-TEST_CASE("Scope: repeat condition keeps its body binding visible", "[Decompiler][Scope][Regression]") {
-    auto repeat = std::make_shared<RepeatStatementNode>();
-    repeat->body = std::make_shared<BlockStatementNode>();
-    repeat->body->body = {LocalDecl("v0", "first"), LocalDecl("v0", "second")};
-    repeat->condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0"));
-    std::vector<std::shared_ptr<Statement>> stmts{repeat};
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    REQUIRE(repeat->body->body.size() == 2);
-    CHECK_FALSE(IsDoBlock(repeat->body->body.back()));
+TEST_CASE("Integration: repeat conditions see body bindings", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local total = 0
+repeat
+    local value = calls + 1
+    calls = value
+    do local temporary = value * 2; total += temporary end
+until value == 3
+print(calls, total))LUA");
 }
 
-TEST_CASE("Scope: repeat-carried redeclarations do not exhaust locals", "[Decompiler][Scope][Regression]") {
-    auto repeat = std::make_shared<RepeatStatementNode>();
-    repeat->body = std::make_shared<BlockStatementNode>();
-    repeat->body->body.push_back(LocalDecl("v0", "seed"));
-    for (size_t i = 0; i < 205; ++i)
-        repeat->body->body.push_back(LocalDecl("v0", "v0"));
-    repeat->condition = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("v0"));
-    std::vector<std::shared_ptr<Statement>> stmts{repeat};
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode root{stmts};
-    SourceGenerator generator{};
-    const std::string source = generator.GenerateSource(&root);
-    INFO("rendered source:\n" << source);
-    CHECK(CountOccurrences(source, "local v0") == 1);
-    CHECK(Recompiles(source));
+TEST_CASE("Integration: many repeat phases preserve carried state", "[Decompiler][Scope][Regression][Integration]") {
+    std::string source = "local calls = 0; local function step(value) calls += 1; return value + 1 end\nlocal state = 0\nrepeat\nlocal value = state\n";
+    for (int phase = 0; phase < 205; ++phase)
+        source += "do local temporary = step(value); value = temporary end\n";
+    source += "state = value\nuntil value > 0\nprint(state, calls)\n";
+    integration_test::Check(source);
 }
 
-TEST_CASE("Scope: reused temporary cuts keep a crossing table binding", "[Decompiler][Scope][Regression]") {
-    const auto callDecl = [](const std::string &name, const std::string &callee) {
-        auto call = std::make_shared<CallExpressionNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(callee)), std::vector<std::shared_ptr<Expression>>{},
-            std::vector<std::shared_ptr<Expression>>{std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name))}, false, false
-        );
-        return std::make_shared<ExpressionStatementNode>(call);
-    };
-    const auto callAssign = [](const std::string &name, const std::string &callee) {
-        auto call = std::make_shared<CallExpressionNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(callee)), std::vector<std::shared_ptr<Expression>>{},
-            std::vector<std::shared_ptr<Expression>>{std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name))}, false, false
-        );
-        call->bIsLocalDeclaration = false;
-        return std::make_shared<ExpressionStatementNode>(call);
-    };
-    const auto assign = [](const std::string &name, const std::string &value) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(value))
-        );
-    };
-    const auto memberAssign = [](const std::string &owner, const std::string &field, const std::string &value) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<MemberExpressionNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(owner)), field),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(value))
-        );
-    };
-    const auto member = [](const std::string &owner, const std::string &field) {
-        return std::make_shared<MemberExpressionNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(owner)), field);
-    };
-    std::vector<std::shared_ptr<Statement>> stmts{
-        callDecl("v2", "outer"),
-        callDecl("v2", "color"),
-        memberAssign("sink", "stroke", "v2"),
-        assign("v2", "font"),
-        callDecl("v2", "v2"),
-        memberAssign("sink", "custom", "v2"),
-        callAssign("v2", "shadow"),
-        callDecl("v3", "one"),
-        memberAssign("v2", "a", "v3"),
-        callDecl("v3", "two"),
-        memberAssign("v2", "b", "v3"),
-        callDecl("v3", "three"),
-        memberAssign("v2", "c", "v3"),
-        std::make_shared<ReturnStatementNode>(
-            std::vector<std::shared_ptr<Expression>>{member("v2", "tag"), member("v2", "a"), member("v2", "b"), member("v2", "c")}
-        )
-    };
-    RootNode beforeRoot{stmts};
-    SourceGenerator beforeGenerator{};
-    const std::string before = beforeGenerator.GenerateSource(&beforeRoot);
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode afterRoot{stmts};
-    SourceGenerator afterGenerator{};
-    const std::string after = afterGenerator.GenerateSource(&afterRoot);
-    const std::string prelude = "outer = function() return { tag = 'outer' } end shadow = function() return { tag = 'shadow' } end "
-                                "color = function() return 0 end font = function() return { tag = 'font' } end sink = {} "
-                                "one = function() return 1 end two = function() return 2 end three = function() return 3 end";
-    INFO("rendered source:\n" << after);
-    const auto verdict = fuzz::CompareSemantics(Luau::compile(before), Luau::compile(after), {Luau::compile(prelude)});
-    CHECK(verdict.original.trace == "return: \"shadow\"\t1\t2\t3\n");
-    CHECK(verdict.decompiled.trace == verdict.original.trace);
-    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+TEST_CASE("Integration: temporary phases preserve table identity", "[Decompiler][Scope][Regression][Integration]") {
+    std::string source = "local persistent = { value = 0 }; local alias = persistent\n";
+    for (int phase = 1; phase <= 205; ++phase)
+        source += "do local temporary = { value = " + std::to_string(phase) + " }; persistent.value += temporary.value; alias = persistent end\n";
+    source += "print(rawequal(alias, persistent), persistent.value)\n";
+    integration_test::Check(source);
 }
 
 TEST_CASE("Source: non-finite numbers preserve their values", "[Decompiler][Source][Regression]") {
@@ -505,58 +317,19 @@ TEST_CASE("Regress: lookup guard keeps its fallback for non-string keys", "[Deco
     CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
 }
 
-// End-to-end through the SourceGenerator: a redefinition list renders as two `do ... end` scopes
-// and the rendered source recompiles.
-TEST_CASE("Scope: redefinition renders as do-end and recompiles", "[Decompiler][Scope][Regression]") {
-    auto assign = [](const std::string &lhs, const std::string &rhs) {
-        return std::make_shared<AssignmentStatementNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(lhs)),
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(rhs))
-        );
-    };
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(LocalDecl("v0", "g1")); // local v0 = g1
-    stmts.push_back(assign("h1", "v0"));    // h1 = v0
-    stmts.push_back(LocalDecl("v0", "g2")); // local v0 = g2  (redefinition)
-    stmts.push_back(assign("h2", "v0"));    // h2 = v0
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    RootNode root{stmts};
-    SourceGenerator gen{};
-    const std::string src = gen.GenerateSource(&root);
-
-    INFO("rendered:\n" << src);
-    CHECK(ContainsRegex(src, std::regex(R"((?:^|\n)\s*do\s*(?:\n|$))")));
-    CHECK(ContainsRegex(src, std::regex(R"((?:^|\n)\s*end\s*(?:\n|$))")));
-    CHECK(CountOccurrences(src, "do") >= 2);
-    CHECK(Recompiles(src));
+TEST_CASE("Integration: nested bindings preserve outer values", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local value = tonumber("1")
+do local value = tonumber("2"); print(value) end
+do local value = tonumber("3"); print(value) end
+print(value))LUA");
 }
 
-// Real lifted call-result locals are NameCall/Call nodes (rets + isLocal) wrapped in an
-// ExpressionStatement, NOT VariableDeclaration. The first cut of this feature only knew
-// VariableDeclaration and produced ZERO do-blocks on real output; this guards that exact shape.
-TEST_CASE("Scope: ExpressionStatement-wrapped call-result redefinition is scoped", "[Decompiler][Scope][Regression]") {
-    auto callDecl = [](const std::string &ret, const std::string &obj) {
-        std::vector<std::shared_ptr<Expression>> args;
-        std::vector<std::shared_ptr<Expression>> rets{std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ret))};
-        auto nc = std::make_shared<NameCallExpressionNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(obj)), std::make_shared<StringLiteralNode>("m"), args, rets, false, false
-        );
-        nc->bIsLocalDeclaration = true; // `local ret = obj:m()`
-        return std::make_shared<ExpressionStatementNode>(nc);
-    };
-    std::vector<std::shared_ptr<Statement>> stmts;
-    stmts.push_back(callDecl("v0", "a")); // local v0 = a:m()
-    stmts.push_back(UseStmt("v0"));
-    stmts.push_back(callDecl("v0", "b")); // local v0 = b:m()  (redefinition via call rets)
-    stmts.push_back(UseStmt("v0"));
-
-    ScopeBlockIntroducer{}.Run(stmts);
-
-    REQUIRE(stmts.size() == 2);
-    CHECK(IsDoBlock(stmts[0]));
-    CHECK(IsDoBlock(stmts[1]));
+TEST_CASE("Integration: scoped multiple results retain their bindings", "[Decompiler][Scope][Regression][Integration]") {
+    integration_test::Check(R"LUA(local function pair(n) return n, n + 1 end
+local a, b = pair(1)
+print(a, b)
+do local a, b = pair(3); print(a, b) end
+print(a, b))LUA");
 }
 
 // RequireRenamer: path-style require(...) -> module leaf name

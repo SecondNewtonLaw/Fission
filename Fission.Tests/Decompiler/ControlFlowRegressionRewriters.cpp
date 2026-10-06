@@ -4,20 +4,11 @@
 //
 
 #include "../../Fission.Fuzzing/include/SemanticOracle.hpp"
-#include "AbstractSyntaxTree/ASTNode.hpp"
-#include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "ControlFlowTestSupport.hpp"
 #include "Decompiler.hpp"
+#include "IntegrationTestSupport.hpp"
 #include "Luau/Common.h"
 #include "Luau/Compiler.h"
-#include "Rewriters/DeadLocalEliminator.hpp"
-#include "Rewriters/IfChainSimplifier.hpp"
-#include "Rewriters/PropertyRenamer.hpp"
-#include "Rewriters/ReverseFieldRenamer.hpp"
-#include "Rewriters/ScopeAwareRenamer.hpp"
-#include "Rewriters/ScopeBlockIntroducer.hpp"
-#include "Rewriters/SelfAssignmentEliminator.hpp"
-#include "SourceGenerator/Generator.hpp"
 #include <catch2/catch_test_macros.hpp>
 #include <cstring>
 #include <limits>
@@ -27,61 +18,31 @@
 
 using namespace control_flow_test;
 
-TEST_CASE("Regress: shadowed bare locals preserve initializer reads", "[Decompiler][Rewriter][Regression]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    for (bool readsOld : {false, true}) {
-        auto args = readsOld ? std::vector<std::shared_ptr<Expression>>{id("v2")} : std::vector<std::shared_ptr<Expression>>{};
-        auto call = std::make_shared<CallExpressionNode>(id("get"), args, std::vector<std::shared_ptr<Expression>>{id("v2")}, false, false);
-        auto bare = std::make_shared<VariableDeclarationNode>(id("v2"), nullptr);
-        std::vector<std::shared_ptr<Statement>> statements{
-            bare, std::make_shared<ExpressionStatementNode>(call), std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("v2")})
-        };
-        DeadLocalEliminator{}.Run(statements);
-        CHECK(statements.size() == (readsOld ? 3 : 2));
-        CHECK(call->rets.size() == 1);
-    }
+TEST_CASE("Integration: shadowed initializers preserve previous observations", "[Decompiler][Rewriter][Regression][Integration]") {
+    integration_test::Check(R"LUA(local value = tonumber("3")
+do local value = value + 1; print(value) end
+print(value))LUA");
 }
 
-TEST_CASE("Dead local analysis refreshes names between runs", "[Decompiler][Rewriter][Regression]") {
-    auto id = [](const char *name) { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
-    auto declaration = std::make_shared<VariableDeclarationNode>(id("value"), id("source"));
-    auto result = std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{id("value")});
-    std::vector<std::shared_ptr<Statement>> statements{declaration, result};
-    DeadLocalEliminator eliminator;
-    eliminator.Run(statements);
-    REQUIRE(statements.size() == 2);
-    result->returnValues.front() = id("other");
-    eliminator.Run(statements);
-    CHECK(statements.size() == 1);
+TEST_CASE("Integration: reused decompiler isolates binding state", "[Decompiler][Rewriter][Regression][Integration]") {
+    integration_test::Check({
+        R"LUA(local value = tonumber("2")
+local function read() return value end
+print(read(), value))LUA",
+        R"LUA(local value = tonumber("5")
+value += 3
+print(value))LUA"
+    });
 }
 
-TEST_CASE("Regress: empty then inversion preserves NaN and condition effects", "[Decompiler][Rewriter][Regression]") {
-    auto call = [](const char *name) {
-        return std::make_shared<CallExpressionNode>(
-            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), std::vector<std::shared_ptr<Expression>>{},
-            std::vector<std::shared_ptr<Expression>>{}, false, true
-        );
-    };
-    auto branch = std::make_shared<IfStatementNode>();
-    branch->condition = std::make_shared<BinaryExpressionNode>("<", call("probe"), std::make_shared<NumberLiteralNode>(0));
-    branch->thenBranch = std::make_shared<BlockStatementNode>();
-    branch->elseBranch = std::make_shared<BlockStatementNode>();
-    branch->elseBranch->body.push_back(std::make_shared<ExpressionStatementNode>(call("mark")));
-    const std::string prelude = "local calls, marks = 0, 0\nlocal function probe() calls += 1 return 0/0 end\n"
-                                "local function mark() marks += 1 end\n";
-    auto render = [&] {
-        SourceGenerator generator;
-        branch->Accept(&generator);
-        return prelude + generator.buffer.str() + "\nreturn calls, marks\n";
-    };
-    const auto before = render();
-    std::vector<std::shared_ptr<Statement>> statements{branch};
-    IfChainSimplifier{}.Run(statements);
-    const auto after = render();
-    REQUIRE(Recompiles(after));
-    const auto verdict = fuzz::CompareSemantics(Luau::compile(before), Luau::compile(after), {Luau::compile("")});
-    CHECK(verdict.original.trace == "return: 1\t1\n");
-    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Match);
+TEST_CASE("Integration: relational branches preserve NaN and evaluation counts", "[Decompiler][Rewriter][Regression][Integration]") {
+    integration_test::Check(R"LUA(local calls = 0
+local function sample(value) calls += 1; return value end
+local hits = 0
+for _, value in ipairs({ -1, 0, 1, 0 / 0 }) do
+    if sample(value) < 0 then else hits += 1 end
+end
+print(calls, hits))LUA");
 }
 
 TEST_CASE("Regress: long effectful dispatch shares its result without recursive lifting", "[Decompiler][ControlFlow][Regression]") {
