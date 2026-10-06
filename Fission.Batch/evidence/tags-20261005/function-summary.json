@@ -1,0 +1,766 @@
+{
+  "sampled_cpu_seconds": 20.404039,
+  "top_down_rows": 6179,
+  "hottest_self_functions": [
+    {
+      "function": "malloc_base",
+      "seconds": 3.860964,
+      "percent": 18.922547638729764
+    },
+    {
+      "function": "std::dynamic_pointer_cast",
+      "seconds": 2.4244399999999997,
+      "percent": 11.882157253277155
+    },
+    {
+      "function": "std::__p2286::format",
+      "seconds": 0.781307,
+      "percent": 3.829178134780079
+    },
+    {
+      "function": "std::_Hash<std::_Uset_traits<std::basic_string<char,std::char_traits<char>,std::allocator<char> >,std::_Uhash_compare<std::basic_string<char,std::char_traits<char>,std::allocator<char> >,std::hash<std::basic_string<char,std::char_traits<char>,std::allocator<char> > >,std::equal_to<std::basic_string<char,std::char_traits<char>,std::allocator<char> > > >,std::allocator<std::basic_string<char,std::char_traits<char>,std::allocator<char> > >,0> >::insert",
+      "seconds": 0.44186500000000006,
+      "percent": 2.165576139116378
+    },
+    {
+      "function": "func@0x18000c56f",
+      "seconds": 0.394939,
+      "percent": 1.9355922619046158
+    },
+    {
+      "function": "std::static_pointer_cast",
+      "seconds": 0.36684799999999995,
+      "percent": 1.7979185395597408
+    },
+    {
+      "function": "std::_Hash<std::_Uset_traits<std::basic_string<char,std::char_traits<char>,std::allocator<char> >,std::_Uhash_compare<std::basic_string<char,std::char_traits<char>,std::allocator<char> >,std::hash<std::basic_string<char,std::char_traits<char>,std::allocator<char> > >,std::equal_to<std::basic_string<char,std::char_traits<char>,std::allocator<char> > > >,std::allocator<std::basic_string<char,std::char_traits<char>,std::allocator<char> > >,0> >::~_Hash",
+      "seconds": 0.32160999999999995,
+      "percent": 1.5762075342043795
+    },
+    {
+      "function": "_uncaught_exceptions",
+      "seconds": 0.183706,
+      "percent": 0.9003413490828948
+    },
+    {
+      "function": "std::basic_ios<char,struct std::char_traits<char> >::init",
+      "seconds": 0.166302,
+      "percent": 0.8150445115302907
+    },
+    {
+      "function": "std::vector<std::shared_ptr<Statement>,std::allocator<std::shared_ptr<Statement> > >::~vector",
+      "seconds": 0.152828,
+      "percent": 0.7490085663921736
+    },
+    {
+      "function": "std::basic_ostream<char,struct std::char_traits<char> >::operator<<",
+      "seconds": 0.152389,
+      "percent": 0.7468570315906571
+    },
+    {
+      "function": "std::shared_ptr<Expression>::~shared_ptr",
+      "seconds": 0.152369,
+      "percent": 0.7467590117819319
+    },
+    {
+      "function": "BytecodeLifter::LiftFunctionBytecodeInternal",
+      "seconds": 0.151801,
+      "percent": 0.7439752492141384
+    },
+    {
+      "function": "std::_Hash<std::_Umap_traits<const LiftedInstruction *,std::vector<SSARef,std::allocator<SSARef> >,std::_Uhash_compare<const LiftedInstruction *,std::hash<const LiftedInstruction *>,std::equal_to<const LiftedInstruction *> >,std::allocator<std::pair<const LiftedInstruction *const,std::vector<SSARef,std::allocator<SSARef> > > >,0> >::find",
+      "seconds": 0.15099100000000001,
+      "percent": 0.7400054469607709
+    },
+    {
+      "function": "std::hash<SSARef>::operator()",
+      "seconds": 0.136164,
+      "percent": 0.6673384617623991
+    }
+  ],
+  "malloc_should_inline_seconds": 0,
+  "casts_shared_traversal_seconds": 0,
+  "casts_class_read_checks_seconds": 0,
+  "outermost_inclusive_functions": [
+    {
+      "function": "ASTLifter::Lift",
+      "seconds": 5.505669,
+      "percent": 26.983231114192638
+    },
+    {
+      "function": "DeclarationHoister::Run",
+      "seconds": 1.938205,
+      "percent": 9.499124168504087
+    },
+    {
+      "function": "ASTLifter::ShouldInline",
+      "seconds": 1.7849950000000003,
+      "percent": 8.748243423765267
+    },
+    {
+      "function": "DeadLocalEliminator::Run",
+      "seconds": 1.654341,
+      "percent": 8.107909419306639
+    },
+    {
+      "function": "ClassMethodRewriter::RewriteStatements",
+      "seconds": 0.46672199999999997,
+      "percent": 2.2874000583904
+    }
+  ],
+  "dynamic_cast_callers": [
+    {
+      "function": "DeadLocalEliminator::CollectExpression",
+      "seconds": 0.167033,
+      "percent": 0.8186271355391939
+    },
+    {
+      "function": "PropertyRenamer::ScanSources",
+      "seconds": 0.138077,
+      "percent": 0.6767140564669574
+    },
+    {
+      "function": "DeadLocalEliminator::CollectStatementUncached",
+      "seconds": 0.13733499999999998,
+      "percent": 0.6730775215632552
+    },
+    {
+      "function": "SourceGenerator::Visit",
+      "seconds": 0.12252999999999999,
+      "percent": 0.600518358154481
+    },
+    {
+      "function": "ShortCircuitChainFolder::ExtractIdentifierName",
+      "seconds": 0.092247,
+      "percent": 0.45210166477333236
+    },
+    {
+      "function": "IfExpressionFolder::FoldExpression",
+      "seconds": 0.091573,
+      "percent": 0.4487983972192956
+    },
+    {
+      "function": "ScopeBlockIntroducer::ProcessStatement",
+      "seconds": 0.090947,
+      "percent": 0.4457303772061992
+    },
+    {
+      "function": "ClassMethodRewriter::ExprUsesAsReceiver",
+      "seconds": 0.075465,
+      "percent": 0.3698532432720796
+    },
+    {
+      "function": "InlineRegionMarker::Mark",
+      "seconds": 0.07470000000000002,
+      "percent": 0.3661039855883436
+    },
+    {
+      "function": "IfExpressionFolder::FoldBooleanOrValue",
+      "seconds": 0.062,
+      "percent": 0.3038614070478889
+    },
+    {
+      "function": "CollectBodyUseFactsFromExpression",
+      "seconds": 0.061239,
+      "percent": 0.30013175332589787
+    },
+    {
+      "function": "IfChainSimplifier::Simplify",
+      "seconds": 0.060446999999999994,
+      "percent": 0.29625016890038286
+    },
+    {
+      "function": "DeclarationHoister::CollectStatementMentions",
+      "seconds": 0.060119,
+      "percent": 0.29464264403729085
+    },
+    {
+      "function": "ShortCircuitChainFolder::IsTriviallyDeadIf",
+      "seconds": 0.047145,
+      "percent": 0.23105719411730197
+    },
+    {
+      "function": "DeclarationHoister::PredeclareRepeatConditionLocals",
+      "seconds": 0.046527,
+      "percent": 0.2280283820276956
+    }
+  ],
+  "malloc_callers": [
+    {
+      "function": "ASTLifter::Lift",
+      "seconds": 0.30291,
+      "percent": 1.4845590130463875
+    },
+    {
+      "function": "BytecodeLifter::LiftFunctionBytecodeInternal",
+      "seconds": 0.259027,
+      "percent": 1.2694888497321535
+    },
+    {
+      "function": "AnalyzeDenominators",
+      "seconds": 0.166035,
+      "percent": 0.8137359470838103
+    },
+    {
+      "function": "ASTLifter::CollectReads",
+      "seconds": 0.151987,
+      "percent": 0.7448868334352821
+    },
+    {
+      "function": "DeadLocalEliminator::References::References",
+      "seconds": 0.15154300000000004,
+      "percent": 0.7427107936815845
+    },
+    {
+      "function": "ScopeBlockIntroducer::ProcessList",
+      "seconds": 0.136682,
+      "percent": 0.6698771748083798
+    },
+    {
+      "function": "AnalyzedFunction::AnalyzedFunction",
+      "seconds": 0.13588199999999998,
+      "percent": 0.6659563824593746
+    },
+    {
+      "function": "DeadLocalEliminator::CollectExpression",
+      "seconds": 0.122396,
+      "percent": 0.5998616254360227
+    },
+    {
+      "function": "SSABuilder::RenameBlock",
+      "seconds": 0.11361299999999999,
+      "percent": 0.5568162264343839
+    },
+    {
+      "function": "ControlFlowAnalyzer::LinkBasicBlocks",
+      "seconds": 0.10531100000000002,
+      "percent": 0.5161282038325844
+    },
+    {
+      "function": "DeclarationHoister::RecordTrackedAccess",
+      "seconds": 0.10529300000000001,
+      "percent": 0.5160399860047318
+    },
+    {
+      "function": "DeadLocalEliminator::RewriteStatements",
+      "seconds": 0.077002,
+      "percent": 0.37738606557260546
+    },
+    {
+      "function": "ASTLifter::LiftCall",
+      "seconds": 0.060991,
+      "percent": 0.29891630769770633
+    },
+    {
+      "function": "DeadLocalEliminator::CollectStatementReferences",
+      "seconds": 0.060728,
+      "percent": 0.2976273472129709
+    },
+    {
+      "function": "ComputeLiveness",
+      "seconds": 0.060328,
+      "percent": 0.2956669510384684
+    }
+  ],
+  "repository_self_functions": [
+    {
+      "function": "BytecodeLifter::LiftFunctionBytecodeInternal",
+      "seconds": 0.1518,
+      "percent": 0.7439703482237021
+    },
+    {
+      "function": "std::hash<SSARef>::operator()",
+      "seconds": 0.136164,
+      "percent": 0.6673384617623991
+    },
+    {
+      "function": "ASTLifter::LiftControlFlow",
+      "seconds": 0.106526,
+      "percent": 0.5220829072126356
+    },
+    {
+      "function": "ForEachSubExpression",
+      "seconds": 0.09092800000000001,
+      "percent": 0.44563725838791035
+    },
+    {
+      "function": "ASTLifter::CollectReads",
+      "seconds": 0.09086199999999998,
+      "percent": 0.44531379301911733
+    },
+    {
+      "function": "ASTLifter::Lift",
+      "seconds": 0.09022,
+      "percent": 0.44216735715904093
+    },
+    {
+      "function": "AnalyzeDenominators",
+      "seconds": 0.077876,
+      "percent": 0.38166953121389346
+    },
+    {
+      "function": "DeclarationHoister::WalkStmt",
+      "seconds": 0.077524,
+      "percent": 0.37994438258033125
+    },
+    {
+      "function": "ASTLifter::LiftExpression",
+      "seconds": 0.075715,
+      "percent": 0.3710784908811437
+    },
+    {
+      "function": "ASTLifter::EmitBlockInstructions",
+      "seconds": 0.062077,
+      "percent": 0.30423878331148063
+    },
+    {
+      "function": "ASTRewriter::RewriteExpression",
+      "seconds": 0.061862,
+      "percent": 0.30318507036768555
+    },
+    {
+      "function": "DeclarationHoister::CollectExpr",
+      "seconds": 0.061533,
+      "percent": 0.3015726445141572
+    },
+    {
+      "function": "ClassMethodRewriter::ExpressionReadsIdentifier",
+      "seconds": 0.05704,
+      "percent": 0.2795524944840578
+    },
+    {
+      "function": "ForEachChildBlock<`lambda at F:\\Coding\\cxx_cpp\\Fission\\Fission.Decompiler\\include\\Rewriters\\ScopeAwareRenamer.hpp:215:33'>",
+      "seconds": 0.047117000000000006,
+      "percent": 0.2309199663850868
+    },
+    {
+      "function": "ScopeAwareRenamer::CollectNestedFunctions::<lambda_2>::operator()",
+      "seconds": 0.04659,
+      "percent": 0.22833714442517972
+    }
+  ],
+  "malloc_repository_paths": [
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift"
+      ],
+      "seconds": 0.242642,
+      "percent": 1.1891861214340944
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "BytecodeLifter::LiftDeserializedBytecode",
+        "BytecodeLifter::LiftFunctionBytecodeInternal",
+        "BytecodeLifter::LiftFunctionBytecodeInternal"
+      ],
+      "seconds": 0.22829000000000002,
+      "percent": 1.1188471066929444
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "SSABuilder::Build",
+        "SSABuilder::Build",
+        "SSABuilder::Rename",
+        "SSABuilder::RenameBlock"
+      ],
+      "seconds": 0.098186,
+      "percent": 0.48120864697425836
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ControlFlowAnalyzer::DetermineBasicBlocks",
+        "ControlFlowAnalyzer::DetermineBasicBlocksInternal",
+        "AnalyzedFunction::AnalyzedFunction"
+      ],
+      "seconds": 0.075922,
+      "percent": 0.37209299590144873
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "SSABuilder::Build",
+        "SSABuilder::Build",
+        "SSABuilder::CreatePhiNodes",
+        "ComputeLiveness"
+      ],
+      "seconds": 0.060328,
+      "percent": 0.2956669510384684
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+        "Decompiler::CommonDecompilerEntryImpl::<lambda_25>::operator()",
+        "ScopeBlockIntroducer::Run",
+        "ScopeBlockIntroducer::ProcessList",
+        "ScopeBlockIntroducer::ProcessStatement",
+        "ScopeBlockIntroducer::ProcessList"
+      ],
+      "seconds": 0.060009999999999994,
+      "percent": 0.29410843607973886
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::FindMergeBlock"
+      ],
+      "seconds": 0.046525,
+      "percent": 0.22801858004682307
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ControlFlowAnalyzer::DetermineBasicBlocks",
+        "ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced",
+        "ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced",
+        "ControlFlowAnalyzer::LinkBasicBlocks"
+      ],
+      "seconds": 0.046519000000000005,
+      "percent": 0.22798917410420555
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift",
+        "ASTLifter::ComputeLoopBodies"
+      ],
+      "seconds": 0.046086,
+      "percent": 0.22586704524530657
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift",
+        "ASTLifter::ShouldInline",
+        "ASTLifter::ShouldInlineImpl",
+        "ASTLifter::MustMaterialize",
+        "ASTLifter::ReadLocationChanged",
+        "ASTLifter::CollectReads"
+      ],
+      "seconds": 0.046074,
+      "percent": 0.22580823336007147
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift",
+        "ASTLifter::Lift::<lambda_0>::operator()",
+        "AnalyzeDenominators"
+      ],
+      "seconds": 0.045630000000000004,
+      "percent": 0.22363219360637374
+    },
+    {
+      "path": [
+        "main",
+        "RunWorker",
+        "RunWorkerRequest",
+        "DecompileWorkerInput",
+        "DecompileBytes",
+        "Decompiler::DecompileVanillaBytecode",
+        "Decompiler::CommonDecompilerEntry",
+        "Decompiler::CommonDecompilerEntryImpl",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift",
+        "ControlFlowTask::Run",
+        "ASTLifter::LiftControlFlow",
+        "ASTLifter::LiftBlockInstructions",
+        "ASTLifter::EmitBlockInstructions",
+        "ASTLifter::Lift"
+      ],
+      "seconds": 0.045224,
+      "percent": 0.22164239148925366
+    }
+  ],
+  "direct_children_of_entry": [
+    {
+      "function": "ASTLifter::Lift",
+      "seconds": 5.505669
+    },
+    {
+      "function": "BytecodeLifter::LiftDeserializedBytecode",
+      "seconds": 1.062845
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 1.025292
+    },
+    {
+      "function": "SSABuilder::Build",
+      "seconds": 1.022899
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.847606
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.7474
+    },
+    {
+      "function": "SourceGenerator::GenerateSource",
+      "seconds": 0.705298
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.637228
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.609722
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.599175
+    },
+    {
+      "function": "ControlFlowAnalyzer::DetermineBasicBlocks",
+      "seconds": 0.542843
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.528958
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.50386
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.397218
+    },
+    {
+      "function": "ControlFlowAnalyzer::OptimizeGraph",
+      "seconds": 0.361053
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.323124
+    },
+    {
+      "function": "RobloxTypeInferer::Infer",
+      "seconds": 0.319531
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.274826
+    },
+    {
+      "function": "std::__p2286::format",
+      "seconds": 0.24231
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.230163
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.229353
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.211478
+    },
+    {
+      "function": "ConstLocalMarker::Run",
+      "seconds": 0.199411
+    },
+    {
+      "function": "InferTypes",
+      "seconds": 0.198111
+    },
+    {
+      "function": "LiftedFunction::~LiftedFunction",
+      "seconds": 0.184155
+    },
+    {
+      "function": "ControlFlowAnalyzer::IdentifyStructures",
+      "seconds": 0.166318
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.152112
+    },
+    {
+      "function": "ScopeAwareRenamer::PruneStaleRenameComments",
+      "seconds": 0.137258
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.136109
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.122545
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.108328
+    },
+    {
+      "function": "AnalyzedFunction::~AnalyzedFunction",
+      "seconds": 0.107485
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.107211
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.092424
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.091411
+    },
+    {
+      "function": "Deserializer::Deserialize",
+      "seconds": 0.076212
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.073145
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.060605
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.060512
+    },
+    {
+      "function": "Decompiler::CommonDecompilerEntryImpl::<lambda_2>::operator()",
+      "seconds": 0.04607
+    },
+    {
+      "function": "std::_Optional_destruct_base<DeserializedBytecode,0>::~_Optional_destruct_base",
+      "seconds": 0.029954
+    },
+    {
+      "function": "std::chrono::steady_clock::now",
+      "seconds": 0.01562
+    },
+    {
+      "function": "ControlFlowAnalyzer::DetermineBasicBlocks",
+      "seconds": 0.015433
+    },
+    {
+      "function": "RecoverInlinedCalls",
+      "seconds": 0.015405
+    }
+  ]
+}

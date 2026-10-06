@@ -34,21 +34,22 @@ class DeadLocalEliminator : public ASTRewriter {
         if (m_tailScopeExpr)
             CollectExpression(m_tailScopeExpr, tail);
         for (size_t i = stmts.size(); i-- > 0;) {
-            auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[i]);
+            auto decl =
+                stmts[i] && stmts[i]->nodeKind == ASTNodeKind::VariableDeclaration ? std::static_pointer_cast<VariableDeclarationNode>(stmts[i]) : nullptr;
             std::string name;
-            if (decl && SimpleLocalName(decl, name) && IsPure(decl->value)) {
+            const bool namedLocal = decl && SimpleLocalName(decl, name);
+            if (namedLocal && IsPure(decl->value)) {
                 const auto next = later.find(name);
                 if (next == later.end() ? !tail.contains(name) : !next->second) {
                     keep[i] = false;
                     continue;
                 }
             }
-            std::unordered_set<std::string> names;
-            CollectStatement(stmts[i], names);
-            for (const auto &mentioned : names)
+            const auto &references = CollectStatementReferences(stmts[i]);
+            for (const auto &mentioned : references.names)
                 later[mentioned] = true;
-            if (decl && SimpleLocalName(decl, name))
-                later[name] = MentionsExpression(decl->value, name);
+            if (namedLocal)
+                later[name] = references.initializerReadsName;
             else if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmts[i])) {
                 RecordCallShadows(std::dynamic_pointer_cast<CallExpressionNode>(es->expression), later);
                 RecordCallShadows(std::dynamic_pointer_cast<NameCallExpressionNode>(es->expression), later);
@@ -62,23 +63,37 @@ class DeadLocalEliminator : public ASTRewriter {
     }
 
   private:
-    std::unordered_map<const Statement *, std::unordered_set<std::string>> m_collected;
+    struct References {
+        std::unordered_set<std::string> names;
+        bool initializerReadsName = false;
+    };
+    std::unordered_map<const Statement *, References> m_collected;
     // `local a, b = f(...)` redeclares its results; each stays read only if the call itself reads it
     template <typename Call> void RecordCallShadows(const std::shared_ptr<Call> &call, std::unordered_map<std::string, bool> &later) {
-        if (!call || call->inlineCall || !call->bIsLocalDeclaration)
+        if (!call || call->inlineCall || !call->bIsLocalDeclaration || call->rets.empty())
             return;
         auto initializer = std::make_shared<Call>(*call);
         initializer->rets.clear();
+        std::unordered_set<std::string> initializerNames;
+        bool collected = false;
         for (const auto &result : call->rets) {
             std::unordered_set<std::string> declared;
             CollectExpression(result, declared);
-            for (const auto &name : declared)
-                later[name] = MentionsExpression(initializer, name);
+            for (const auto &name : declared) {
+                if (!collected) {
+                    CollectExpression(initializer, initializerNames);
+                    collected = true;
+                }
+                later[name] = initializerNames.contains(name);
+            }
         }
     }
 
     static bool SimpleLocalName(const std::shared_ptr<VariableDeclarationNode> &decl, std::string &out) {
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier); id && id->identifier) {
+        if (auto id = decl->identifier && decl->identifier->nodeKind == ASTNodeKind::IdentifierExpression
+                          ? std::static_pointer_cast<IdentifierExpressionNode>(decl->identifier)
+                          : nullptr;
+            id && id->identifier) {
             out = id->identifier->name;
             return !out.empty();
         }
@@ -91,19 +106,19 @@ class DeadLocalEliminator : public ASTRewriter {
     enum class Ty { Number, Integer, String, Bool, Nil, Table, Function, Vector, Unknown };
 
     static Ty TypeOf(const std::shared_ptr<Expression> &e) {
-        if (std::dynamic_pointer_cast<IntegerLiteralNode>(e))
+        if (AsLiteral<IntegerLiteralNode>(e))
             return Ty::Integer;
-        if (std::dynamic_pointer_cast<NumberLiteralNode>(e))
+        if (AsLiteral<NumberLiteralNode>(e))
             return Ty::Number;
-        if (std::dynamic_pointer_cast<StringLiteralNode>(e))
+        if (AsLiteral<StringLiteralNode>(e))
             return Ty::String;
-        if (std::dynamic_pointer_cast<BooleanLiteralNode>(e))
+        if (AsLiteral<BooleanLiteralNode>(e))
             return Ty::Bool;
-        if (std::dynamic_pointer_cast<NilLiteralNode>(e))
+        if (AsLiteral<NilLiteralNode>(e))
             return Ty::Nil;
-        if (std::dynamic_pointer_cast<TableLiteralNode>(e))
+        if (AsLiteral<TableLiteralNode>(e))
             return Ty::Table;
-        if (std::dynamic_pointer_cast<VectorNode>(e))
+        if (AsLiteral<VectorNode>(e))
             return Ty::Vector;
         if (std::dynamic_pointer_cast<FunctionDeclarationNode>(e))
             return Ty::Function;
@@ -119,9 +134,8 @@ class DeadLocalEliminator : public ASTRewriter {
     static bool IsPure(const std::shared_ptr<Expression> &e) {
         if (!e) // bare `local X`
             return true;
-        if (std::dynamic_pointer_cast<NilLiteralNode>(e) || std::dynamic_pointer_cast<BooleanLiteralNode>(e) ||
-            std::dynamic_pointer_cast<NumberLiteralNode>(e) || std::dynamic_pointer_cast<IntegerLiteralNode>(e) ||
-            std::dynamic_pointer_cast<StringLiteralNode>(e) || std::dynamic_pointer_cast<VectorNode>(e))
+        if (AsLiteral<NilLiteralNode>(e) || AsLiteral<BooleanLiteralNode>(e) || AsLiteral<NumberLiteralNode>(e) || AsLiteral<IntegerLiteralNode>(e) ||
+            AsLiteral<StringLiteralNode>(e) || AsLiteral<VectorNode>(e))
             return true;
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e))
             return id->identifier && !id->identifier->bIsGlobal;
@@ -142,7 +156,7 @@ class DeadLocalEliminator : public ASTRewriter {
         // table constructor key=value entry: the store into a fresh table cannot run metamethods,
         // but a nil (or unknown-and-possibly-nil) key raises "table index is nil".
         if (auto tentry = std::dynamic_pointer_cast<TableBinaryExpressionNode>(e)) {
-            if (auto key = std::dynamic_pointer_cast<NumberLiteralNode>(tentry->left);
+            if (auto key = AsLiteral<NumberLiteralNode>(tentry->left);
                 key && (std::bit_cast<uint64_t>(key->value) & 0x7fffffffffffffffULL) > 0x7ff0000000000000ULL)
                 return false;
             const Ty kt = TypeOf(tentry->left);
@@ -152,7 +166,7 @@ class DeadLocalEliminator : public ASTRewriter {
             return IsPure(bin->left) && IsPure(bin->right) && OpIsThrowFree(bin->op, bin->left, bin->right);
         if (auto cbin = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(e))
             return IsPure(cbin->left) && IsPure(cbin->right) && OpIsThrowFree(cbin->op, cbin->left, cbin->right);
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(e)) {
+        if (auto tbl = AsLiteral<TableLiteralNode>(e)) {
             for (const auto &entry : tbl->expressions)
                 if (!IsPure(entry))
                     return false;
@@ -181,12 +195,6 @@ class DeadLocalEliminator : public ASTRewriter {
         return false;
     }
 
-    bool MentionsExpression(const std::shared_ptr<Expression> &e, const std::string &name) {
-        std::unordered_set<std::string> names;
-        CollectExpression(e, names);
-        return names.contains(name);
-    }
-
     void CollectBlock(const std::shared_ptr<BlockStatementNode> &block, std::unordered_set<std::string> &out) {
         if (block)
             for (const auto &s : block->body)
@@ -194,29 +202,44 @@ class DeadLocalEliminator : public ASTRewriter {
     }
 
     void CollectExpression(const std::shared_ptr<Expression> &e, std::unordered_set<std::string> &out) {
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(e)) {
+        if (auto id = e && e->nodeKind == ASTNodeKind::IdentifierExpression ? std::static_pointer_cast<IdentifierExpressionNode>(e) : nullptr) {
             if (id->identifier)
                 out.insert(id->identifier->name);
         } else if (auto identifier = std::dynamic_pointer_cast<Identifier>(e)) {
             out.insert(identifier->name);
-        } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(e)) {
+        } else if (auto fn = e && e->nodeKind == ASTNodeKind::FunctionDeclarationNode ? std::static_pointer_cast<FunctionDeclarationNode>(e) : nullptr) {
             CollectBlock(fn->lpFunctionBody, out);
         } else {
             ForEachSubExpression(e, [&](const std::shared_ptr<Expression> &child) { CollectExpression(child, out); });
         }
     }
 
-    void CollectStatement(const std::shared_ptr<Statement> &s, std::unordered_set<std::string> &out) {
+    const References &CollectStatementReferences(const std::shared_ptr<Statement> &s) {
+        static const References kEmpty;
         if (!s)
-            return;
-        if (const auto it = m_collected.find(s.get()); it != m_collected.end()) {
-            out.insert(it->second.begin(), it->second.end());
-            return;
+            return kEmpty;
+        if (const auto it = m_collected.find(s.get()); it != m_collected.end())
+            return it->second;
+        References references;
+        std::string name;
+        if (auto declaration = s->nodeKind == ASTNodeKind::VariableDeclaration ? std::static_pointer_cast<VariableDeclarationNode>(s) : nullptr;
+            declaration && SimpleLocalName(declaration, name)) {
+            CollectExpression(declaration->value, references.names);
+            references.initializerReadsName = references.names.contains(name);
+            CollectExpression(declaration->identifier, references.names);
+            if (declaration->type)
+                CollectExpression(*declaration->type, references.names);
+        } else {
+            CollectStatementUncached(s, references.names);
         }
-        std::unordered_set<std::string> names;
-        CollectStatementUncached(s, names);
+        return m_collected.emplace(s.get(), std::move(references)).first->second;
+    }
+
+    const std::unordered_set<std::string> &CollectStatement(const std::shared_ptr<Statement> &s) { return CollectStatementReferences(s).names; }
+
+    void CollectStatement(const std::shared_ptr<Statement> &s, std::unordered_set<std::string> &out) {
+        const auto &names = CollectStatement(s);
         out.insert(names.begin(), names.end());
-        m_collected.emplace(s.get(), std::move(names));
     }
 
     void CollectStatementUncached(const std::shared_ptr<Statement> &s, std::unordered_set<std::string> &out) {

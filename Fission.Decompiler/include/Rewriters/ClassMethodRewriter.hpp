@@ -2,6 +2,7 @@
 
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
+#include "AbstractSyntaxTree/Traversal.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 
 #include <cctype>
@@ -32,23 +33,25 @@ class ClassMethodRewriter : public ASTRewriter {
         // current statement into a method declaration. Tombstoned statements
         // are nulled out and filtered at the end.
         std::vector<bool> removed(stmts.size(), false);
+        std::optional<std::vector<size_t>> bindingSites;
         for (size_t i = 0; i < stmts.size(); ++i) {
             if (removed[i])
                 continue;
-            auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmts[i]);
+            auto asn =
+                stmts[i] && stmts[i]->nodeKind == ASTNodeKind::AssignmentStatement ? std::static_pointer_cast<AssignmentStatementNode>(stmts[i]) : nullptr;
             if (!asn)
                 continue;
-            auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(asn->left);
+            auto mem = asn->left && asn->left->nodeKind == ASTNodeKind::MemberExpression ? std::static_pointer_cast<MemberExpressionNode>(asn->left) : nullptr;
             if (!mem || !mem->table || !mem->key)
                 continue;
-            auto tblId = std::dynamic_pointer_cast<IdentifierExpressionNode>(mem->table);
+            auto tblId = mem->table->nodeKind == ASTNodeKind::IdentifierExpression ? std::static_pointer_cast<IdentifierExpressionNode>(mem->table) : nullptr;
             if (!tblId || !tblId->identifier)
                 continue;
             const bool isClass = classes.contains(tblId->identifier->name);
             const bool isModule = moduleTables.contains(tblId->identifier->name);
             if (!isClass && !isModule)
                 continue;
-            auto keyStr = std::dynamic_pointer_cast<StringLiteralNode>(mem->key);
+            auto keyStr = AsLiteral<StringLiteralNode>(mem->key);
             if (!keyStr)
                 continue;
             if (keyStr->value.size() >= 2 && keyStr->value[0] == '_' && keyStr->value[1] == '_')
@@ -62,11 +65,20 @@ class ClassMethodRewriter : public ASTRewriter {
             std::optional<size_t> sourceIndex;
             std::string sourceName;
 
-            if (auto direct = std::dynamic_pointer_cast<FunctionDeclarationNode>(asn->right)) {
+            if (auto direct = asn->right && asn->right->nodeKind == ASTNodeKind::FunctionDeclarationNode
+                                  ? std::static_pointer_cast<FunctionDeclarationNode>(asn->right)
+                                  : nullptr) {
                 fn = direct;
             } else if (auto rhsId = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->right); rhsId && rhsId->identifier) {
                 sourceName = rhsId->identifier->name;
-                auto found = FindClosureSource(stmts, removed, i, sourceName);
+                if (!bindingSites) {
+                    bindingSites.emplace();
+                    for (size_t j = 0; j < stmts.size(); ++j)
+                        if (stmts[j] && (stmts[j]->nodeKind == ASTNodeKind::FunctionDeclarationNode || stmts[j]->nodeKind == ASTNodeKind::VariableDeclaration ||
+                                         stmts[j]->nodeKind == ASTNodeKind::AssignmentStatement || stmts[j]->nodeKind == ASTNodeKind::CompoundAssignment))
+                            bindingSites->push_back(j);
+                }
+                auto found = FindClosureSource(stmts, removed, *bindingSites, i, sourceName);
                 if (!found.has_value())
                     continue;
                 sourceIndex = found->first;
@@ -147,17 +159,18 @@ class ClassMethodRewriter : public ASTRewriter {
     static void CollectClassesFromStatement(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &out) {
         if (!stmt)
             return;
-        auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt);
+        auto asn = stmt->nodeKind == ASTNodeKind::AssignmentStatement ? std::static_pointer_cast<AssignmentStatementNode>(stmt) : nullptr;
         if (!asn)
             return;
-        auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(asn->left);
+        auto mem = asn->left && asn->left->nodeKind == ASTNodeKind::MemberExpression ? std::static_pointer_cast<MemberExpressionNode>(asn->left) : nullptr;
         if (!mem || !mem->table || !mem->key)
             return;
-        auto key = std::dynamic_pointer_cast<StringLiteralNode>(mem->key);
+        auto key = AsLiteral<StringLiteralNode>(mem->key);
         if (!key || key->value != "__index")
             return;
-        auto lhsId = std::dynamic_pointer_cast<IdentifierExpressionNode>(mem->table);
-        auto rhsId = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->right);
+        auto lhsId = mem->table->nodeKind == ASTNodeKind::IdentifierExpression ? std::static_pointer_cast<IdentifierExpressionNode>(mem->table) : nullptr;
+        auto rhsId =
+            asn->right && asn->right->nodeKind == ASTNodeKind::IdentifierExpression ? std::static_pointer_cast<IdentifierExpressionNode>(asn->right) : nullptr;
         if (!lhsId || !rhsId || !lhsId->identifier || !rhsId->identifier)
             return;
         if (lhsId->identifier->name == rhsId->identifier->name)
@@ -170,15 +183,18 @@ class ClassMethodRewriter : public ASTRewriter {
     static void CollectModuleTableFromStatement(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &out) {
         if (!stmt)
             return;
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier);
-            if (id && id->identifier && std::dynamic_pointer_cast<TableLiteralNode>(decl->value))
+        if (auto decl = stmt->nodeKind == ASTNodeKind::VariableDeclaration ? std::static_pointer_cast<VariableDeclarationNode>(stmt) : nullptr) {
+            auto id = decl->identifier && decl->identifier->nodeKind == ASTNodeKind::IdentifierExpression
+                          ? std::static_pointer_cast<IdentifierExpressionNode>(decl->identifier)
+                          : nullptr;
+            if (id && id->identifier && AsLiteral<TableLiteralNode>(decl->value))
                 out.insert(id->identifier->name);
             return;
         }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
-            auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left);
-            if (id && id->identifier && std::dynamic_pointer_cast<TableLiteralNode>(asn->right))
+        if (auto asn = stmt->nodeKind == ASTNodeKind::AssignmentStatement ? std::static_pointer_cast<AssignmentStatementNode>(stmt) : nullptr) {
+            auto id =
+                asn->left && asn->left->nodeKind == ASTNodeKind::IdentifierExpression ? std::static_pointer_cast<IdentifierExpressionNode>(asn->left) : nullptr;
+            if (id && id->identifier && AsLiteral<TableLiteralNode>(asn->right))
                 out.insert(id->identifier->name);
             return;
         }
@@ -205,9 +221,13 @@ class ClassMethodRewriter : public ASTRewriter {
     //   `local function name(...) end`          -> FunctionDeclarationNode
     //   `local name = function(...) end`        -> VariableDeclarationNode
     //   `name = function(...) end`              -> AssignmentStatementNode
-    static std::optional<std::pair<size_t, std::shared_ptr<FunctionDeclarationNode>>>
-    FindClosureSource(const std::vector<std::shared_ptr<Statement>> &stmts, const std::vector<bool> &removed, size_t before, const std::string &name) {
-        for (size_t j = before; j-- > 0;) {
+    static std::optional<std::pair<size_t, std::shared_ptr<FunctionDeclarationNode>>> FindClosureSource(
+        const std::vector<std::shared_ptr<Statement>> &stmts, const std::vector<bool> &removed, const std::vector<size_t> &bindingSites, size_t before,
+        const std::string &name
+    ) {
+        auto site = std::ranges::lower_bound(bindingSites, before);
+        while (site != bindingSites.begin()) {
+            const size_t j = *--site;
             if (removed[j])
                 continue;
             const auto &s = stmts[j];
@@ -292,7 +312,9 @@ class ClassMethodRewriter : public ASTRewriter {
     static bool StatementReadsIdentifier(const std::shared_ptr<Statement> &stmt, const std::string &name) {
         if (!stmt)
             return false;
-        if (auto ifS = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
+        switch (stmt->nodeKind) {
+        case ASTNodeKind::IfStatement: {
+            const auto ifS = std::static_pointer_cast<IfStatementNode>(stmt);
             if (ExpressionReadsIdentifier(ifS->condition, name))
                 return true;
             if (BlockReadsIdentifier(ifS->thenBranch, name))
@@ -301,43 +323,58 @@ class ClassMethodRewriter : public ASTRewriter {
                 return true;
             return false;
         }
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+        case ASTNodeKind::FunctionDeclarationNode: {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(stmt);
             if (HasArgNamed(fn->argumentsNames, name))
                 return false;
             return BlockReadsIdentifier(fn->lpFunctionBody, name);
         }
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt))
+        case ASTNodeKind::WhileStatement: {
+            const auto w = std::static_pointer_cast<WhileStatementNode>(stmt);
             return ExpressionReadsIdentifier(w->condition, name) || BlockReadsIdentifier(w->body, name);
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt))
+        }
+        case ASTNodeKind::RepeatStatement: {
+            const auto r = std::static_pointer_cast<RepeatStatementNode>(stmt);
             return ExpressionReadsIdentifier(r->condition, name) || BlockReadsIdentifier(r->body, name);
-        if (auto fnum = std::dynamic_pointer_cast<ForNumericNode>(stmt))
+        }
+        case ASTNodeKind::ForNumeric: {
+            const auto fnum = std::static_pointer_cast<ForNumericNode>(stmt);
             return ExpressionReadsIdentifier(fnum->startVariable, name) || ExpressionReadsIdentifier(fnum->maxIncreased, name) ||
                    ExpressionReadsIdentifier(fnum->increaseBy, name) || BlockReadsIdentifier(fnum->lpLoopBody, name);
-        if (auto fgen = std::dynamic_pointer_cast<ForGeneralNode>(stmt))
+        }
+        case ASTNodeKind::ForGeneral: {
+            const auto fgen = std::static_pointer_cast<ForGeneralNode>(stmt);
             return ExpressionReadsIdentifier(fgen->generator, name) || BlockReadsIdentifier(fgen->body, name);
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
+        }
+        case ASTNodeKind::AssignmentStatement: {
+            const auto asn = std::static_pointer_cast<AssignmentStatementNode>(stmt);
             // A bare-identifier LHS (`v42 = ...`) is a write, not a read, and
             // doesn't extend `name`'s live range. Only descend when the LHS is
             // a member/index expression -- then `name` may appear in the
             // table/key position as a genuine read (`t[name] = ...`).
-            if (!std::dynamic_pointer_cast<IdentifierExpressionNode>(asn->left))
+            if (!asn->left || asn->left->nodeKind != ASTNodeKind::IdentifierExpression)
                 if (ExpressionReadsIdentifier(asn->left, name))
                     return true;
             return ExpressionReadsIdentifier(asn->right, name);
         }
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
+        case ASTNodeKind::VariableDeclaration: {
+            const auto decl = std::static_pointer_cast<VariableDeclarationNode>(stmt);
             return ExpressionReadsIdentifier(decl->value, name);
-        if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt))
+        }
+        case ASTNodeKind::ExpressionStatement: {
+            const auto es = std::static_pointer_cast<ExpressionStatementNode>(stmt);
             return ExpressionReadsIdentifier(es->expression, name);
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
+        }
+        case ASTNodeKind::ReturnExpression: {
+            const auto ret = std::static_pointer_cast<ReturnStatementNode>(stmt);
             for (const auto &v : ret->returnValues)
                 if (ExpressionReadsIdentifier(v, name))
                     return true;
             return false;
         }
-        if (auto expr = std::dynamic_pointer_cast<Expression>(stmt))
-            return ExpressionReadsIdentifier(expr, name);
-        return false;
+        default:
+            return ExpressionReadsIdentifier(AsExpression(stmt), name);
+        }
     }
 
     static bool BlockReadsIdentifier(const std::shared_ptr<BlockStatementNode> &block, const std::string &name) {
@@ -352,13 +389,21 @@ class ClassMethodRewriter : public ASTRewriter {
     static bool ExpressionReadsIdentifier(const std::shared_ptr<Expression> &expr, const std::string &name) {
         if (!expr)
             return false;
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr))
+        switch (expr->nodeKind) {
+        case ASTNodeKind::IdentifierExpression: {
+            const auto id = std::static_pointer_cast<IdentifierExpressionNode>(expr);
             return id->identifier && id->identifier->name == name;
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr))
+        }
+        case ASTNodeKind::MemberExpression: {
+            const auto mem = std::static_pointer_cast<MemberExpressionNode>(expr);
             return ExpressionReadsIdentifier(mem->table, name) || ExpressionReadsIdentifier(mem->key, name);
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr))
+        }
+        case ASTNodeKind::IndexExpression: {
+            const auto idx = std::static_pointer_cast<IndexExpressionNode>(expr);
             return ExpressionReadsIdentifier(idx->left, name) || ExpressionReadsIdentifier(idx->right, name);
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
+        }
+        case ASTNodeKind::CallExpression: {
+            const auto call = std::static_pointer_cast<CallExpressionNode>(expr);
             if (ExpressionReadsIdentifier(call->callee, name))
                 return true;
             for (const auto &a : call->arguments)
@@ -366,7 +411,8 @@ class ClassMethodRewriter : public ASTRewriter {
                     return true;
             return false;
         }
-        if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
+        case ASTNodeKind::MethodCallExpression: {
+            const auto nameCall = std::static_pointer_cast<NameCallExpressionNode>(expr);
             if (ExpressionReadsIdentifier(nameCall->calledOn, name))
                 return true;
             for (const auto &a : nameCall->arguments)
@@ -374,27 +420,42 @@ class ClassMethodRewriter : public ASTRewriter {
                     return true;
             return false;
         }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr))
+        case ASTNodeKind::BinaryExpression:
+        case ASTNodeKind::TableBinaryExpression: {
+            const auto bin = std::static_pointer_cast<BinaryExpressionNode>(expr);
             return ExpressionReadsIdentifier(bin->left, name) || ExpressionReadsIdentifier(bin->right, name);
-        if (auto compound = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr))
+        }
+        case ASTNodeKind::CompoundAssignment: {
+            const auto compound = std::static_pointer_cast<CompoundBinaryExpressionNode>(expr);
             return ExpressionReadsIdentifier(compound->left, name) || ExpressionReadsIdentifier(compound->right, name);
-        if (auto ifExpr = std::dynamic_pointer_cast<IfExpressionNode>(expr))
+        }
+        case ASTNodeKind::IfExpression: {
+            const auto ifExpr = std::static_pointer_cast<IfExpressionNode>(expr);
             return ExpressionReadsIdentifier(ifExpr->condition, name) || ExpressionReadsIdentifier(ifExpr->thenExpr, name) ||
                    ExpressionReadsIdentifier(ifExpr->elseExpr, name);
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr))
+        }
+        case ASTNodeKind::UnaryExpression: {
+            const auto un = std::static_pointer_cast<UnaryExpressionNode>(expr);
             return ExpressionReadsIdentifier(un->operand, name);
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
+        }
+        case ASTNodeKind::LiteralValue: {
+            if (!std::static_pointer_cast<LiteralNode>(expr)->bIsTableLiteral)
+                return false;
+            const auto tbl = std::static_pointer_cast<TableLiteralNode>(expr);
             for (const auto &e : tbl->expressions)
                 if (ExpressionReadsIdentifier(e, name))
                     return true;
             return false;
         }
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+        case ASTNodeKind::FunctionDeclarationNode: {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(expr);
             if (HasArgNamed(fn->argumentsNames, name))
                 return false;
             return BlockReadsIdentifier(fn->lpFunctionBody, name);
         }
-        return false;
+        default:
+            return false;
+        }
     }
 
     static std::string ExtractArgName(const std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>> &args, int32_t index) {
@@ -519,7 +580,7 @@ class ClassMethodRewriter : public ASTRewriter {
             RenameIdentifiersInExpression(un->operand, from, to);
             return;
         }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
+        if (auto tbl = AsLiteral<TableLiteralNode>(expr)) {
             for (auto &e : tbl->expressions)
                 RenameIdentifiersInExpression(e, from, to);
             return;
@@ -576,7 +637,7 @@ class ClassMethodRewriter : public ASTRewriter {
             return ExprUsesAsReceiver(bin->left, name) || ExprUsesAsReceiver(bin->right, name);
         if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr))
             return ExprUsesAsReceiver(un->operand, name);
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
+        if (auto tbl = AsLiteral<TableLiteralNode>(expr)) {
             for (const auto &e : tbl->expressions)
                 if (ExprUsesAsReceiver(e, name))
                     return true;

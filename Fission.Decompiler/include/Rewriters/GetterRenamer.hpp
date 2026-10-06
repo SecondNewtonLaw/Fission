@@ -44,7 +44,7 @@ class GetterRenamer {
     // Callee name of a `obj.Method()` / `Method()` plain call.
     static std::string CallMethod(const std::shared_ptr<CallExpressionNode> &call) {
         if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(call->callee)) {
-            if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(mem->key))
+            if (auto key = AsLiteral<StringLiteralNode>(mem->key))
                 return key->value;
         }
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(call->callee); id && id->identifier)

@@ -129,10 +129,8 @@ struct AnalyzedFunction {
 
     [[nodiscard]] LiftedInstruction *GetDefinition(const LiftedOperand &operand) const {
         const auto ssaRef = SSARef{operand.value.reg, operand.ssaVersion};
-        if (!definitionMap.contains(ssaRef))
-            return nullptr;
-
-        return definitionMap.at(ssaRef);
+        const auto definition = definitionMap.find(ssaRef);
+        return definition != definitionMap.end() ? definition->second : nullptr;
     }
 
     [[nodiscard]] bool IsConsumedByPhi(const LiftedOperand &op) const {
@@ -270,14 +268,13 @@ struct AnalyzedFunction {
 
     // an automatic name must not spell a reserved debug name, nor one of its shadow suffixes
     bool IsReservedName(const std::string &name) const {
-        if (globalAutoNameCollisions.contains(name))
+        if (globalAutoNameCollisions.contains(name) || reservedDebugNames.contains(name))
             return true;
-        for (const auto &reserved : reservedDebugNames)
-            if (name == reserved || (name.size() > reserved.size() + 1 && name.starts_with(reserved) && name[reserved.size()] == '_' &&
-                                     std::all_of(name.begin() + static_cast<std::ptrdiff_t>(reserved.size() + 1), name.end(),
-                                                 [](char c) { return std::isdigit(static_cast<unsigned char>(c)); })))
-                return true;
-        return false;
+        const auto separator = name.find_last_of('_');
+        return separator != std::string::npos && separator + 1 < name.size() && reservedDebugNames.contains(name.substr(0, separator)) &&
+               std::all_of(name.begin() + static_cast<std::ptrdiff_t>(separator + 1), name.end(), [](char c) {
+                   return std::isdigit(static_cast<unsigned char>(c));
+               });
     }
 
     void SetGlobalName(int32_t reg, const std::string &name) { globalRegNames[reg] = name; }
@@ -292,9 +289,8 @@ struct AnalyzedFunction {
     std::string DisambiguateOwnName(const std::string &name) {
         if (nameSuffix.empty())
             return name;
-        for (const auto &[renamed, original] : disambiguatedNames)
-            if (original == name)
-                return renamed;
+        if (const auto renamed = disambiguatedByOriginal.find(name); renamed != disambiguatedByOriginal.end())
+            return renamed->second;
 
         const auto occupied = [&](const std::string &candidate) {
             if (enclosingNames.contains(candidate) || disambiguatedNames.contains(candidate))
@@ -314,6 +310,7 @@ struct AnalyzedFunction {
         for (size_t index = 2; occupied(suffixed); ++index)
             suffixed = std::format("{}{}_{}", name, nameSuffix, index);
         disambiguatedNames[suffixed] = name; // recorded so the lifter can note the rename
+        disambiguatedByOriginal.emplace(name, suffixed);
         return suffixed;
     }
 
@@ -324,14 +321,14 @@ struct AnalyzedFunction {
                 return it->second;
 
         SSARef ref{static_cast<uint8_t>(reg), version};
-        if (this->ssaOverrides.contains(ref))
-            return this->ssaOverrides.at(ref);
+        if (const auto name = this->ssaOverrides.find(ref); name != this->ssaOverrides.end())
+            return name->second;
 
-        if (this->globalRegNames.contains(reg))
-            return DisambiguateOwnName(this->globalRegNames.at(reg));
+        if (const auto name = this->globalRegNames.find(reg); name != this->globalRegNames.end())
+            return DisambiguateOwnName(name->second);
 
-        if (variableNames.contains(ref))
-            return variableNames.at(ref);
+        if (const auto name = variableNames.find(ref); name != variableNames.end())
+            return name->second;
 
         std::string base = std::format("v{}", reg);
         std::string name = DisambiguateOwnName(base);
@@ -349,10 +346,10 @@ struct AnalyzedFunction {
     // Parent-provided LCT_UPVAL names survive PopulateNames.
     void SetUpvalueNameOverride(int32_t index, const std::string &name) { upvalueNameOverrides[index] = name; }
     std::string GetUpvalueName(int32_t index) {
-        if (upvalueNameOverrides.contains(index))
-            return upvalueNameOverrides.at(index);
-        if (upvalueNames.contains(index))
-            return upvalueNames.at(index);
+        if (const auto name = upvalueNameOverrides.find(index); name != upvalueNameOverrides.end())
+            return name->second;
+        if (const auto name = upvalueNames.find(index); name != upvalueNames.end())
+            return name->second;
         return std::format("uv_{}", index);
     }
 
@@ -365,6 +362,7 @@ struct AnalyzedFunction {
         this->variableNames.clear();
         this->globalRegNames.clear();
         this->disambiguatedNames.clear();
+        this->disambiguatedByOriginal.clear();
         this->prefixedLocalRenames.clear();
 
         // Cache auto-shaped globals once; PopulateNames can run once per closure reference.
@@ -439,6 +437,7 @@ struct AnalyzedFunction {
     std::set<std::pair<int32_t, int32_t>> debugLocalInitializers{};
     std::unordered_map<std::string, std::string> prefixedLocalRenames{};
     bool globalCollisionsComputed{false}; // globalAutoNameCollisions is built once (immutable per function)
+    std::unordered_map<std::string, std::string> disambiguatedByOriginal{};
 };
 
 inline std::string BlockTypeToString(BlockType type) {

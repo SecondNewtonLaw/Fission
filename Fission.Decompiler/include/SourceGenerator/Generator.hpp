@@ -224,7 +224,7 @@ class SourceGenerator : public Visitor {
 
     // Luau lowers `` `a{x}b` `` to `("a%*b"):format(x)` with literal `%` doubled; read that call back as the interpolation.
     bool TryEmitInterpolation(NameCallExpressionNode *lpNode) {
-        const auto format = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->calledOn);
+        const auto format = AsLiteral<StringLiteralNode>(lpNode->calledOn);
         const auto method = std::dynamic_pointer_cast<IdentifierExpressionNode>(lpNode->callWhat);
         if (!format || !method || !method->identifier || method->identifier->name != "format" || lpNode->bIsVariadicCall || lpNode->arguments.empty())
             return false;
@@ -412,7 +412,7 @@ class SourceGenerator : public Visitor {
                 buffer << ";"; // a bare `(expr)(...)` statement would merge with the previous line
             if (!lpNode->rets.empty()) {
                 if (lpNode->bIsLocalDeclaration)
-                    buffer << "local ";
+                    buffer << (lpNode->bConst ? "const " : "local ");
                 for (size_t i = 0; i < lpNode->rets.size(); i++) {
                     lpNode->rets.at(i)->Accept(this);
                     if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr &&
@@ -485,7 +485,7 @@ class SourceGenerator : public Visitor {
         (void)lpNode;
         EmitPrefix(lpNode->left);
         buffer << "[";
-        if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpNode->right)) {
+        if (auto str = AsLiteral<StringLiteralNode>(lpNode->right)) {
             EmitQuotedString(str->value);
         } else {
             std::stringstream keyBuf;
@@ -523,14 +523,13 @@ class SourceGenerator : public Visitor {
         for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
             MemberExpressionNode *node = *it;
             if (node->table != nullptr) {
-                if (auto lpStringLiteral = std::dynamic_pointer_cast<StringLiteralNode>(node->key);
-                    lpStringLiteral && IsLegalLuauIndex(lpStringLiteral->value)) {
+                if (auto lpStringLiteral = AsLiteral<StringLiteralNode>(node->key); lpStringLiteral && IsLegalLuauIndex(lpStringLiteral->value)) {
                     buffer << "." << lpStringLiteral->value;
                     continue;
                 }
             }
             buffer << "[";
-            if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(node->key))
+            if (auto str = AsLiteral<StringLiteralNode>(node->key))
                 EmitQuotedString(str->value);
             else
                 EmitWithPrecedence(11, node->key.get());
@@ -829,7 +828,7 @@ class SourceGenerator : public Visitor {
         buffer << this->GetIndentation();
         if (lpNode->bExported)
             buffer << "export ";
-        buffer << "local ";
+        buffer << (lpNode->bConst ? "const " : "local ");
         lpNode->identifier->Accept(this);
         if (lpNode->type && ShouldEmitTypeAnnotation(*lpNode->type)) {
             buffer << ": ";
@@ -854,7 +853,7 @@ class SourceGenerator : public Visitor {
     void EmitTableEntry(const std::shared_ptr<Expression> &entry) {
         // Only assignment nodes encode keyed entries; other binary expressions remain values.
         if (auto lpBinExpr = std::dynamic_pointer_cast<BinaryExpressionNode>(entry); lpBinExpr && lpBinExpr->op == "=") {
-            if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(lpBinExpr->left)) {
+            if (auto str = AsLiteral<StringLiteralNode>(lpBinExpr->left)) {
                 buffer << "[";
                 EmitQuotedString(str->value);
                 buffer << "] " << lpBinExpr->op << " ";
@@ -966,7 +965,7 @@ class SourceGenerator : public Visitor {
         }
         buffer << this->GetIndentation();
         if (lpNode->bIsLocalDeclaration)
-            buffer << "local ";
+            buffer << (lpNode->bConst ? "const " : "local ");
         for (size_t i = 0; i < lpNode->rets.size(); i++) {
             lpNode->rets.at(i)->Accept(this);
             if (lpNode->bIsLocalDeclaration && i < lpNode->retTypes.size() && lpNode->retTypes[i] != nullptr && ShouldEmitTypeAnnotation(lpNode->retTypes[i])) {

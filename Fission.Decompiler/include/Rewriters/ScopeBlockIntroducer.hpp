@@ -49,31 +49,6 @@ class ScopeBlockIntroducer {
             return;
         }
 
-        // Per-lifetime last use, keyed by declaration index. A use at i extends the lifetime of the
-        // latest declaration of that name at or before i, so a binding is NOT considered live past a
-        // later redefinition of the same name (uses after the redefinition belong to the new binding).
-        // A declaration's own bound name is excluded from its ref-set by ProcessStatement, so a
-        // redefinition whose RHS does not read the old binding does not block its own cut.
-        std::unordered_map<std::string, size_t> currentDecl;
-        std::unordered_map<size_t, size_t> lifeLastUse;
-        std::vector<size_t> previousDeclaration(n, n);
-        for (size_t i = 0; i < n; ++i) {
-            for (const auto &nm : refs[i]) {
-                auto it = currentDecl.find(nm);
-                if (it != currentDecl.end())
-                    lifeLastUse[it->second] = i;
-            }
-            if (!declName[i].empty()) {
-                if (auto previous = currentDecl.find(declName[i]); previous != currentDecl.end())
-                    previousDeclaration[i] = previous->second;
-                currentDecl[declName[i]] = i;
-            }
-        }
-        if (liveOut)
-            for (const auto &nm : *liveOut)
-                if (auto it = currentDecl.find(nm); it != currentDecl.end())
-                    lifeLastUse[it->second] = n;
-
         auto bubble = [&]() {
             for (auto &r : refs)
                 for (const auto &nm : r)
@@ -105,13 +80,39 @@ class ScopeBlockIntroducer {
             return;
         }
 
+        // Per-lifetime last use, keyed by declaration index. A use at i extends the lifetime of the
+        // latest declaration of that name at or before i, so a binding is NOT considered live past a
+        // later redefinition of the same name (uses after the redefinition belong to the new binding).
+        // A declaration's own bound name is excluded from its ref-set by ProcessStatement, so a
+        // redefinition whose RHS does not read the old binding does not block its own cut.
+        std::unordered_map<std::string, size_t> currentDecl;
+        std::vector<size_t> lifeLastUse(n);
+        std::vector<size_t> previousDeclaration(n, n);
+        for (size_t i = 0; i < n; ++i) {
+            for (const auto &nm : refs[i]) {
+                auto it = currentDecl.find(nm);
+                if (it != currentDecl.end())
+                    lifeLastUse[it->second] = i;
+            }
+            if (!declName[i].empty()) {
+                const auto [current, inserted] = currentDecl.try_emplace(declName[i], i);
+                if (!inserted) {
+                    previousDeclaration[i] = current->second;
+                    current->second = i;
+                }
+            }
+        }
+        if (liveOut)
+            for (const auto &nm : *liveOut)
+                if (auto it = currentDecl.find(nm); it != currentDecl.end())
+                    lifeLastUse[it->second] = n;
+
         const auto originalCuts = cuts;
         for (size_t s = 0; s < cuts.size(); ++s) {
             const size_t previous = s == 0 ? 0 : originalCuts[s - 1];
             const size_t next = s + 1 < originalCuts.size() ? originalCuts[s + 1] : n;
             for (size_t i = previous; i < originalCuts[s]; ++i) {
-                const auto use = lifeLastUse.find(i);
-                if (!declName[i].empty() && use != lifeLastUse.end() && use->second >= originalCuts[s] && use->second < next)
+                if (!declName[i].empty() && lifeLastUse[i] >= originalCuts[s] && lifeLastUse[i] < next)
                     cuts[s] = (std::min)(cuts[s], i);
             }
         }
@@ -138,9 +139,7 @@ class ScopeBlockIntroducer {
         for (size_t i = 0; i < n; ++i) {
             if (declName[i].empty())
                 continue;
-            auto it = lifeLastUse.find(i);
-            const size_t lu = (it != lifeLastUse.end()) ? it->second : i;
-            crossing[i] = lu >= segEndAt[i];
+            crossing[i] = lifeLastUse[i] >= segEndAt[i];
         }
 
         for (size_t i = n; i-- > 0;) {
@@ -339,71 +338,19 @@ class ScopeBlockIntroducer {
     void ScanExpr(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &refs, std::unordered_set<std::string> &captures) {
         if (!expr)
             return;
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr)) {
+        if (expr->nodeKind == ASTNodeKind::IdentifierExpression) {
+            const auto id = std::static_pointer_cast<IdentifierExpressionNode>(expr);
             if (id->identifier)
                 refs.insert(id->identifier->name);
             return;
         }
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
-            ScanExpr(mem->table, refs, captures);
-            ScanExpr(mem->key, refs, captures);
-            return;
-        }
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
-            ScanExpr(idx->left, refs, captures);
-            ScanExpr(idx->right, refs, captures);
-            return;
-        }
-        if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
-            // separate type: does NOT derive from BinaryExpressionNode, so must be handled explicitly
-            ScanExpr(cmp->left, refs, captures);
-            ScanExpr(cmp->right, refs, captures);
-            return;
-        }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
-            // also catches TableBinaryExpressionNode (derives from BinaryExpressionNode)
-            ScanExpr(bin->left, refs, captures);
-            ScanExpr(bin->right, refs, captures);
-            return;
-        }
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
-            ScanExpr(un->operand, refs, captures);
-            return;
-        }
-        if (auto conditional = std::dynamic_pointer_cast<IfExpressionNode>(expr)) {
-            ScanExpr(conditional->condition, refs, captures);
-            ScanExpr(conditional->thenExpr, refs, captures);
-            ScanExpr(conditional->elseExpr, refs, captures);
-            return;
-        }
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
-            ScanExpr(call->callee, refs, captures);
-            for (const auto &a : call->arguments)
-                ScanExpr(a, refs, captures);
-            for (const auto &rt : call->rets)
-                ScanExpr(rt, refs, captures);
-            return;
-        }
-        if (auto nameCall = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
-            ScanExpr(nameCall->calledOn, refs, captures);
-            for (const auto &a : nameCall->arguments)
-                ScanExpr(a, refs, captures);
-            for (const auto &rt : nameCall->rets)
-                ScanExpr(rt, refs, captures);
-            return;
-        }
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+        if (expr->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(expr);
             captures.insert(fn->capturedNames.begin(), fn->capturedNames.end());
             if (fn->lpFunctionBody)
                 ProcessList(fn->lpFunctionBody->body, refs); // scope inside inline closures too
             return;
         }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (const auto &e : tbl->expressions)
-                ScanExpr(e, refs, captures);
-            return;
-        }
-        // literals (nil/bool/number/integer/string/vector), VarArgExpression, NoExpression reference
-        // nothing. New expression kinds that can read locals MUST be added above.
+        ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { ScanExpr(child, refs, captures); });
     }
 };

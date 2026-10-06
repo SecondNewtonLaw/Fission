@@ -528,8 +528,38 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return;
 
     const auto domInfo = AnalyzeDenominators(func);
+    std::vector<std::pair<size_t, size_t>> domRanges(blocks.size());
+    std::vector<std::pair<int32_t, bool>> domWalk;
+    size_t domOrder = 0;
+    for (const auto &[id, info] : domInfo)
+        if (info.idom == -1)
+            domWalk.emplace_back(id, false);
+    while (!domWalk.empty()) {
+        Fission::CheckDecompileDeadline();
+        const auto [id, closing] = domWalk.back();
+        domWalk.pop_back();
+        if (id < 0 || static_cast<size_t>(id) >= domRanges.size())
+            continue;
+        auto &range = domRanges[id];
+        if (closing) {
+            range.second = domOrder;
+            continue;
+        }
+        if (range.first != 0)
+            continue;
+        range.first = ++domOrder;
+        domWalk.emplace_back(id, true);
+        if (const auto info = domInfo.find(id); info != domInfo.end())
+            for (auto child = info->second.children.rbegin(); child != info->second.children.rend(); ++child)
+                domWalk.emplace_back(*child, false);
+    }
 
     auto dominates = [&](int32_t header, int32_t latchCandidate) -> bool {
+        if (header >= 0 && latchCandidate >= 0 && static_cast<size_t>(header) < domRanges.size() && static_cast<size_t>(latchCandidate) < domRanges.size() &&
+            domRanges[header].first != 0 && domRanges[latchCandidate].first != 0) {
+            Fission::CheckDecompileDeadline();
+            return domRanges[header].first <= domRanges[latchCandidate].first && domRanges[latchCandidate].first <= domRanges[header].second;
+        }
         int32_t cur = latchCandidate;
         while (cur != -1) {
             Fission::CheckDecompileDeadline();
@@ -1220,6 +1250,12 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     }
 
     // Classify forward jumps inside loops against the loop exit.
+    std::vector<const BasicBlock *> loopHeaders;
+    for (const auto &block : blocks)
+        if (block.bType == BlockType::LoopHeader && block.loopLatch)
+            loopHeaders.push_back(&block);
+    if (loopHeaders.empty())
+        return;
     for (BasicBlock &blk : blocks) {
         if (blk.bType != BlockType::Standard)
             continue;
@@ -1246,9 +1282,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         int32_t innermostHeader = -1;
         int32_t innermostExit = -1;
         int32_t innermostLatch = -1;
-        for (const auto &b : blocks) {
-            if (b.bType != BlockType::LoopHeader || !b.loopLatch)
-                continue;
+        for (const auto *header : loopHeaders) {
+            const auto &b = *header;
             if (!dominates(b.dwBlockId, blk.dwBlockId))
                 continue;
             if (blk.lpHead->instructionIndex > blocks[*b.loopLatch].lpTail->instructionIndex)
@@ -1339,17 +1374,21 @@ void ControlFlowAnalyzer::PruneUnreachableBlocks(std::vector<BasicBlock> &blocks
         }
     }
 
+    bool pruned = false;
     for (size_t i = 0; i < blocks.size(); ++i) {
         if (!reachable[i]) {
+            pruned = true;
             blocks[i].bType = BlockType::Dead;
             Explain(blocks[i], "prune: no path from entry B0 reaches this block");
             blocks[i].successors.clear();
-            for (auto &b : blocks) {
-                std::erase(b.predecessors, i);
-                std::erase(b.successors, i);
-            }
         }
     }
+    if (pruned)
+        for (auto &block : blocks) {
+            const auto dead = [&](auto id) { return id < reachable.size() && !reachable[id]; };
+            std::erase_if(block.predecessors, dead);
+            std::erase_if(block.successors, dead);
+        }
 }
 
 void ControlFlowAnalyzer::DetermineBasicBlocksInternalAdvanced(AnalyzedFunction &func) {

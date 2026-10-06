@@ -45,11 +45,11 @@ class ReverseFieldRenamer {
     // The field name written to: `obj.field` / `obj["field"]`.
     static std::string FieldKey(const std::shared_ptr<Expression> &lhs) {
         if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(lhs)) {
-            if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(mem->key))
+            if (auto key = AsLiteral<StringLiteralNode>(mem->key))
                 return key->value;
         }
         if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(lhs)) {
-            if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(idx->right))
+            if (auto key = AsLiteral<StringLiteralNode>(idx->right))
                 return key->value;
         }
         return "";

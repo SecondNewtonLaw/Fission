@@ -28,7 +28,8 @@ static std::optional<int32_t> SourceLine(const DeserializedFunction &function, i
     return base + function.lineinfo[pc];
 }
 
-std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder, const LiftedFunction &root) {
+std::shared_ptr<const InlineSourceMap>
+BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder, const LiftedFunction &root) {
     auto map = std::make_shared<InlineSourceMap>();
     std::vector<const LiftedFunction *> pending{&root};
     while (!pending.empty()) {
@@ -47,7 +48,9 @@ std::shared_ptr<const InlineSourceMap> BuildInlineSourceMap(const DeserializedBy
             map->hasLineInfo = true;
             // the implicit `return` sits on the closing `end`, which the caller's next statement may share
             auto end = static_cast<int32_t>(function.instructions.size());
-            const LuauInstruction tail{decoder ? decoder->DecodeInstruction(function.instructions.back().instruction) : function.instructions.back().instruction};
+            const LuauInstruction tail{
+                decoder ? decoder->DecodeInstruction(function.instructions.back().instruction) : function.instructions.back().instruction
+            };
             if (tail.GetOpCode() == LOP_RETURN && tail.GetABCOperand(LuauInstruction::LuauOperand::B) == 1)
                 --end;
             for (int32_t pc = 0; pc < end; ++pc)
@@ -190,7 +193,8 @@ static bool JumpsAlways(LiftedOperation operation) {
 static bool CreatesClosure(const LiftedInstruction &instruction, const DeserializedFunction &owner, const DeserializedFunction *function) {
     if (instruction.operation == LiftedOperation::NEWCLOSURE)
         return instruction.operands.size() > 1 && instruction.operands[1].value.imm.k >= 0 &&
-               static_cast<size_t>(instruction.operands[1].value.imm.k) < owner.subfunctions.size() && owner.subfunctions[instruction.operands[1].value.imm.k] == function;
+               static_cast<size_t>(instruction.operands[1].value.imm.k) < owner.subfunctions.size() &&
+               owner.subfunctions[instruction.operands[1].value.imm.k] == function;
     return instruction.operation == LiftedOperation::DUPCLOSURE && instruction.operands.size() > 2 &&
            instruction.operands[2].value.imm.n == static_cast<int32_t>(function->bytecodeId);
 }
@@ -226,8 +230,8 @@ struct RecoveryState {
 
 // Where `chain.back()` can read the callee's closure before `until`: a register still holding it, or one of its upvalues. When every call was
 // inlined the compiler never captured the closure; the capture is then added, but only when `commit` is set.
-static std::optional<ClosureAccess> EnsureClosure(std::span<const LiftedFunction *const> chain, const DeserializedFunction *callee, int32_t until,
-                                                  RecoveryState &state, bool commit) {
+static std::optional<ClosureAccess>
+EnsureClosure(std::span<const LiftedFunction *const> chain, const DeserializedFunction *callee, int32_t until, RecoveryState &state, bool commit) {
     const auto &function = *chain.back();
     if (const auto creation = SoleCreation(function, callee)) {
         const int32_t reg = function.instructions[*creation].operands[0].value.reg;
@@ -266,16 +270,19 @@ static std::optional<ClosureAccess> EnsureClosure(std::span<const LiftedFunction
         mode.type = LiftedOperandType::ImmediateInteger;
         mode.value.imm.n = outer->upvalue ? 2 : 0;
         LiftedOperand captured = Register(outer->index);
-        state.insertions[&parent].push_back(Recovery{static_cast<int32_t>(pc), static_cast<int32_t>(pc) - 1, -1,
-                                                     {LiftedInstruction{LiftedOperation::CAPTURE, -1, {mode, captured}}}});
+        state.insertions[&parent].push_back(
+            Recovery{static_cast<int32_t>(pc), static_cast<int32_t>(pc) - 1, -1, {LiftedInstruction{LiftedOperation::CAPTURE, -1, {mode, captured}}}}
+        );
         state.added.emplace(key, index);
         ++deserialized.nups;
     }
     return ClosureAccess{true, index};
 }
 
-static std::optional<Recovery> RecoverRegion(const AnalyzedFunction &analyzed, std::span<const LiftedFunction *const> chain, const InlineSourceMap &map,
-                                             RecoveryState &state, int32_t source, int32_t lo, int32_t hi, int32_t frame) {
+static std::optional<Recovery> RecoverRegion(
+    const AnalyzedFunction &analyzed, std::span<const LiftedFunction *const> chain, const InlineSourceMap &map, RecoveryState &state, int32_t source,
+    int32_t lo, int32_t hi, int32_t frame
+) {
     const auto &sources = map.sources;
     const auto *callee = sources[source].function;
     const auto liftedCallee = map.lifted.find(callee);
@@ -413,9 +420,9 @@ static std::optional<Recovery> RecoverRegion(const AnalyzedFunction &analyzed, s
             operand.value.imm.b = std::get<bool>(constant.constantData);
             return Argument{*key, operand};
         case LUA_TNUMBER:
-            if (const double value = std::get<double>(constant.constantData);
-                std::trunc(value) == value && value >= std::numeric_limits<int16_t>::min() && value <= std::numeric_limits<int16_t>::max() &&
-                !(value == 0 && std::signbit(value)))
+            if (const double value = std::get<double>(constant.constantData); std::trunc(value) == value && value >= std::numeric_limits<int16_t>::min() &&
+                                                                              value <= std::numeric_limits<int16_t>::max() &&
+                                                                              !(value == 0 && std::signbit(value)))
                 return Argument{*key, Integer(static_cast<int32_t>(value))};
             break;
         default:
@@ -574,14 +581,17 @@ static std::optional<Recovery> RecoverRegion(const AnalyzedFunction &analyzed, s
 
     Recovery recovery{lo, hi, source, {}};
     auto &code = recovery.code;
-    code.push_back(closure->upvalue ? LiftedInstruction{LiftedOperation::GETUPVAL, -1, {Register(frame), Integer(closure->index)}}
-                                    : LiftedInstruction{LiftedOperation::MOVE, -1, {Register(frame), Register(closure->index)}});
+    code.push_back(
+        closure->upvalue ? LiftedInstruction{LiftedOperation::GETUPVAL, -1, {Register(frame), Integer(closure->index)}}
+                         : LiftedInstruction{LiftedOperation::MOVE, -1, {Register(frame), Register(closure->index)}}
+    );
     for (int32_t i = 0; i < arguments; ++i) {
         const auto &operand = bound[i]->operand;
         auto value = operand;
         value.ssaVersion = -1;
-        code.push_back(LiftedInstruction{operand.type == LiftedOperandType::Register ? LiftedOperation::MOVE : LiftedOperation::LOAD, -1,
-                                         {Register(frame + 1 + i), value}});
+        code.push_back(
+            LiftedInstruction{operand.type == LiftedOperandType::Register ? LiftedOperation::MOVE : LiftedOperation::LOAD, -1, {Register(frame + 1 + i), value}}
+        );
     }
     code.push_back(LiftedInstruction{LiftedOperation::CALL, -1, {Register(frame), Integer(arguments + 1), Integer(count + 1)}});
     for (int32_t j = 0; j < count; ++j)
@@ -661,7 +671,8 @@ static void Splice(LiftedFunction &function, const std::vector<Recovery> &recove
     for (const auto &recovery : recoveries)
         for (const auto &instruction : recovery.code)
             if (instruction.operation == LiftedOperation::CALL)
-                frame = (std::max)(frame, instruction.operands[0].value.reg + (std::max)(instruction.operands[1].value.imm.n, instruction.operands[2].value.imm.n - 1));
+                frame = (std::max)(frame, instruction.operands[0].value.reg +
+                                              (std::max)(instruction.operands[1].value.imm.n, instruction.operands[2].value.imm.n - 1));
     function.lpDeserialized->maxstacksize = static_cast<uint8_t>((std::min)(frame, 255));
 
     instructions = std::move(rebuilt);
@@ -696,9 +707,7 @@ static bool RecoverFunction(AnalyzedFunction &analyzed, std::vector<const Lifted
     }
     if (const auto insertions = state.insertions.find(&function); insertions != state.insertions.end()) {
         recoveries.insert(recoveries.end(), insertions->second.begin(), insertions->second.end());
-        std::ranges::stable_sort(recoveries, [](const Recovery &a, const Recovery &b) {
-            return a.lo != b.lo ? a.lo < b.lo : (a.hi < a.lo) > (b.hi < b.lo);
-        });
+        std::ranges::stable_sort(recoveries, [](const Recovery &a, const Recovery &b) { return a.lo != b.lo ? a.lo<b.lo : (a.hi < a.lo)>(b.hi < b.lo); });
     }
     if (!recoveries.empty()) {
         Splice(function, recoveries);

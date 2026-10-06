@@ -48,11 +48,11 @@ class PropertyRenamer {
     // (isPropertyRead, decapitalized leaf) for a value expression.
     static std::pair<bool, std::string> PropLeaf(const std::shared_ptr<Expression> &value) {
         if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(value)) {
-            if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(mem->key))
+            if (auto key = AsLiteral<StringLiteralNode>(mem->key))
                 return {true, Decapitalize(key->value)};
         }
         if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(value)) {
-            if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(idx->right))
+            if (auto key = AsLiteral<StringLiteralNode>(idx->right))
                 return {true, Decapitalize(key->value)};
         }
         return {false, ""};

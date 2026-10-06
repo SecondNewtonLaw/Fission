@@ -63,7 +63,7 @@ inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Express
     }
     if (const auto node = std::dynamic_pointer_cast<IdentifierExpressionNode>(expression))
         return std::make_shared<IdentifierExpressionNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<TableLiteralNode>(expression)) {
+    if (const auto node = AsLiteral<TableLiteralNode>(expression)) {
         auto copy = std::make_shared<TableLiteralNode>(*node);
         cloneAll(copy->expressions);
         return copy;
@@ -101,17 +101,17 @@ inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Express
         return std::make_shared<CommentNode>(*node);
     if (const auto node = std::dynamic_pointer_cast<VarArgExpression>(expression))
         return std::make_shared<VarArgExpression>(*node);
-    if (const auto node = std::dynamic_pointer_cast<NilLiteralNode>(expression))
+    if (const auto node = AsLiteral<NilLiteralNode>(expression))
         return std::make_shared<NilLiteralNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<BooleanLiteralNode>(expression))
+    if (const auto node = AsLiteral<BooleanLiteralNode>(expression))
         return std::make_shared<BooleanLiteralNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<NumberLiteralNode>(expression))
+    if (const auto node = AsLiteral<NumberLiteralNode>(expression))
         return std::make_shared<NumberLiteralNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<IntegerLiteralNode>(expression))
+    if (const auto node = AsLiteral<IntegerLiteralNode>(expression))
         return std::make_shared<IntegerLiteralNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<StringLiteralNode>(expression))
+    if (const auto node = AsLiteral<StringLiteralNode>(expression))
         return std::make_shared<StringLiteralNode>(*node);
-    if (const auto node = std::dynamic_pointer_cast<VectorNode>(expression))
+    if (const auto node = AsLiteral<VectorNode>(expression))
         return std::make_shared<VectorNode>(*node);
     if (const auto node = std::dynamic_pointer_cast<NoExpressionNode>(expression))
         return std::make_shared<NoExpressionNode>(*node);

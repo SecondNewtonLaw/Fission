@@ -55,7 +55,7 @@ class ChildLookupRenamer {
     static std::string LiteralArgument(const std::vector<std::shared_ptr<Expression>> &arguments) {
         if (arguments.size() != 1)
             return "";
-        const auto literal = std::dynamic_pointer_cast<StringLiteralNode>(arguments[0]);
+        const auto literal = AsLiteral<StringLiteralNode>(arguments[0]);
         return literal && IsPlainIdentifier(literal->value) ? literal->value : "";
     }
 

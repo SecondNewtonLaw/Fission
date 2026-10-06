@@ -92,9 +92,9 @@ class ShortCircuitFolder : public ASTRewriter {
         if (fallback && primary && thenB.size() == 1 && elseB.size() <= 2) {
             auto selected = std::dynamic_pointer_cast<BinaryExpressionNode>(AsAssignToVar(elseB.back(), vname));
             const auto fallbackName = SimpleIdentName(fallback);
-            const bool plainFallback = (fallbackName && *fallbackName != vname) || std::dynamic_pointer_cast<NilLiteralNode>(fallback) ||
-                                       std::dynamic_pointer_cast<BooleanLiteralNode>(fallback) || std::dynamic_pointer_cast<NumberLiteralNode>(fallback) ||
-                                       std::dynamic_pointer_cast<IntegerLiteralNode>(fallback) || std::dynamic_pointer_cast<StringLiteralNode>(fallback);
+            const bool plainFallback = (fallbackName && *fallbackName != vname) || AsLiteral<NilLiteralNode>(fallback) ||
+                                       AsLiteral<BooleanLiteralNode>(fallback) || AsLiteral<NumberLiteralNode>(fallback) ||
+                                       AsLiteral<IntegerLiteralNode>(fallback) || AsLiteral<StringLiteralNode>(fallback);
             if (selected && selected->op == "or" && StatementsEqual({selected->right}, {fallback}) &&
                 (elseB.size() == 1 || (plainFallback && SimpleIdentName(selected->left).value_or("") == vname))) {
                 if (elseB.size() == 1)

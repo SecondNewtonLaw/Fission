@@ -79,16 +79,19 @@ class LoopVariableRenamer {
     }
 
     static bool IsCallTo(const std::shared_ptr<Expression> &expr, const char *name) {
-        auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr);
-        if (!call)
+        if (!expr || expr->nodeKind != ASTNodeKind::CallExpression)
             return false;
-        auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(call->callee);
+        const auto call = std::static_pointer_cast<CallExpressionNode>(expr);
+        if (!call->callee || call->callee->nodeKind != ASTNodeKind::IdentifierExpression)
+            return false;
+        const auto id = std::static_pointer_cast<IdentifierExpressionNode>(call->callee);
         return id && id->identifier && id->identifier->name == name;
     }
 
     static std::string AutoName(const std::shared_ptr<Expression> &var) {
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(var); id && id->identifier && IsLoopAutoName(id->identifier->name))
-            return id->identifier->name;
+        if (var && var->nodeKind == ASTNodeKind::IdentifierExpression)
+            if (const auto id = std::static_pointer_cast<IdentifierExpressionNode>(var); id->identifier && IsLoopAutoName(id->identifier->name))
+                return id->identifier->name;
         return "";
     }
 
@@ -103,25 +106,38 @@ class LoopVariableRenamer {
     }
 
     static void AddBinding(const std::shared_ptr<Expression> &expr, std::unordered_set<std::string> &active, std::vector<std::string> *added = nullptr) {
-        if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); id && id->identifier)
-            if (auto [it, inserted] = active.insert(id->identifier->name); inserted && added)
-                added->push_back(*it);
+        if (expr && expr->nodeKind == ASTNodeKind::IdentifierExpression)
+            if (const auto id = std::static_pointer_cast<IdentifierExpressionNode>(expr); id->identifier)
+                if (auto [it, inserted] = active.insert(id->identifier->name); inserted && added)
+                    added->push_back(*it);
     }
 
     static void AddBindings(const std::shared_ptr<Statement> &stmt, std::unordered_set<std::string> &active, std::vector<std::string> &added) {
-        if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
+        if (!stmt)
+            return;
+        if (stmt->nodeKind == ASTNodeKind::VariableDeclaration) {
+            const auto decl = std::static_pointer_cast<VariableDeclarationNode>(stmt);
             AddBinding(decl->identifier, active, &added);
-        } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+        } else if (stmt->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(stmt);
             if (fn->bIsLocalDeclaration && ScopeAwareRenamer::IsBareIdentifier(fn->functionName))
                 if (auto [it, inserted] = active.insert(fn->functionName); inserted)
                     added.push_back(*it);
-        } else if (auto expression = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
-            if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expression->expression); call && call->bIsLocalDeclaration)
-                for (const auto &ret : call->rets)
-                    AddBinding(ret, active, &added);
-            else if (auto call = std::dynamic_pointer_cast<NameCallExpressionNode>(expression->expression); call && call->bIsLocalDeclaration)
-                for (const auto &ret : call->rets)
-                    AddBinding(ret, active, &added);
+        } else if (stmt->nodeKind == ASTNodeKind::ExpressionStatement) {
+            const auto expression = std::static_pointer_cast<ExpressionStatementNode>(stmt);
+            if (!expression->expression)
+                return;
+            if (expression->expression->nodeKind == ASTNodeKind::CallExpression) {
+                const auto call = std::static_pointer_cast<CallExpressionNode>(expression->expression);
+                if (call->bIsLocalDeclaration)
+                    for (const auto &ret : call->rets)
+                        AddBinding(ret, active, &added);
+            } else if (expression->expression->nodeKind == ASTNodeKind::MethodCallExpression) {
+                const auto call = std::static_pointer_cast<NameCallExpressionNode>(expression->expression);
+                if (call->bIsLocalDeclaration)
+                    for (const auto &ret : call->rets)
+                        AddBinding(ret, active, &added);
+            }
         }
     }
 
@@ -129,7 +145,9 @@ class LoopVariableRenamer {
         if (!stmt)
             return;
 
-        if (auto fn = std::dynamic_pointer_cast<ForNumericNode>(stmt)) {
+        switch (stmt->nodeKind) {
+        case ASTNodeKind::ForNumeric: {
+            const auto fn = std::static_pointer_cast<ForNumericNode>(stmt);
             std::unordered_set<std::string> active2 = active;
             if (const std::string from = AutoName(fn->loopVariable); !from.empty() && fn->lpLoopBody) {
                 std::unordered_set<std::string> bodyNames;
@@ -149,7 +167,8 @@ class LoopVariableRenamer {
             return;
         }
 
-        if (auto fg = std::dynamic_pointer_cast<ForGeneralNode>(stmt)) {
+        case ASTNodeKind::ForGeneral: {
+            const auto fg = std::static_pointer_cast<ForGeneralNode>(stmt);
             std::unordered_set<std::string> active2 = active;
             std::unordered_set<std::string> bodyNames;
             if (fg->body)
@@ -172,42 +191,53 @@ class LoopVariableRenamer {
             return;
         }
 
-        if (auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt)) {
+        case ASTNodeKind::WhileStatement: {
+            const auto w = std::static_pointer_cast<WhileStatementNode>(stmt);
             WalkExpr(w->condition, active);
             WalkStmt(w->body, active);
             return;
         }
-        if (auto r = std::dynamic_pointer_cast<RepeatStatementNode>(stmt)) {
+        case ASTNodeKind::RepeatStatement: {
+            const auto r = std::static_pointer_cast<RepeatStatementNode>(stmt);
             WalkExpr(r->condition, active);
             WalkStmt(r->body, active);
             return;
         }
-        if (auto ifs = std::dynamic_pointer_cast<IfStatementNode>(stmt)) {
+        case ASTNodeKind::IfStatement: {
+            const auto ifs = std::static_pointer_cast<IfStatementNode>(stmt);
             WalkExpr(ifs->condition, active);
             WalkStmt(ifs->thenBranch, active);
             WalkStmt(ifs->elseBranch, active);
             return;
         }
-        if (auto b = std::dynamic_pointer_cast<BlockStatementNode>(stmt)) {
+        case ASTNodeKind::BlockStatement: {
+            const auto b = std::static_pointer_cast<BlockStatementNode>(stmt);
             WalkBlock(b->body, active);
             return;
         }
-        if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
+        case ASTNodeKind::VariableDeclaration: {
+            const auto vd = std::static_pointer_cast<VariableDeclarationNode>(stmt);
             WalkExpr(vd->value, active);
             return;
         }
-        if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt)) {
+        case ASTNodeKind::AssignmentStatement: {
+            const auto asn = std::static_pointer_cast<AssignmentStatementNode>(stmt);
             WalkExpr(asn->right, active);
             return;
         }
-        if (auto es = std::dynamic_pointer_cast<ExpressionStatementNode>(stmt)) {
+        case ASTNodeKind::ExpressionStatement: {
+            const auto es = std::static_pointer_cast<ExpressionStatementNode>(stmt);
             WalkExpr(es->expression, active);
             return;
         }
-        if (auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmt)) {
+        case ASTNodeKind::ReturnExpression: {
+            const auto ret = std::static_pointer_cast<ReturnStatementNode>(stmt);
             for (auto &v : ret->returnValues)
                 WalkExpr(v, active);
             return;
+        }
+        default:
+            break;
         }
         // a `local function`/expression-function statement: recurse into its body as a fresh scope.
         if (auto e = std::dynamic_pointer_cast<Expression>(stmt)) {
@@ -220,7 +250,9 @@ class LoopVariableRenamer {
     void WalkExpr(const std::shared_ptr<Expression> &expr, const std::unordered_set<std::string> &active) {
         if (!expr)
             return;
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+        switch (expr->nodeKind) {
+        case ASTNodeKind::FunctionDeclarationNode: {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(expr);
             if (fn->lpFunctionBody) {
                 std::unordered_set<std::string> fresh = active;
                 for (const auto &[_, arg] : fn->argumentsNames)
@@ -230,46 +262,58 @@ class LoopVariableRenamer {
             }
             return;
         }
-        if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
+        case ASTNodeKind::CallExpression: {
+            const auto call = std::static_pointer_cast<CallExpressionNode>(expr);
             WalkExpr(call->callee, active);
             for (auto &a : call->arguments)
                 WalkExpr(a, active);
             return;
         }
-        if (auto nc = std::dynamic_pointer_cast<NameCallExpressionNode>(expr)) {
+        case ASTNodeKind::MethodCallExpression: {
+            const auto nc = std::static_pointer_cast<NameCallExpressionNode>(expr);
             WalkExpr(nc->calledOn, active);
             for (auto &a : nc->arguments)
                 WalkExpr(a, active);
             return;
         }
-        if (auto mem = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
+        case ASTNodeKind::MemberExpression: {
+            const auto mem = std::static_pointer_cast<MemberExpressionNode>(expr);
             WalkExpr(mem->table, active);
             WalkExpr(mem->key, active);
             return;
         }
-        if (auto idx = std::dynamic_pointer_cast<IndexExpressionNode>(expr)) {
+        case ASTNodeKind::IndexExpression: {
+            const auto idx = std::static_pointer_cast<IndexExpressionNode>(expr);
             WalkExpr(idx->left, active);
             WalkExpr(idx->right, active);
             return;
         }
-        if (auto bin = std::dynamic_pointer_cast<BinaryExpressionNode>(expr)) {
+        case ASTNodeKind::BinaryExpression:
+        case ASTNodeKind::TableBinaryExpression: {
+            const auto bin = std::static_pointer_cast<BinaryExpressionNode>(expr);
             WalkExpr(bin->left, active);
             WalkExpr(bin->right, active);
             return;
         }
-        if (auto cmp = std::dynamic_pointer_cast<CompoundBinaryExpressionNode>(expr)) {
+        case ASTNodeKind::CompoundAssignment: {
+            const auto cmp = std::static_pointer_cast<CompoundBinaryExpressionNode>(expr);
             WalkExpr(cmp->left, active);
             WalkExpr(cmp->right, active);
             return;
         }
-        if (auto un = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
+        case ASTNodeKind::UnaryExpression: {
+            const auto un = std::static_pointer_cast<UnaryExpressionNode>(expr);
             WalkExpr(un->operand, active);
             return;
         }
-        if (auto tbl = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
-            for (auto &e : tbl->expressions)
-                WalkExpr(e, active);
-            return;
+        case ASTNodeKind::LiteralValue:
+            if (const auto tbl = AsLiteral<TableLiteralNode>(expr)) {
+                for (auto &e : tbl->expressions)
+                    WalkExpr(e, active);
+            }
+            break;
+        default:
+            break;
         }
     }
 };

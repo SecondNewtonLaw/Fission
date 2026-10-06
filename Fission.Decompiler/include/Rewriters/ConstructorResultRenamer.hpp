@@ -52,7 +52,7 @@ class ConstructorResultRenamer {
 
     // String key of a `a.b` member access (`mem->key` is a StringLiteralNode).
     static std::string MemberName(const std::shared_ptr<MemberExpressionNode> &mem) {
-        if (auto key = std::dynamic_pointer_cast<StringLiteralNode>(mem->key))
+        if (auto key = AsLiteral<StringLiteralNode>(mem->key))
             return key->value;
         return "";
     }
@@ -75,7 +75,7 @@ class ConstructorResultRenamer {
 
         // `Instance.new("Class")`: the class string is the real type.
         if (type == "Instance" && method == "new" && !call->arguments.empty())
-            if (auto s = std::dynamic_pointer_cast<StringLiteralNode>(call->arguments[0]); s && ScopeAwareRenamer::IsBareIdentifier(s->value))
+            if (auto s = AsLiteral<StringLiteralNode>(call->arguments[0]); s && ScopeAwareRenamer::IsBareIdentifier(s->value))
                 return ScopeAwareRenamer::LowerFirst(s->value);
 
         return ScopeAwareRenamer::LowerFirst(type);

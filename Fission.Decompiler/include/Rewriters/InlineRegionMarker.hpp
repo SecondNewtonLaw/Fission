@@ -43,9 +43,13 @@ class InlineRegionMarker {
     void MarkFunctions(const std::shared_ptr<Expression> &expression) {
         if (!expression)
             return;
-        if (const auto function = std::dynamic_pointer_cast<FunctionDeclarationNode>(expression); function && function->lpFunctionBody)
-            Mark(function->lpFunctionBody->body, -1, nullptr);
-        else
+        if (expression->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+            const auto function = std::static_pointer_cast<FunctionDeclarationNode>(expression);
+            if (function->lpFunctionBody)
+                Mark(function->lpFunctionBody->body, -1, nullptr);
+            else
+                ForEachSubExpression(expression, [&](const std::shared_ptr<Expression> &child) { MarkFunctions(child); });
+        } else
             ForEachSubExpression(expression, [&](const std::shared_ptr<Expression> &child) { MarkFunctions(child); });
     }
 
@@ -103,14 +107,18 @@ class InlineRegionMarker {
                 ++i;
             const auto &source = m_sources->sources[origin];
             auto comment = std::make_shared<CommentNode>(
-                std::format("Fission: INFO: inlined call to {} (defined at line {}, bytecode ID {})",
-                            source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function"), source.firstLine,
-                            source.function->bytecodeId),
+                std::format(
+                    "Fission: INFO: inlined call to {} (defined at line {}, bytecode ID {})",
+                    source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function"), source.firstLine,
+                    source.function->bytecodeId
+                ),
                 true, true
             );
             const auto readLater = [&](const std::string &name) {
-                return std::any_of(statements.begin() + static_cast<std::ptrdiff_t>(i), statements.end(),
-                                   [&](const auto &later) { return later && DeclarationHoister::Mentions(later, name); }) ||
+                return std::any_of(
+                           statements.begin() + static_cast<std::ptrdiff_t>(i), statements.end(),
+                           [&](const auto &later) { return later && DeclarationHoister::Mentions(later, name); }
+                       ) ||
                        (readAfter && DeclarationHoister::ExpressionMentions(readAfter, name));
             };
             // bare `local x` heading the run evaluate nothing and may open before the block
@@ -121,10 +129,11 @@ class InlineRegionMarker {
                     break;
                 ++body;
             }
-            const bool scoped = std::all_of(statements.begin() + static_cast<std::ptrdiff_t>(body), statements.begin() + static_cast<std::ptrdiff_t>(i),
-                                            [&](const auto &statement) {
-                                                return std::ranges::none_of(DeclaredNames(statement), [&](const std::string &name) { return !name.empty() && readLater(name); });
-                                            });
+            const bool scoped = std::all_of(
+                statements.begin() + static_cast<std::ptrdiff_t>(body), statements.begin() + static_cast<std::ptrdiff_t>(i), [&](const auto &statement) {
+                    return std::ranges::none_of(DeclaredNames(statement), [&](const std::string &name) { return !name.empty() && readLater(name); });
+                }
+            );
             if (!scoped || body == i) {
                 rebuilt.push_back(comment);
                 for (size_t k = start; k < i; ++k)

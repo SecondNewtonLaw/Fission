@@ -8,8 +8,8 @@
 #include "SSABuilder.hpp"
 
 #include <algorithm>
+#include <array>
 #include <functional>
-#include <unordered_set>
 
 #ifndef NDEBUG
 #if defined(__clang__)
@@ -382,9 +382,10 @@ bool ASTLifter::MustMaterialize(const LiftedInstruction *inst) {
             // only an operand rendered by its register's name can see a later write to that register
             const auto namedOperand = [&](const LiftedOperand &operand) {
                 const auto *definition = operand.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(operand) : nullptr;
-                return operand.type == LiftedOperandType::Register && !(definition && definition->instructionIndex < inst->instructionIndex && ShouldInline(definition));
+                return operand.type == LiftedOperandType::Register &&
+                       !(definition && definition->instructionIndex < inst->instructionIndex && ShouldInline(definition));
             };
-            for (int32_t k = inst->instructionIndex + 1; k < user->instructionIndex; ++k)
+            for (int32_t k = m_nextDefinitionInstruction[inst->instructionIndex + 1]; k < user->instructionIndex; k = m_nextDefinitionInstruction[k + 1])
                 if (const auto defs = m_defsByInstruction.find(&instructions[k]); defs != m_defsByInstruction.end())
                     for (size_t i = 1; i < inst->operands.size(); ++i)
                         if (namedOperand(inst->operands[i]) &&
@@ -488,9 +489,9 @@ std::optional<bool> ASTLifter::InlinesConstructor(const LiftedInstruction *inst)
                     return false;
                 }
             // AND/OR read both registers eagerly; the folded elements would only run when the right side is needed
-            if (const auto *reader = *readers.begin();
-                (reader->operation == LiftedOperation::AND || reader->operation == LiftedOperation::OR) && reader->operands.size() > 2 &&
-                reader->operands[2].value.reg == defRef.regIndex && reader->operands[2].ssaVersion == defRef.version) {
+            if (const auto *reader = *readers.begin(); (reader->operation == LiftedOperation::AND || reader->operation == LiftedOperation::OR) &&
+                                                       reader->operands.size() > 2 && reader->operands[2].value.reg == defRef.regIndex &&
+                                                       reader->operands[2].ssaVersion == defRef.version) {
                 ExplainKeep(inst, "populated constructor would become the lazy side of a short-circuit");
                 return false;
             }
@@ -517,7 +518,7 @@ std::optional<bool> ASTLifter::InlinesConstructor(const LiftedInstruction *inst)
                 }
             }
             // a SETLIST taking this table as an element records it twice; count distinct user instructions
-            std::unordered_set<const LiftedInstruction *> realUsers;
+            const LiftedInstruction *realUser = nullptr;
             for (const auto *user : users) {
                 if ((user->operation == LiftedOperation::SETTABLE || user->operation == LiftedOperation::SETTABLEKS ||
                      user->operation == LiftedOperation::SETTABLEN) &&
@@ -530,12 +531,13 @@ std::optional<bool> ASTLifter::InlinesConstructor(const LiftedInstruction *inst)
                 // a copy aliases the table under another name
                 if (user->operation == LiftedOperation::MOVE)
                     return false;
-                if (!realUsers.insert(user).second && user->operation != LiftedOperation::SETLIST)
+                if (realUser && (realUser != user || user->operation != LiftedOperation::SETLIST))
                     return false;
+                realUser = user;
             }
-            if (realUsers.size() != 1)
+            if (!realUser)
                 return false;
-            return !InliningReordersEffect(inst, *realUsers.begin());
+            return !InliningReordersEffect(inst, realUser);
         }
     }
     return std::nullopt;
@@ -576,22 +578,21 @@ bool ASTLifter::InlinesCall(const LiftedInstruction *inst) {
 
     // a SETLIST records its base register twice; count distinct user instructions
     const auto &rawUsers = m_currentFunction->users[usedRef];
-    std::unordered_set<const LiftedInstruction *> users(rawUsers.begin(), rawUsers.end());
-    if (users.size() == 1 && rawUsers.size() > 1 && (*users.begin())->operation != LiftedOperation::SETLIST) {
-        ExplainKeep(inst, "call result is read more than once by its consumer", *users.begin());
+    const auto *user = SoleUser(usedRef);
+    if (user && rawUsers.size() > 1 && user->operation != LiftedOperation::SETLIST) {
+        ExplainKeep(inst, "call result is read more than once by its consumer", user);
         return false;
     }
-    if (users.size() == 1) {
+    if (user) {
         // `x = f()` into an existing local lands in a temporary and moves down into the local's register
-        const auto *user = *users.begin();
-        if (BeginsDebugLocal(*inst, usedRef.regIndex) && IsTableStore(*user) && user->operands.size() > 1 &&
-            StoredTable(*user).value.reg == usedRef.regIndex && StoredTable(*user).ssaVersion == usedRef.version)
+        if (BeginsDebugLocal(*inst, usedRef.regIndex) && IsTableStore(*user) && user->operands.size() > 1 && StoredTable(*user).value.reg == usedRef.regIndex &&
+            StoredTable(*user).ssaVersion == usedRef.version)
             return false;
         const bool assignsLocal = user->operation == LiftedOperation::MOVE && user->operands.size() > 1 &&
                                   user->operands[1].type == LiftedOperandType::Register && user->operands[0].value.reg < user->operands[1].value.reg;
         if (EvaluatesInlinedCall(user->operation, true) || assignsLocal)
-            return !InliningReordersEffect(inst, *users.begin());
-        ExplainKeep(inst, "call consumer is not an inlineable operation", *users.begin());
+            return !InliningReordersEffect(inst, user);
+        ExplainKeep(inst, "call consumer is not an inlineable operation", user);
     } else {
         ExplainKeep(inst, "call result has multiple distinct consumers");
     }
@@ -613,7 +614,8 @@ bool ASTLifter::InlinesCopy(const LiftedInstruction *inst) {
 
     const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
     const int sourceReg = inst->operands[1].value.reg;
-    for (int32_t k = inst->instructionIndex + 1; k < usersIt->second.front()->instructionIndex; ++k)
+    for (int32_t k = m_nextDefinitionInstruction[inst->instructionIndex + 1]; k < usersIt->second.front()->instructionIndex;
+         k = m_nextDefinitionInstruction[k + 1])
         if (const auto defsIt = m_defsByInstruction.find(&instructions[k]); defsIt != m_defsByInstruction.end())
             for (const auto &ref : defsIt->second)
                 if (ref.regIndex == sourceReg)
@@ -825,6 +827,8 @@ bool ASTLifter::DominatesMerges(const LiftedInstruction &def, const LiftedOperan
     const int32_t home = BlockOf(&def);
     if (home < 0)
         return false;
+    if (!m_phiConsumers.contains({static_cast<uint8_t>(value.value.reg), value.ssaVersion}))
+        return true;
     if (!m_dominators)
         m_dominators = AnalyzeDenominators(*m_currentFunction);
     const auto &dominators = *m_dominators;
@@ -875,11 +879,10 @@ bool ASTLifter::IsConstructorElement(const LiftedInstruction *e) {
             return false;
         }
 
-        std::vector<SSARef> refs;
+        const std::array fallback{SSARef{current->operands[0].value.reg, current->operands[0].ssaVersion}};
+        std::span<const SSARef> refs(fallback);
         if (const auto defs = m_defsByInstruction.find(current); defs != m_defsByInstruction.end())
             refs = defs->second;
-        else
-            refs.push_back({current->operands[0].value.reg, current->operands[0].ssaVersion});
 
         bool found = false;
         for (const auto &ref : refs) {
@@ -931,10 +934,17 @@ bool ASTLifter::StoreTargetsFreshTable(const LiftedInstruction *e) {
     return def && (def->operation == LiftedOperation::NEWTABLE || def->operation == LiftedOperation::DUPTABLE);
 }
 
-ASTLifter::ValueReads ASTLifter::CollectReads(const LiftedInstruction *def) {
-    ValueReads reads;
-    std::vector<const LiftedInstruction *> pending{def};
-    boost::unordered_flat_set<const LiftedInstruction *> seen{def};
+const ASTLifter::ValueReads &ASTLifter::CollectReads(const LiftedInstruction *def) {
+    const auto [entry, inserted] = m_valueReads.try_emplace(def);
+    if (!inserted)
+        return entry->second;
+    auto &reads = entry->second;
+    auto &pending = m_valueReadPending;
+    auto &seen = m_valueReadSeen;
+    pending.clear();
+    seen.clear();
+    pending.push_back(def);
+    seen.insert(def);
     while (!pending.empty() && reads.registers.size() < 64) {
         const auto *reader = pending.back();
         pending.pop_back();
@@ -963,7 +973,7 @@ ASTLifter::ValueReads ASTLifter::CollectReads(const LiftedInstruction *def) {
 }
 
 bool ASTLifter::InputRebound(const LiftedInstruction *def, const LiftedInstruction *use, int32_t skipIndex, bool sameRegister) {
-    const auto reads = CollectReads(def);
+    const auto &reads = CollectReads(def);
     if (reads.incomplete)
         return true;
     if (reads.registers.empty())
@@ -1073,17 +1083,33 @@ bool ASTLifter::ChangedOnPath(const LiftedInstruction *def, const LiftedInstruct
     if (scan(def + 1, blocks[defId].lpTail + 1))
         return true;
 
-    boost::unordered_flat_set<uint32_t> after, before;
-    if (!ReachAvoiding(blocks[defId].successors, true, defId, after) || !ReachAvoiding({static_cast<uint32_t>(useId)}, false, defId, before))
+    EffectPath computed;
+    const EffectPath *path;
+    const auto key = std::make_pair(defId, useId);
+    if (const auto cached = m_effectPaths.find(key); cached != m_effectPaths.end()) {
+        path = &cached->second;
+    } else {
+        boost::unordered_flat_set<uint32_t> after, before;
+        computed.complete = ReachAvoiding(blocks[defId].successors, true, defId, after) && ReachAvoiding({static_cast<uint32_t>(useId)}, false, defId, before);
+        if (computed.complete) {
+            for (const uint32_t id : after)
+                if (id != static_cast<uint32_t>(useId) && before.contains(id))
+                    computed.blocks.push_back(id);
+            computed.loopsAroundUse = std::ranges::any_of(blocks[useId].successors, [&](uint32_t next) { return before.contains(next); });
+        }
+        constexpr size_t kMaxCachedPaths = 128;
+        path = m_effectPaths.size() < kMaxCachedPaths ? &m_effectPaths.emplace(key, std::move(computed)).first->second : &computed;
+    }
+    if (!path->complete)
         return true;
-    for (const uint32_t id : after)
-        if (id != static_cast<uint32_t>(useId) && before.contains(id) && blocks[id].lpHead && scan(blocks[id].lpHead, blocks[id].lpTail + 1))
+    for (const uint32_t id : path->blocks)
+        if (blocks[id].lpHead && scan(blocks[id].lpHead, blocks[id].lpTail + 1))
             return true;
     const auto &useBlock = blocks[useId];
     if (scan(useBlock.lpHead, use))
         return true;
     // a loop around the use runs the rest of its block before the next read
-    return std::ranges::any_of(useBlock.successors, [&](uint32_t next) { return before.contains(next); }) && scan(use + 1, useBlock.lpTail + 1);
+    return path->loopsAroundUse && scan(use + 1, useBlock.lpTail + 1);
 }
 
 // Evaluation rank of `value` among the inputs of `use`; unknown where rendering may reorder operands.
@@ -1196,7 +1222,7 @@ bool ASTLifter::RendersAfter(const LiftedInstruction &inst, const SSARef &value,
 bool ASTLifter::ReadLocationChanged(const LiftedInstruction *def) {
     if (def->operands.size() < 2 || def->operands[0].type != LiftedOperandType::Register)
         return false;
-    const auto reads = CollectReads(def);
+    const auto &reads = CollectReads(def);
     if (reads.incomplete)
         return true;
     if (!reads.capturedLocal && reads.globals.empty() && reads.upvalues.empty())

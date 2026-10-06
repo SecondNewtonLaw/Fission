@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <string_view>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <variant>
@@ -25,6 +26,7 @@ inline std::string RestoreReservedNames(std::string text) {
 }
 
 class Visitor;
+enum class LiteralNodeKind : uint8_t { Unknown, Nil, Boolean, Number, Integer, String, Table, Vector };
 enum class ASTNodeKind {
     LiteralValue,
     FunctionDeclarationNode,
@@ -157,6 +159,7 @@ class ASTNode {
   public:
     virtual ~ASTNode() = default;
     ASTNodeKind nodeKind = ASTNodeKind::Unknown;
+    LiteralNodeKind literalKind = LiteralNodeKind::Unknown;
     virtual void Accept(Visitor *visitor) { (void)visitor; }
 };
 
@@ -347,6 +350,7 @@ class VariableDeclarationNode : public Declaration {
     std::shared_ptr<Expression> identifier;
     std::shared_ptr<Expression> value;
     bool bExported = false;
+    bool bConst = false;
     std::optional<std::shared_ptr<Expression>> type = std::nullopt;
     VariableDeclarationNode(std::shared_ptr<Identifier> identifier) : identifier(std::make_shared<IdentifierExpressionNode>(identifier)), value(nullptr) {
         this->nodeKind = ASTNodeKind::VariableDeclaration;
@@ -361,18 +365,25 @@ class VariableDeclarationNode : public Declaration {
 class LiteralNode : public Expression {
   public:
     bool bUseParenthesis = false;
+    bool bIsTableLiteral = false;
 };
 
 class NilLiteralNode : public LiteralNode {
   public:
-    NilLiteralNode() { this->nodeKind = ASTNodeKind::LiteralValue; }
+    NilLiteralNode() {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Nil;
+    }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
 class BooleanLiteralNode : public LiteralNode {
   public:
     bool value;
-    BooleanLiteralNode(bool v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    BooleanLiteralNode(bool v) : value(v) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Boolean;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
@@ -380,7 +391,10 @@ class BooleanLiteralNode : public LiteralNode {
 class NumberLiteralNode : public LiteralNode {
   public:
     double value;
-    NumberLiteralNode(double v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    NumberLiteralNode(double v) : value(v) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Number;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
@@ -388,14 +402,20 @@ class NumberLiteralNode : public LiteralNode {
 class IntegerLiteralNode : public LiteralNode {
   public:
     int64_t value;
-    IntegerLiteralNode(int64_t v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    IntegerLiteralNode(int64_t v) : value(v) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Integer;
+    }
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
 
 class StringLiteralNode : public LiteralNode {
   public:
     std::string value;
-    StringLiteralNode(std::string v) : value(v) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    StringLiteralNode(std::string v) : value(v) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::String;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
@@ -403,8 +423,16 @@ class StringLiteralNode : public LiteralNode {
 class TableLiteralNode : public LiteralNode {
   public:
     std::vector<std::shared_ptr<Expression>> expressions;
-    TableLiteralNode() : expressions() { this->nodeKind = ASTNodeKind::LiteralValue; }
-    TableLiteralNode(const std::vector<std::shared_ptr<Expression>> &expressions) : expressions(expressions) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    TableLiteralNode() : expressions() {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->bIsTableLiteral = true;
+        this->literalKind = LiteralNodeKind::Table;
+    }
+    TableLiteralNode(const std::vector<std::shared_ptr<Expression>> &expressions) : expressions(expressions) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->bIsTableLiteral = true;
+        this->literalKind = LiteralNodeKind::Table;
+    }
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
@@ -416,14 +444,57 @@ class VectorNode : public LiteralNode {
 
     std::variant<Float, Double> components{Float{}};
 
-    VectorNode() { this->nodeKind = ASTNodeKind::LiteralValue; }
-    VectorNode(Float values) : components(values) { this->nodeKind = ASTNodeKind::LiteralValue; }
-    VectorNode(Double values) : components(values) { this->nodeKind = ASTNodeKind::LiteralValue; }
+    VectorNode() {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Vector;
+    }
+    VectorNode(Float values) : components(values) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Vector;
+    }
+    VectorNode(Double values) : components(values) {
+        this->nodeKind = ASTNodeKind::LiteralValue;
+        this->literalKind = LiteralNodeKind::Vector;
+    }
     VectorNode(const float x, const float y, const float z, const float w) : VectorNode(Float{x, y, z, w}) {}
     VectorNode(const double x, const double y, const double z, const double w) : VectorNode(Double{x, y, z, w}) {}
 
     void Accept(Visitor *visitor) override { visitor->Visit(this); }
 };
+
+template <typename T, typename Base> std::shared_ptr<T> AsLiteral(const std::shared_ptr<Base> &value) {
+    constexpr auto kind = [] {
+        if constexpr (std::is_same_v<T, NilLiteralNode>)
+            return LiteralNodeKind::Nil;
+        else if constexpr (std::is_same_v<T, BooleanLiteralNode>)
+            return LiteralNodeKind::Boolean;
+        else if constexpr (std::is_same_v<T, NumberLiteralNode>)
+            return LiteralNodeKind::Number;
+        else if constexpr (std::is_same_v<T, IntegerLiteralNode>)
+            return LiteralNodeKind::Integer;
+        else if constexpr (std::is_same_v<T, StringLiteralNode>)
+            return LiteralNodeKind::String;
+        else if constexpr (std::is_same_v<T, TableLiteralNode>)
+            return LiteralNodeKind::Table;
+        else if constexpr (std::is_same_v<T, VectorNode>)
+            return LiteralNodeKind::Vector;
+        else
+            return LiteralNodeKind::Unknown;
+    }();
+    if constexpr (kind == LiteralNodeKind::Unknown) {
+        return std::dynamic_pointer_cast<T>(value);
+    } else {
+        if (!value)
+            return {};
+        if (value->nodeKind == ASTNodeKind::Unknown)
+            return std::dynamic_pointer_cast<T>(value);
+        if (value->nodeKind != ASTNodeKind::LiteralValue)
+            return {};
+        if (value->literalKind == LiteralNodeKind::Unknown)
+            return std::dynamic_pointer_cast<T>(value);
+        return value->literalKind == kind ? std::static_pointer_cast<T>(value) : nullptr;
+    }
+}
 
 class FunctionDeclarationNode : public Expression {
   public:
@@ -486,6 +557,7 @@ class NameCallExpressionNode : public Expression {
     bool bIsVariadicCall;
     bool inlineCall = false;
     bool bIsLocalDeclaration = true;
+    bool bConst = false;
     // Parentheses truncate a fixed-result method call in a spread position.
     bool bAdjustToOne = false;
 
@@ -510,6 +582,7 @@ class CallExpressionNode : public Expression {
     bool bIsVariadicCall;
     bool inlineCall;
     bool bIsLocalDeclaration = true;
+    bool bConst = false;
     // Parentheses truncate a fixed-result call in a spread position.
     bool bAdjustToOne = false;
     // `local a, b = ...`: `rets` bind the varargs; callee and arguments are unused

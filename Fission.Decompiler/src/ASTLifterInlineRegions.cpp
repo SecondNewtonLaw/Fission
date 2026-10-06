@@ -26,11 +26,15 @@ void ASTLifter::StampInlineSources(std::vector<std::shared_ptr<Statement>> &stat
         const int32_t call = at(lifted.recoveredCallAt, statement->originPc, -1);
         if (call >= 0 && call != lastCall && m_inlineSources) {
             const auto &source = m_inlineSources->sources[lifted.recoveredCalls[call]];
-            rebuilt.push_back(std::make_shared<CommentNode>(
-                std::format("Fission: INFO: call to {} recovered from its inlined body",
-                            source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function")),
-                true, true
-            ));
+            rebuilt.push_back(
+                std::make_shared<CommentNode>(
+                    std::format(
+                        "Fission: INFO: call to {} recovered from its inlined body",
+                        source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function")
+                    ),
+                    true, true
+                )
+            );
         }
         lastCall = call;
         rebuilt.push_back(std::move(statement));

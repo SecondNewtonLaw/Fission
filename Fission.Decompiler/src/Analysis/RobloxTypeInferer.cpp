@@ -41,13 +41,13 @@ static bool IsGeneratedName(const std::string &name) {
 }
 
 std::optional<std::string> RobloxTypeInferer::StringLiteralValue(const std::shared_ptr<Expression> &expr) {
-    if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr))
+    if (auto str = AsLiteral<StringLiteralNode>(expr))
         return str->value;
     return std::nullopt;
 }
 
 std::optional<std::string> RobloxTypeInferer::MemberKeyName(const std::shared_ptr<Expression> &expr) {
-    if (auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr))
+    if (auto str = AsLiteral<StringLiteralNode>(expr))
         return str->value;
     return IdentifierName(expr);
 }
@@ -270,17 +270,17 @@ std::optional<std::string> RobloxTypeInferer::LibraryReceiverMethodType(const st
 }
 
 std::optional<std::string> RobloxTypeInferer::LiteralType(const std::shared_ptr<Expression> &expr) {
-    if (std::dynamic_pointer_cast<StringLiteralNode>(expr))
+    if (AsLiteral<StringLiteralNode>(expr))
         return "string";
-    if (std::dynamic_pointer_cast<NumberLiteralNode>(expr))
+    if (AsLiteral<NumberLiteralNode>(expr))
         return "number";
-    if (std::dynamic_pointer_cast<IntegerLiteralNode>(expr))
+    if (AsLiteral<IntegerLiteralNode>(expr))
         return "integer";
-    if (std::dynamic_pointer_cast<BooleanLiteralNode>(expr))
+    if (AsLiteral<BooleanLiteralNode>(expr))
         return "boolean";
-    if (std::dynamic_pointer_cast<VectorNode>(expr))
+    if (AsLiteral<VectorNode>(expr))
         return "Vector3";
-    if (std::dynamic_pointer_cast<NilLiteralNode>(expr))
+    if (AsLiteral<NilLiteralNode>(expr))
         return "nil";
     return std::nullopt;
 }

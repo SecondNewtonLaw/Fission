@@ -114,7 +114,7 @@ class IfExpressionFolder {
             return Calls(index->left) || Calls(index->right);
         if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(expr))
             return Calls(member->table) || Calls(member->key);
-        if (auto table = std::dynamic_pointer_cast<TableLiteralNode>(expr))
+        if (auto table = AsLiteral<TableLiteralNode>(expr))
             return std::ranges::any_of(table->expressions, [](const auto &value) { return Calls(value); });
         if (auto iff = std::dynamic_pointer_cast<IfExpressionNode>(expr))
             return Calls(iff->condition) || Calls(iff->thenExpr) || Calls(iff->elseExpr);
@@ -207,7 +207,7 @@ class IfExpressionFolder {
         for (size_t i = 0; i + 2 < stmts.size(); ++i) {
             const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmts[i]);
             const auto temp = decl ? std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier) : nullptr;
-            const auto initial = decl ? std::dynamic_pointer_cast<BooleanLiteralNode>(decl->value) : nullptr;
+            const auto initial = decl ? AsLiteral<BooleanLiteralNode>(decl->value) : nullptr;
             const auto guard = std::dynamic_pointer_cast<IfStatementNode>(stmts[i + 1]);
             const auto negated = guard ? std::dynamic_pointer_cast<UnaryExpressionNode>(guard->condition) : nullptr;
             const auto first = negated ? std::dynamic_pointer_cast<BinaryExpressionNode>(negated->operand) : nullptr;
@@ -223,8 +223,8 @@ class IfExpressionFolder {
                 !SameOperand(decl->identifier, destinationValue))
                 continue;
             const auto choice = std::dynamic_pointer_cast<IfExpressionNode>(branchValue);
-            const auto yes = choice ? std::dynamic_pointer_cast<BooleanLiteralNode>(choice->thenExpr) : nullptr;
-            const auto no = choice ? std::dynamic_pointer_cast<BooleanLiteralNode>(choice->elseExpr) : nullptr;
+            const auto yes = choice ? AsLiteral<BooleanLiteralNode>(choice->thenExpr) : nullptr;
+            const auto no = choice ? AsLiteral<BooleanLiteralNode>(choice->elseExpr) : nullptr;
             const auto second = choice ? std::dynamic_pointer_cast<BinaryExpressionNode>(choice->condition) : nullptr;
             if (!yes || !no || yes->value == no->value || !second || (second->op != "==" && second->op != "~="))
                 continue;

@@ -206,30 +206,33 @@ static bool IsLoopPrep(LiftedOperation operation) {
 }
 
 // FORGLOOP assigns a generic-for's variables before every body run, so the header's entry edge carries none of them.
-static bool IsGenericForVariable(const AnalyzedFunction &func, const BasicBlock &header, int reg) {
+static std::bitset<256> GenericForVariables(const AnalyzedFunction &func, const BasicBlock &header, int maxRegs) {
+    std::bitset<256> variables;
     if (!header.loopLatch || *header.loopLatch >= func.basicBlocks.size())
-        return false;
+        return variables;
     const auto *latchTail = func.basicBlocks[*header.loopLatch].lpTail;
     if (!latchTail || latchTail->operation != LiftedOperation::FORGLOOP || latchTail->operands.size() < 3)
-        return false;
+        return variables;
     const int base = latchTail->operands[0].value.reg;
     const int numVars = latchTail->operands[2].value.imm.n & 0xFF;
-    return reg >= base + 3 && reg < base + 3 + numVars;
+    const int end = std::min(maxRegs + 1, base + 3 + numVars);
+    for (int reg = base + 3; reg < end; ++reg)
+        variables[reg] = true;
+    return variables;
 }
 
 // The CFG routes the loop latch back into the FOR*PREP block, but the VM runs the prep once: its reads
 // happen on entry edges only. `liveInNormal` omits those reads and is what the latch edge observes.
 static void ComputeLiveness(
-    AnalyzedFunction *func, int maxRegs, std::vector<std::vector<bool>> &liveIn, std::vector<std::vector<bool>> &liveInNormal,
-    std::vector<std::vector<bool>> &blockUses
+    AnalyzedFunction *func, int maxRegs, std::vector<std::bitset<256>> &liveIn, std::vector<std::bitset<256>> &liveInNormal,
+    std::vector<std::bitset<256>> &blockUses
 ) {
     size_t numBlocks = func->basicBlocks.size();
-    liveIn.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
-    liveInNormal.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
-    blockUses.assign(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    liveIn.assign(numBlocks, {});
+    liveInNormal.assign(numBlocks, {});
+    blockUses.assign(numBlocks, {});
     auto &use = blockUses;
-    std::vector<std::vector<bool>> entryUse(numBlocks, std::vector<bool>(maxRegs + 1, false));
-    std::vector<std::vector<bool>> def(numBlocks, std::vector<bool>(maxRegs + 1, false));
+    std::vector<std::bitset<256>> entryUse(numBlocks), def(numBlocks), genericVariables(numBlocks);
 
     for (const auto &block : func->basicBlocks) {
         if (!block.lpHead)
@@ -333,6 +336,9 @@ static void ComputeLiveness(
         }
     }
 
+    for (const auto &block : func->basicBlocks)
+        genericVariables[block.dwBlockId] = GenericForVariables(*func, block, maxRegs);
+
     // backward dataflow: a worklist seeded last-block-first revisits only predecessors of a block whose live-in changed
     std::vector<std::vector<uint32_t>> predecessors(numBlocks);
     for (const auto &block : func->basicBlocks)
@@ -350,30 +356,18 @@ static void ComputeLiveness(
         queued[bid] = false;
         {
             const auto &block = func->basicBlocks[bid];
-            bool blockChanged = false;
-
-            for (int r = 0; r <= maxRegs; ++r) {
-                bool isLiveOut = false;
-                for (uint32_t succ : block.successors) {
-                    if (succ >= liveIn.size())
-                        continue; // hostile bytecode: wild jump target
-                    const bool latchEdge = func->basicBlocks[succ].loopLatch == bid;
-                    if (!latchEdge && IsGenericForVariable(*func, func->basicBlocks[succ], r))
-                        continue;
-                    if ((latchEdge ? liveInNormal : liveIn)[succ][r]) {
-                        isLiveOut = true;
-                        break;
-                    }
-                }
-
-                const bool isLiveInNormal = use[bid][r] || (isLiveOut && !def[bid][r]);
-                const bool isLiveIn = isLiveInNormal || entryUse[bid][r];
-                if (liveIn[bid][r] != isLiveIn || liveInNormal[bid][r] != isLiveInNormal) {
-                    liveIn[bid][r] = isLiveIn;
-                    liveInNormal[bid][r] = isLiveInNormal;
-                    blockChanged = true;
-                }
+            std::bitset<256> liveOut;
+            for (uint32_t succ : block.successors) {
+                if (succ >= liveIn.size())
+                    continue; // hostile bytecode: wild jump target
+                const bool latchEdge = func->basicBlocks[succ].loopLatch == bid;
+                liveOut |= latchEdge ? liveInNormal[succ] : (liveIn[succ] & ~genericVariables[succ]);
             }
+            const auto normal = use[bid] | (liveOut & ~def[bid]);
+            const auto incoming = normal | entryUse[bid];
+            const bool blockChanged = incoming != liveIn[bid] || normal != liveInNormal[bid];
+            liveIn[bid] = incoming;
+            liveInNormal[bid] = normal;
             if (blockChanged)
                 for (const uint32_t pred : predecessors[bid])
                     if (!queued[pred]) {
@@ -395,7 +389,7 @@ void SSABuilder::CreatePhiNodes(AnalyzedFunction *lpOriginalFunction, const std:
         numParams = lpOriginalFunction->lpLiftedFunction->lpDeserialized->numparams;
     }
 
-    std::vector<std::vector<bool>> liveIn, liveInNormal;
+    std::vector<std::bitset<256>> liveIn, liveInNormal;
     ComputeLiveness(lpOriginalFunction, maxRegs, liveIn, liveInNormal, blockUses);
     entryOnlyPhis.assign(lpOriginalFunction->basicBlocks.size(), std::vector<bool>(maxRegs + 1, false));
 

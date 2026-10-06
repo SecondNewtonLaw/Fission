@@ -7,6 +7,7 @@
 #include "DenominatorAnalysis.hpp"
 #include "FissionDebugNotes.hpp"
 
+#include <bitset>
 #include <map>
 #include <set>
 #include <stack>
@@ -47,7 +48,7 @@ class SSABuilder {
      *  Block x register: header phis that exist only for the FOR*PREP read, which runs on loop entry.
      */
     std::vector<std::vector<bool>> entryOnlyPhis;
-    std::vector<std::vector<bool>> blockUses;
+    std::vector<std::bitset<256>> blockUses;
 
     int32_t NewVersion(int32_t reg);
 

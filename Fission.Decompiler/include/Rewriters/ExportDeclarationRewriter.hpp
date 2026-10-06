@@ -38,7 +38,7 @@ class ExportDeclarationRewriter {
                 if (tableIndex != statements.size())
                     return;
                 tableIndex = i;
-                table = std::dynamic_pointer_cast<TableLiteralNode>(decl->value);
+                table = AsLiteral<TableLiteralNode>(decl->value);
             }
         }
         if (!table)
@@ -63,8 +63,7 @@ class ExportDeclarationRewriter {
         for (size_t i = tableIndex + 1; i + 1 < statements.size(); ++i) {
             if (std::dynamic_pointer_cast<ClassDeclarationNode>(statements[i]))
                 return;
-            if (const auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements[i]); fn &&
-                fn->functionName.starts_with(tableName + ".")) {
+            if (const auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(statements[i]); fn && fn->functionName.starts_with(tableName + ".")) {
                 const std::string key = fn->functionName.substr(tableName.size() + 1);
                 if (!ValidName(key) || !functionSources.emplace(key, i).second)
                     return;
@@ -74,7 +73,7 @@ class ExportDeclarationRewriter {
             const auto member = assignment ? std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left) : nullptr;
             if (!member || !IsName(member->table, tableName))
                 continue;
-            const auto key = std::dynamic_pointer_cast<StringLiteralNode>(member->key);
+            const auto key = AsLiteral<StringLiteralNode>(member->key);
             if (!key || !ValidName(key->value))
                 return;
             keys.insert(key->value);
@@ -113,9 +112,8 @@ class ExportDeclarationRewriter {
             const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(statements[i]);
             const auto id = decl ? std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier) : nullptr;
             if (!id || !id->identifier || !entries.contains(id->identifier->name) || functionSources.contains(id->identifier->name) ||
-                !(std::dynamic_pointer_cast<NumberLiteralNode>(decl->value) || std::dynamic_pointer_cast<IntegerLiteralNode>(decl->value) ||
-                  std::dynamic_pointer_cast<StringLiteralNode>(decl->value) || std::dynamic_pointer_cast<BooleanLiteralNode>(decl->value) ||
-                  std::dynamic_pointer_cast<NilLiteralNode>(decl->value)))
+                !(AsLiteral<NumberLiteralNode>(decl->value) || AsLiteral<IntegerLiteralNode>(decl->value) || AsLiteral<StringLiteralNode>(decl->value) ||
+                  AsLiteral<BooleanLiteralNode>(decl->value) || AsLiteral<NilLiteralNode>(decl->value)))
                 continue;
             bool used = false;
             for (size_t j = 0; j + 1 < statements.size() && !used; ++j) {
@@ -136,9 +134,9 @@ class ExportDeclarationRewriter {
                 continue;
             const auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(statements[i]);
             const auto member = assignment ? std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left) : nullptr;
-            const auto key = member && IsName(member->table, tableName) ? std::dynamic_pointer_cast<StringLiteralNode>(member->key) : nullptr;
-            if (!key || !entries.contains(key->value) || functionSources.contains(key->value) ||
-                !std::dynamic_pointer_cast<NilLiteralNode>(entries.at(key->value)) || foldedInitializers.contains(key->value))
+            const auto key = member && IsName(member->table, tableName) ? AsLiteral<StringLiteralNode>(member->key) : nullptr;
+            if (!key || !entries.contains(key->value) || functionSources.contains(key->value) || !AsLiteral<NilLiteralNode>(entries.at(key->value)) ||
+                foldedInitializers.contains(key->value))
                 break;
             foldedInitializers.emplace(key->value, assignment->right);
             foldedAssignments.insert(i);
@@ -161,8 +159,10 @@ class ExportDeclarationRewriter {
                 for (const auto &key : entryOrder) {
                     if (functionSources.contains(key))
                         continue;
-                    auto decl = std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key)),
-                                                                          foldedInitializers.contains(key) ? foldedInitializers.at(key) : entries.at(key));
+                    auto decl = std::make_shared<VariableDeclarationNode>(
+                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key)),
+                        foldedInitializers.contains(key) ? foldedInitializers.at(key) : entries.at(key)
+                    );
                     decl->bExported = true;
                     WalkExpression(decl->value, tableName, keys, true);
                     result.push_back(std::move(decl));
@@ -184,19 +184,20 @@ class ExportDeclarationRewriter {
             const auto assignment = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt);
             const auto member = assignment ? std::dynamic_pointer_cast<MemberExpressionNode>(assignment->left) : nullptr;
             if (member && IsName(member->table, tableName)) {
-                const auto key = std::dynamic_pointer_cast<StringLiteralNode>(member->key);
+                const auto key = AsLiteral<StringLiteralNode>(member->key);
                 if (key && functionNames.contains(key->value) && IsName(assignment->right, key->value))
                     continue;
                 if (key && !declared.contains(key->value)) {
-                    auto decl = std::make_shared<VariableDeclarationNode>(std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key->value)),
-                                                                          assignment->right);
+                    auto decl = std::make_shared<VariableDeclarationNode>(
+                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key->value)), assignment->right
+                    );
                     decl->bExported = true;
                     stmt = std::move(decl);
                     declared.insert(key->value);
                 }
             }
-            if (auto comment = std::dynamic_pointer_cast<CommentNode>(stmt); comment && comment->bIsInformational &&
-                comment->comment.find(tableName) != std::string::npos)
+            if (auto comment = std::dynamic_pointer_cast<CommentNode>(stmt);
+                comment && comment->bIsInformational && comment->comment.find(tableName) != std::string::npos)
                 continue;
             WalkStatement(stmt, tableName, keys, true);
             result.push_back(std::move(stmt));
@@ -211,13 +212,13 @@ class ExportDeclarationRewriter {
     }
 
     static bool IsKey(const std::shared_ptr<Expression> &expr, const std::string &key) {
-        const auto str = std::dynamic_pointer_cast<StringLiteralNode>(expr);
+        const auto str = AsLiteral<StringLiteralNode>(expr);
         return str && str->value == key;
     }
 
     static bool ValidName(const std::string &name) {
-        static const std::unordered_set<std::string> reserved = {"and", "break", "do", "else", "elseif", "end", "false", "for", "function",
-                                                                "if", "in", "local", "nil", "not", "or", "repeat", "return", "then", "true", "until", "while"};
+        static const std::unordered_set<std::string> reserved = {"and",   "break", "do",  "else", "elseif", "end",    "false", "for",  "function", "if",   "in",
+                                                                 "local", "nil",   "not", "or",   "repeat", "return", "then",  "true", "until",    "while"};
         return ScopeAwareRenamer::IsBareIdentifier(name) && !reserved.contains(name);
     }
 
@@ -226,7 +227,7 @@ class ExportDeclarationRewriter {
             return true;
         if (auto member = std::dynamic_pointer_cast<MemberExpressionNode>(expr)) {
             if (IsName(member->table, table)) {
-                const auto key = std::dynamic_pointer_cast<StringLiteralNode>(member->key);
+                const auto key = AsLiteral<StringLiteralNode>(member->key);
                 if (!key || !keys.contains(key->value))
                     return false;
                 if (rewrite)
@@ -268,7 +269,7 @@ class ExportDeclarationRewriter {
                    WalkExpression(conditional->elseExpr, table, keys, rewrite);
         } else if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(expr)) {
             return WalkExpression(unary->operand, table, keys, rewrite);
-        } else if (auto literal = std::dynamic_pointer_cast<TableLiteralNode>(expr)) {
+        } else if (auto literal = AsLiteral<TableLiteralNode>(expr)) {
             for (auto &entry : literal->expressions)
                 if (!WalkExpression(entry, table, keys, rewrite))
                     return false;
@@ -276,16 +277,19 @@ class ExportDeclarationRewriter {
         return true;
     }
 
-    static bool WalkBlock(std::vector<std::shared_ptr<Statement>> &stmts, const std::string &table, const std::unordered_set<std::string> &keys,
-                          bool rewrite, bool inFunction = false) {
+    static bool WalkBlock(
+        std::vector<std::shared_ptr<Statement>> &stmts, const std::string &table, const std::unordered_set<std::string> &keys, bool rewrite,
+        bool inFunction = false
+    ) {
         for (auto &stmt : stmts)
             if (!WalkStatement(stmt, table, keys, rewrite, inFunction))
                 return false;
         return true;
     }
 
-    static bool WalkStatement(std::shared_ptr<Statement> &stmt, const std::string &table, const std::unordered_set<std::string> &keys, bool rewrite,
-                              bool inFunction = false) {
+    static bool WalkStatement(
+        std::shared_ptr<Statement> &stmt, const std::string &table, const std::unordered_set<std::string> &keys, bool rewrite, bool inFunction = false
+    ) {
         if (std::dynamic_pointer_cast<CommentNode>(stmt) || std::dynamic_pointer_cast<BreakStatementNode>(stmt) ||
             std::dynamic_pointer_cast<ContinueStatementNode>(stmt))
             return true;

@@ -24,6 +24,7 @@ const LuauConstant &ASTLifter::ConstantAt(long idx) const {
 #include <cstring>
 #include <exception>
 #include <functional>
+#include <map>
 #include <numeric>
 #include <unordered_map>
 #include <unordered_set>
@@ -364,9 +365,11 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             analyzedFunction.lpLiftedFunction->name
         );
     Explain("function {}: lifting {} CFG blocks", m_debugFunction, analyzedFunction.basicBlocks.size());
-    for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions)
+    for (const auto &instruction : analyzedFunction.lpLiftedFunction->instructions) {
+        m_hasClasses |= instruction.operation == LiftedOperation::NEWCLASS;
         if (const int32_t local = AssignedLocal(instruction); local >= 0)
             this->m_assignedRegisters.insert(local);
+    }
     const auto &closureInstructions = analyzedFunction.lpLiftedFunction->instructions;
     for (size_t index = 0; index < closureInstructions.size(); ++index)
         if (const auto &instruction = closureInstructions[index]; instruction.operation == LiftedOperation::DUPCLOSURE && instruction.operands.size() > 1) {
@@ -413,6 +416,13 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         this->m_defsByInstruction[defInst].push_back(ref);
 
     const auto &instructions = analyzedFunction.lpLiftedFunction->instructions;
+    m_nextDefinitionInstruction.assign(instructions.size() + 1, static_cast<int32_t>(instructions.size()));
+    // GETVARARGS can acquire an empty definition entry during emission.
+    for (size_t index = instructions.size(); index-- > 0;)
+        m_nextDefinitionInstruction[index] =
+            (m_defsByInstruction.contains(&instructions[index]) || instructions[index].operation == LiftedOperation::GETVARARGS)
+                ? static_cast<int32_t>(index)
+                : m_nextDefinitionInstruction[index + 1];
     this->m_blockOfInstruction.assign(instructions.size(), -1);
     for (const auto &block : analyzedFunction.basicBlocks)
         if (block.lpHead)
@@ -485,47 +495,53 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     for (const auto &block : analyzedFunction.basicBlocks) {
         if (!block.lpHead || !block.lpTail)
             continue;
+        std::map<std::pair<int32_t, int32_t>, std::vector<const LiftedInstruction *>> setLists;
+        for (const auto *instruction = block.lpHead; instruction <= block.lpTail; ++instruction)
+            if (instruction->operation == LiftedOperation::SETLIST && instruction->operands.size() >= 2 && analyzedFunction.implicitUses.contains(instruction))
+                setLists[{instruction->operands[0].value.reg, instruction->operands[0].ssaVersion}].push_back(instruction);
+        if (setLists.empty())
+            continue;
         for (const auto *table = block.lpHead; table <= block.lpTail; ++table) {
             if ((table->operation != LiftedOperation::NEWTABLE && table->operation != LiftedOperation::DUPTABLE) || table->operands.empty())
                 continue;
-            for (const auto *setList = table + 1; setList <= block.lpTail; ++setList) {
-                if (setList->operation != LiftedOperation::SETLIST || setList->operands.size() < 2 ||
-                    setList->operands[0].value.reg != table->operands[0].value.reg || setList->operands[0].ssaVersion != table->operands[0].ssaVersion ||
-                    !analyzedFunction.implicitUses.contains(setList))
-                    continue;
-                const auto &versions = analyzedFunction.implicitUses.at(setList);
-                const int32_t startReg = setList->operands[1].value.reg;
-                boost::unordered_flat_set<SSARef, std::hash<SSARef>> seen;
-                std::function<bool(const LiftedOperand &)> dependsOnLaterClosure = [&](const LiftedOperand &operand) -> bool {
-                    if (operand.type != LiftedOperandType::Register)
-                        return false;
-                    const SSARef ref{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion};
-                    if (!seen.insert(ref).second)
-                        return false;
-                    const auto *definition = analyzedFunction.GetDefinition(operand);
-                    if (!definition)
-                        return false;
-                    if ((definition->operation == LiftedOperation::NEWCLOSURE || definition->operation == LiftedOperation::DUPCLOSURE) &&
-                        definition->instructionIndex > table->instructionIndex)
-                        return true;
-                    for (size_t i = 1; i < definition->operands.size(); ++i)
-                        if (dependsOnLaterClosure(definition->operands[i]))
-                            return true;
+            const auto populations = setLists.find({table->operands[0].value.reg, table->operands[0].ssaVersion});
+            if (populations == setLists.end())
+                continue;
+            const auto next = std::upper_bound(populations->second.begin(), populations->second.end(), table);
+            if (next == populations->second.end())
+                continue;
+            const auto *setList = *next;
+            const auto &versions = analyzedFunction.implicitUses.at(setList);
+            const int32_t startReg = setList->operands[1].value.reg;
+            boost::unordered_flat_set<SSARef, std::hash<SSARef>> seen;
+            std::function<bool(const LiftedOperand &)> dependsOnLaterClosure = [&](const LiftedOperand &operand) -> bool {
+                if (operand.type != LiftedOperandType::Register)
                     return false;
-                };
-                for (size_t i = 0; i < versions.size(); ++i) {
-                    LiftedOperand element{};
-                    element.type = LiftedOperandType::Register;
-                    element.value.reg = startReg + static_cast<int32_t>(i);
-                    element.ssaVersion = versions[i];
-                    seen.clear();
-                    if (dependsOnLaterClosure(element)) {
-                        m_forcedMaterialization.insert(table);
-                        ExplainKeep(table, "constructor element depends on a later closure", setList);
-                        break;
-                    }
+                const SSARef ref{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion};
+                if (!seen.insert(ref).second)
+                    return false;
+                const auto *definition = analyzedFunction.GetDefinition(operand);
+                if (!definition)
+                    return false;
+                if ((definition->operation == LiftedOperation::NEWCLOSURE || definition->operation == LiftedOperation::DUPCLOSURE) &&
+                    definition->instructionIndex > table->instructionIndex)
+                    return true;
+                for (size_t i = 1; i < definition->operands.size(); ++i)
+                    if (dependsOnLaterClosure(definition->operands[i]))
+                        return true;
+                return false;
+            };
+            for (size_t i = 0; i < versions.size(); ++i) {
+                LiftedOperand element{};
+                element.type = LiftedOperandType::Register;
+                element.value.reg = startReg + static_cast<int32_t>(i);
+                element.ssaVersion = versions[i];
+                seen.clear();
+                if (dependsOnLaterClosure(element)) {
+                    m_forcedMaterialization.insert(table);
+                    ExplainKeep(table, "constructor element depends on a later closure", setList);
+                    break;
                 }
-                break;
             }
         }
     }
@@ -546,7 +562,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
     for (const auto &block : analyzedFunction.basicBlocks)
         for (const auto &phi : block.phiNodes)
             for (size_t i = 1; i < phi.operands.size(); ++i)
-                if (phi.operands[i].type == LiftedOperandType::Register && phi.operands[i].value.reg == phi.operands[0].value.reg && phi.operands[i].ssaVersion >= 0)
+                if (phi.operands[i].type == LiftedOperandType::Register && phi.operands[i].value.reg == phi.operands[0].value.reg &&
+                    phi.operands[i].ssaVersion >= 0)
                     m_variableParent[VariableOf({static_cast<uint8_t>(phi.operands[i].value.reg), phi.operands[i].ssaVersion})] =
                         VariableOf({static_cast<uint8_t>(phi.operands[0].value.reg), phi.operands[0].ssaVersion});
 
@@ -634,7 +651,9 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         };
         for (size_t i = 0; i < instrs.size(); ++i) {
             const auto &inst = instrs[i];
-            const int32_t blockId = analyzedFunction.GetBlockId(&inst);
+            if (inst.operation != LiftedOperation::DUPCLOSURE && inst.operation != LiftedOperation::NEWCLOSURE)
+                continue;
+            const int32_t blockId = BlockOf(&inst);
             if (blockId < 0 || analyzedFunction.basicBlocks[static_cast<size_t>(blockId)].bType == BlockType::Dead)
                 continue;
             LuauProto proto = nullptr;
@@ -708,7 +727,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                                             analyzedFunction.ssaOverrides[ref] = name;
                     } else if (mode == 1 && proto->upvalueNames.size() <= capIdx && reg >= analyzedFunction.lpLiftedFunction->numparams) {
                         // no debug locals: every value of the captured variable is one local
-                        const auto className = HoistedClassName(analyzedFunction, SSARef{reg, cap.operands[1].ssaVersion});
+                        const auto className = m_hasClasses ? HoistedClassName(analyzedFunction, SSARef{reg, cap.operands[1].ssaVersion}) : std::nullopt;
                         const std::string name =
                             className                         ? *className
                             : selfCapture && proto->debugName ? localName(*proto->debugName, reg)
@@ -753,141 +772,144 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         // Debug locals name every value written inside their range. Lifted scopes are flatter than the source's, so a
         // local that overlaps a same-named local in another register (a shadow) keeps a distinct name.
         const auto &locals = analyzedFunction.lpLiftedFunction->lpDeserialized->locvars;
-        std::vector<std::string> debugNames(locals.size());
-        // locvars close innermost-first; the outer local of a shadow pair keeps the plain name
-        std::vector<size_t> openOrder(locals.size());
-        std::iota(openOrder.begin(), openOrder.end(), size_t{0});
-        std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
-        std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
-        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
-            if (definition && definition->operation != LiftedOperation::PHI)
-                writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
-        // the named value lives from its initializer, which can precede the local's open by a whole inlined call
-        const auto liveFrom = [&](const LuauLocalVar &local) {
-            int32_t from = -1;
-            for (const int32_t write : writesByRegister[static_cast<uint8_t>(local.reg)])
-                if (write < local.startpc)
-                    from = std::max(from, write);
-            return from < 0 ? local.startpc : from;
-        };
-        for (const size_t i : openOrder) {
-            const auto &local = locals[i];
-            if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
-                continue;
-            // a move-elided inline parameter opens on a register another local still owns; it names nothing
-            if (std::ranges::any_of(locals, [&](const auto &owner) {
-                    return &owner != &local && owner.reg == local.reg && owner.startpc < local.startpc && local.startpc < owner.endpc;
-                }))
-                continue;
-            const std::string baseName = analyzedFunction.DebugLocalName(local.varname);
-            std::string name = localName(baseName, static_cast<uint8_t>(local.reg));
-            const auto shadows = [&](const std::string &candidate) {
-                for (size_t j = 0; j < locals.size(); ++j) {
-                    // parameters are named apart from this pass, yet a same-named local still hides one
-                    const bool named = debugNames[j] == candidate || (locals[j].reg < analyzedFunction.lpLiftedFunction->numparams &&
-                                                                      analyzedFunction.DebugLocalName(locals[j].varname) == candidate);
-                    if (named && locals[j].reg != local.reg && liveFrom(locals[j]) < local.endpc && liveFrom(local) < locals[j].endpc)
+        analyzedFunction.debugLocalInitializers.clear();
+        if (!locals.empty()) {
+            std::vector<std::string> debugNames(locals.size());
+            // locvars close innermost-first; the outer local of a shadow pair keeps the plain name
+            std::vector<size_t> openOrder(locals.size());
+            std::iota(openOrder.begin(), openOrder.end(), size_t{0});
+            std::ranges::stable_sort(openOrder, {}, [&](size_t i) { return locals[i].startpc; });
+            std::unordered_map<uint8_t, std::vector<int32_t>> writesByRegister;
+            for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+                if (definition && definition->operation != LiftedOperation::PHI)
+                    writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
+            for (auto &entry : writesByRegister)
+                std::ranges::sort(entry.second);
+            const auto lastWriteBefore = [&](const LuauLocalVar &local) {
+                const auto &writes = writesByRegister[static_cast<uint8_t>(local.reg)];
+                const auto position = std::ranges::lower_bound(writes, local.startpc);
+                return position == writes.begin() ? int32_t{-1} : std::max(int32_t{-1}, *(position - 1));
+            };
+            // the named value lives from its initializer, which can precede the local's open by a whole inlined call
+            const auto liveFrom = [&](const LuauLocalVar &local) {
+                const int32_t from = lastWriteBefore(local);
+                return from < 0 ? local.startpc : from;
+            };
+            for (const size_t i : openOrder) {
+                const auto &local = locals[i];
+                if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
+                    continue;
+                // a move-elided inline parameter opens on a register another local still owns; it names nothing
+                if (std::ranges::any_of(locals, [&](const auto &owner) {
+                        return &owner != &local && owner.reg == local.reg && owner.startpc < local.startpc && local.startpc < owner.endpc;
+                    }))
+                    continue;
+                const std::string baseName = analyzedFunction.DebugLocalName(local.varname);
+                std::string name = localName(baseName, static_cast<uint8_t>(local.reg));
+                const auto shadows = [&](const std::string &candidate) {
+                    for (size_t j = 0; j < locals.size(); ++j) {
+                        // parameters are named apart from this pass, yet a same-named local still hides one
+                        const bool named = debugNames[j] == candidate || (locals[j].reg < analyzedFunction.lpLiftedFunction->numparams &&
+                                                                          analyzedFunction.DebugLocalName(locals[j].varname) == candidate);
+                        if (named && locals[j].reg != local.reg && liveFrom(locals[j]) < local.endpc && liveFrom(local) < locals[j].endpc)
+                            return true;
+                    }
+                    return false;
+                };
+                for (int suffix = 2; shadows(name); ++suffix)
+                    name = std::format("{}_{}", baseName, suffix);
+                debugNames[i] = name;
+            }
+            // `local a, b = f(), g()` opens both locals after the last initializer, so a write counts when it is the register's last before the open
+            const auto initializes = [&](const LuauLocalVar &local, int32_t index) {
+                if (index >= local.startpc - 1)
+                    return true;
+                const auto &writes = writesByRegister[static_cast<uint8_t>(local.reg)];
+                const auto next = std::ranges::upper_bound(writes, index);
+                return next == writes.end() || *next >= local.startpc;
+            };
+            std::optional<std::map<int32_t, DominatorInfo>> dominators;
+            const auto dominates = [&](int32_t ancestor, int32_t block) {
+                if (ancestor < 0 || block < 0)
+                    return false;
+                if (!dominators)
+                    dominators = AnalyzeDenominators(analyzedFunction);
+                for (int32_t cursor = block; cursor >= 0;) {
+                    if (cursor == ancestor)
                         return true;
+                    const auto it = dominators->find(cursor);
+                    if (it == dominators->end() || it->second.idom == cursor)
+                        return false;
+                    cursor = it->second.idom;
                 }
                 return false;
             };
-            for (int suffix = 2; shadows(name); ++suffix)
-                name = std::format("{}_{}", baseName, suffix);
-            debugNames[i] = name;
-        }
-        // `local a, b = f(), g()` opens both locals after the last initializer, so a write counts when it is the register's last before the open
-        const auto initializes = [&](const LuauLocalVar &local, int32_t index) {
-            if (index >= local.startpc - 1)
-                return true;
-            return std::ranges::none_of(writesByRegister[static_cast<uint8_t>(local.reg)], [&](int32_t write) {
-                return index < write && write < local.startpc;
-            });
-        };
-        analyzedFunction.debugLocalInitializers.clear();
-        std::optional<std::map<int32_t, DominatorInfo>> dominators;
-        const auto dominates = [&](int32_t ancestor, int32_t block) {
-            if (ancestor < 0 || block < 0)
-                return false;
-            if (!dominators)
-                dominators = AnalyzeDenominators(analyzedFunction);
-            for (int32_t cursor = block; cursor >= 0;) {
-                if (cursor == ancestor)
-                    return true;
-                const auto it = dominators->find(cursor);
-                if (it == dominators->end() || it->second.idom == cursor)
-                    return false;
-                cursor = it->second.idom;
-            }
-            return false;
-        };
-        for (size_t i = 0; i < locals.size(); ++i) {
-            const auto &local = locals[i];
-            if (debugNames[i].empty() || local.startpc <= 0 || static_cast<size_t>(local.startpc) > instrs.size())
-                continue;
-            const auto &opener = instrs[local.startpc - 1];
-            if (opener.operation == LiftedOperation::FORNPREP || opener.operation == LiftedOperation::FORGPREP ||
-                opener.operation == LiftedOperation::FORGPREP_NEXT || opener.operation == LiftedOperation::FORGPREP_INEXT)
-                continue;
-            int32_t last = -1;
-            for (const int32_t write : writesByRegister[static_cast<uint8_t>(local.reg)])
-                if (write < local.startpc)
-                    last = std::max(last, write);
-            // a later write on one arm of a branch is the last by index but not every path's initializer
-            if (last < 0 || !dominates(analyzedFunction.GetBlockId(&instrs[last]), analyzedFunction.GetBlockId(&opener)))
-                continue;
-            if (std::ranges::any_of(locals, [&](const auto &owner) {
-                    return &owner != &local && owner.reg == local.reg && owner.startpc <= last && owner.endpc > local.startpc && !owner.varname.empty();
-                }))
-                continue;
-            analyzedFunction.debugLocalInitializers.emplace(last, local.reg);
-        }
-        const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
-            std::optional<size_t> found;
             for (size_t i = 0; i < locals.size(); ++i) {
-                if (index < locals[i].startpc && locals[i].startpc > 0 && static_cast<size_t>(locals[i].startpc - 1) < instrs.size()) {
-                    const auto &prep = instrs[locals[i].startpc - 1];
-                    const bool numeric = prep.operation == LiftedOperation::FORNPREP;
-                    const bool generic = prep.operation == LiftedOperation::FORGPREP || prep.operation == LiftedOperation::FORGPREP_NEXT ||
-                                         prep.operation == LiftedOperation::FORGPREP_INEXT;
-                    if ((numeric || generic) && !prep.operands.empty() && reg >= prep.operands[0].value.reg + (numeric ? 2 : 3))
-                        continue;
-                }
-                if (!debugNames[i].empty() && locals[i].reg == reg && index < locals[i].endpc && initializes(locals[i], index) &&
-                    (!found || locals[i].startpc > locals[*found].startpc))
-                    found = i;
+                const auto &local = locals[i];
+                if (debugNames[i].empty() || local.startpc <= 0 || static_cast<size_t>(local.startpc) > instrs.size())
+                    continue;
+                const auto &opener = instrs[local.startpc - 1];
+                if (opener.operation == LiftedOperation::FORNPREP || opener.operation == LiftedOperation::FORGPREP ||
+                    opener.operation == LiftedOperation::FORGPREP_NEXT || opener.operation == LiftedOperation::FORGPREP_INEXT)
+                    continue;
+                const int32_t last = lastWriteBefore(local);
+                // a later write on one arm of a branch is the last by index but not every path's initializer
+                if (last < 0 || !dominates(BlockOf(&instrs[last]), BlockOf(&opener)))
+                    continue;
+                if (std::ranges::any_of(locals, [&](const auto &owner) {
+                        return &owner != &local && owner.reg == local.reg && owner.startpc <= last && owner.endpc > local.startpc && !owner.varname.empty();
+                    }))
+                    continue;
+                analyzedFunction.debugLocalInitializers.emplace(last, local.reg);
             }
-            return found;
-        };
-        const auto root = [&](const SSARef &ref) { return VariableOf(ref); };
-        std::unordered_map<SSARef, std::optional<size_t>> componentLocals; // nullopt: two different locals share it
-        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
-            if (definition && definition->operation != LiftedOperation::PHI && ref.regIndex >= analyzedFunction.lpLiftedFunction->numparams)
-                if (const auto local = debugLocalAt(ref.regIndex, definition->instructionIndex)) {
-                    const auto [entry, inserted] = componentLocals.try_emplace(root(ref), local);
-                    if (!inserted && entry->second && debugNames[*entry->second] != debugNames[*local])
-                        entry->second.reset();
-                }
-        // a value read outside its local's scope (an inlined call's result) is not that local; constructor stores precede the open
-        const auto populates = [](const LiftedInstruction &user, const SSARef &table) {
-            const size_t operand = user.operation == LiftedOperation::SETLIST ? 0 : 1;
-            return (user.operation == LiftedOperation::SETLIST || user.operation == LiftedOperation::SETTABLE ||
-                    user.operation == LiftedOperation::SETTABLEKS || user.operation == LiftedOperation::SETTABLEN) &&
-                   user.operands.size() > operand && user.operands[operand].type == LiftedOperandType::Register &&
-                   user.operands[operand].value.reg == table.regIndex && user.operands[operand].ssaVersion == table.version;
-        };
-        for (const auto &[ref, users] : analyzedFunction.users)
-            if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
-                for (const auto *user : users)
-                    if (user->operation != LiftedOperation::PHI &&
-                        ((user->instructionIndex < locals[*owner->second].startpc - 1 && !populates(*user, ref)) ||
-                         user->instructionIndex >= locals[*owner->second].endpc)) {
-                        owner->second.reset();
-                        break;
+            const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
+                std::optional<size_t> found;
+                for (size_t i = 0; i < locals.size(); ++i) {
+                    if (index < locals[i].startpc && locals[i].startpc > 0 && static_cast<size_t>(locals[i].startpc - 1) < instrs.size()) {
+                        const auto &prep = instrs[locals[i].startpc - 1];
+                        const bool numeric = prep.operation == LiftedOperation::FORNPREP;
+                        const bool generic = prep.operation == LiftedOperation::FORGPREP || prep.operation == LiftedOperation::FORGPREP_NEXT ||
+                                             prep.operation == LiftedOperation::FORGPREP_INEXT;
+                        if ((numeric || generic) && !prep.operands.empty() && reg >= prep.operands[0].value.reg + (numeric ? 2 : 3))
+                            continue;
                     }
-        for (const auto &[ref, definition] : analyzedFunction.definitionMap)
-            if (!analyzedFunction.ssaOverrides.contains(ref) && !analyzedFunction.variableNames.contains(ref))
+                    if (!debugNames[i].empty() && locals[i].reg == reg && index < locals[i].endpc && initializes(locals[i], index) &&
+                        (!found || locals[i].startpc > locals[*found].startpc))
+                        found = i;
+                }
+                return found;
+            };
+            const auto root = [&](const SSARef &ref) { return VariableOf(ref); };
+            std::unordered_map<SSARef, std::optional<size_t>> componentLocals; // nullopt: two different locals share it
+            for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+                if (definition && definition->operation != LiftedOperation::PHI && ref.regIndex >= analyzedFunction.lpLiftedFunction->numparams)
+                    if (const auto local = debugLocalAt(ref.regIndex, definition->instructionIndex)) {
+                        const auto [entry, inserted] = componentLocals.try_emplace(root(ref), local);
+                        if (!inserted && entry->second && debugNames[*entry->second] != debugNames[*local])
+                            entry->second.reset();
+                    }
+            // a value read outside its local's scope (an inlined call's result) is not that local; constructor stores precede the open
+            const auto populates = [](const LiftedInstruction &user, const SSARef &table) {
+                const size_t operand = user.operation == LiftedOperation::SETLIST ? 0 : 1;
+                return (user.operation == LiftedOperation::SETLIST || user.operation == LiftedOperation::SETTABLE ||
+                        user.operation == LiftedOperation::SETTABLEKS || user.operation == LiftedOperation::SETTABLEN) &&
+                       user.operands.size() > operand && user.operands[operand].type == LiftedOperandType::Register &&
+                       user.operands[operand].value.reg == table.regIndex && user.operands[operand].ssaVersion == table.version;
+            };
+            for (const auto &[ref, users] : analyzedFunction.users)
                 if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
-                    analyzedFunction.SetVariableName(ref.regIndex, ref.version, debugNames[*owner->second]);
+                    for (const auto *user : users)
+                        if (user->operation != LiftedOperation::PHI &&
+                            ((user->instructionIndex < locals[*owner->second].startpc - 1 && !populates(*user, ref)) ||
+                             user->instructionIndex >= locals[*owner->second].endpc)) {
+                            owner->second.reset();
+                            break;
+                        }
+            for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+                if (!analyzedFunction.ssaOverrides.contains(ref) && !analyzedFunction.variableNames.contains(ref))
+                    if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
+                        analyzedFunction.SetVariableName(ref.regIndex, ref.version, debugNames[*owner->second]);
+        }
     }
 
     // Captured phi inputs must use the same local name as the merged upvalue.
@@ -926,6 +948,8 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         if (definitions.size() < 2 || analyzedFunction.globalRegNames.contains(reg))
             continue;
         std::ranges::sort(definitions, [](const auto &left, const auto &right) { return left.second->instructionIndex < right.second->instructionIndex; });
+        std::vector<size_t> nextInBlock;
+        boost::unordered_flat_set<SSARef, std::hash<SSARef>> seen;
         for (size_t i = 0; i + 1 < definitions.size(); ++i) {
             const auto [ref, definition] = definitions[i];
             if (definition->operation == LiftedOperation::NAMECALL || definition->operation == LiftedOperation::NAMECALLUDATA)
@@ -945,7 +969,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             }
             auto current = ref;
             int32_t lastUse = definition->instructionIndex;
-            std::unordered_set<SSARef> seen;
+            seen.clear();
             while (seen.insert(current).second) {
                 const auto users = analyzedFunction.users.find(current);
                 if (users == analyzedFunction.users.end() || users->second.size() != 1)
@@ -961,11 +985,24 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             if (block < 0)
                 continue;
             bool overlaps = false;
-            for (size_t j = i + 1; j < definitions.size() && definitions[j].second->instructionIndex < lastUse; ++j)
-                if (BlockOf(definitions[j].second) == block) {
+            if (definitions[i + 1].second->instructionIndex < lastUse) {
+                if (BlockOf(definitions[i + 1].second) == block) {
                     overlaps = true;
-                    break;
+                } else {
+                    if (nextInBlock.empty()) {
+                        nextInBlock.assign(definitions.size(), definitions.size());
+                        std::unordered_map<int32_t, size_t> nextByBlock;
+                        for (size_t j = definitions.size(); j-- > 0;) {
+                            const auto [next, inserted] = nextByBlock.try_emplace(BlockOf(definitions[j].second), j);
+                            if (!inserted) {
+                                nextInBlock[j] = next->second;
+                                next->second = j;
+                            }
+                        }
+                    }
+                    overlaps = nextInBlock[i] < definitions.size() && definitions[nextInBlock[i]].second->instructionIndex < lastUse;
                 }
+            }
             if (overlaps)
                 analyzedFunction.ssaOverrides[ref] = std::format("v{}_{}", reg, ref.version);
         }
@@ -1141,8 +1178,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             ast.statements.insert(
                 ast.statements.begin(),
                 std::make_shared<CommentNode>(
-                    "Fission: INFO: no line info (debug level 0); calls the compiler inlined at O2 cannot be located and stay expanded in place.", true,
-                    true
+                    "Fission: INFO: no line info (debug level 0); calls the compiler inlined at O2 cannot be located and stay expanded in place.", true, true
                 )
             );
 
@@ -1202,8 +1238,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
         auto left = LiftExpression(a);
         auto right = LiftExpression(b);
         // `x > 3` lowers to LT(3, x); a literal has no evaluation order, so read it back variable-first
-        const bool pureLiteral =
-            std::dynamic_pointer_cast<LiteralNode>(left) && !std::dynamic_pointer_cast<TableLiteralNode>(left) && !std::dynamic_pointer_cast<VectorNode>(left);
+        const bool pureLiteral = std::dynamic_pointer_cast<LiteralNode>(left) && !AsLiteral<TableLiteralNode>(left) && !AsLiteral<VectorNode>(left);
         if (std::string_view(op) != mirrored && pureLiteral && !std::dynamic_pointer_cast<LiteralNode>(right))
             return std::make_shared<BinaryExpressionNode>(mirrored, right, left);
         return std::make_shared<BinaryExpressionNode>(op, left, right);
@@ -1600,10 +1635,14 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     return std::nullopt;
                 };
                 const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && m_valueArmDuplications < kMaxValueArmDuplications &&
-                                         std::ranges::all_of(visitedBlock.predecessors, [&](uint32_t p) {
-                                             // a loop's own back edge does not enter the tail
-                                             return p < currentBlockId || (visitedBlock.bType == BlockType::LoopHeader && visitedBlock.loopLatch == p);
-                                         });                if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
+                                         std::ranges::all_of(
+                                             visitedBlock.predecessors,
+                                             [&](uint32_t p) {
+                                                 // a loop's own back edge does not enter the tail
+                                                 return p < currentBlockId || (visitedBlock.bType == BlockType::LoopHeader && visitedBlock.loopLatch == p);
+                                             }
+                                         );
+                if (canDup && IsDuplicableValueArm(currentBlockId, stopBlockId)) {
                     // single pure value block whose successor IS the merge: fall through and re-lift inline.
                     ++m_valueArmDuplications;
                 } else if ((canDup || (siblingTail && visitedBlock.bType == BlockType::IfHeader)) && IsDuplicablePureRegion(currentBlockId, stopBlockId)) {
@@ -1622,9 +1661,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     break;
                 } else if (
                     // a sibling arm owns the only other copy, so skipping it here drops the tail from this path
-                    auto region = canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId)
-                                                        .or_else([&] { return closedTailRegion(); })
-                                                        : std::nullopt;
+                    auto region =
+                        canDup || siblingTail ? SharedTailRegion(currentBlockId, stopBlockId).or_else([&] { return closedTailRegion(); }) : std::nullopt;
                     // a pure tail reached through pure tests folds back into one short-circuit value
                     region && (canDup || std::ranges::any_of(*region, blockHasEffect) || std::ranges::any_of(walked, blockHasEffect))
                 ) {
@@ -1764,9 +1802,12 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     return std::ranges::any_of(std::array{trueIdx, falseIdx}, [&](uint32_t arm) {
                         const auto &block = m_currentFunction->basicBlocks[arm];
                         return arm != static_cast<uint32_t>(join) && block.lpHead &&
-                               std::any_of(block.lpHead, block.lpTail + 1, [](const LiftedInstruction &instruction) {
-                                   return instruction.operation != LiftedOperation::NOP && instruction.operation != LiftedOperation::JUMP;
-                               }) &&
+                               std::any_of(
+                                   block.lpHead, block.lpTail + 1,
+                                   [](const LiftedInstruction &instruction) {
+                                       return instruction.operation != LiftedOperation::NOP && instruction.operation != LiftedOperation::JUMP;
+                                   }
+                               ) &&
                                !CanReach(arm, static_cast<uint32_t>(join), currentBlockId, {currentBlockId});
                     });
                 };
@@ -2034,10 +2075,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 }
 
                 // a latch phi fed only from inside this `if` belongs to it, though the latch also ends the loop body
-                const bool latchJoinsOnlyThisIf = mergeIdx == stopBlockId && isInnermostLatch(mergeIdx) &&
-                                                  std::ranges::all_of(m_currentFunction->basicBlocks[mergeIdx].predecessors, [&](uint32_t pred) {
-                                                      return pred > currentBlockId;
-                                                  });
+                const bool latchJoinsOnlyThisIf =
+                    mergeIdx == stopBlockId && isInnermostLatch(mergeIdx) &&
+                    std::ranges::all_of(m_currentFunction->basicBlocks[mergeIdx].predecessors, [&](uint32_t pred) { return pred > currentBlockId; });
                 HoistPhiLocals(static_cast<int32_t>(mergeIdx), latchJoinsOnlyThisIf ? InvalidBlockId : stopBlockId, ifStmt, nodes, definedBeforeBranches);
                 nodes.push_back(ifStmt);
 
@@ -2173,7 +2213,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         earlyForExit = std::make_pair(natural, name);
                         nodes.push_back(
                             std::make_shared<VariableDeclarationNode>(
-                                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), std::make_shared<BooleanLiteralNode>(false)
+                                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)),
+                                std::make_shared<BooleanLiteralNode>(false)
                             )
                         );
                         for (const auto &phi : m_currentFunction->basicBlocks[*block.loopExit].phiNodes) {
@@ -2552,8 +2593,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         }
                     if (block.loopExit.has_value() && block.loopExit.value() != bodyIdx && block.loopExit.value() != block.loopLatch.value_or(InvalidBlockId))
                         exitIdx = block.loopExit.value();
-                    else if (block.loopLatch.has_value() && *block.loopLatch < m_currentFunction->basicBlocks.size() &&
-                             !m_currentFunction->basicBlocks[*block.loopLatch].predecessors.empty()) {
+                    else if (
+                        block.loopLatch.has_value() && *block.loopLatch < m_currentFunction->basicBlocks.size() &&
+                        !m_currentFunction->basicBlocks[*block.loopLatch].predecessors.empty()
+                    ) {
                         uint32_t resolved = ResolveLoopExitFromLatch(m_currentFunction->basicBlocks, *block.loopLatch, block.dwBlockId);
                         boost::unordered_flat_set<uint32_t> exitChain;
                         while (resolved < m_currentFunction->basicBlocks.size()) {
@@ -3211,7 +3254,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
                             // `for k,v in t do` lowers to [t, nil, nil] (Luau pads to 3). the nil state/control
                             // aren't idiomatic/portable, so collapse to the single-generator form.
-                            if (std::dynamic_pointer_cast<NilLiteralNode>(forNode->state) && std::dynamic_pointer_cast<NilLiteralNode>(forNode->index)) {
+                            if (AsLiteral<NilLiteralNode>(forNode->state) && AsLiteral<NilLiteralNode>(forNode->index)) {
                                 forNode->state = nullptr;
                                 forNode->index = nullptr;
                             }
@@ -3332,7 +3375,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     for (int hops = 0; wrapExit != InvalidBlockId && hops < 8; ++hops) {
                         const auto &bridge = m_currentFunction->basicBlocks[wrapExit];
                         if (bridge.bTerminator != BlockTerminator::Unconditional || bridge.successors.size() != 1 || bridge.lpHead != bridge.lpTail ||
-                            !bridge.lpTail || bridge.lpTail->operation != LiftedOperation::JUMP || bridge.successors.front() >= m_currentFunction->basicBlocks.size())
+                            !bridge.lpTail || bridge.lpTail->operation != LiftedOperation::JUMP ||
+                            bridge.successors.front() >= m_currentFunction->basicBlocks.size())
                             break;
                         wrapExit = bridge.successors.front();
                     }
@@ -3489,9 +3533,12 @@ std::vector<std::shared_ptr<Expression>> ASTLifter::FoldMultiAssignment(
         if (!assign || assign->instructionIndex <= index || assign->operands.size() < 2)
             return {};
         const bool local = assign->operation == LiftedOperation::MOVE && assign->operands[0].value.reg < ref.regIndex &&
-                           std::ranges::none_of(assigns, [&](const LiftedInstruction *other) {
-                               return other->operation == LiftedOperation::MOVE && other->operands[0].value.reg == assign->operands[0].value.reg;
-                           });
+                           std::ranges::none_of(
+                               assigns,
+                               [&](const LiftedInstruction *other) {
+                                   return other->operation == LiftedOperation::MOVE && other->operands[0].value.reg == assign->operands[0].value.reg;
+                               }
+                           );
         const bool store = (assign->operation == LiftedOperation::SETTABLE || assign->operation == LiftedOperation::SETTABLEKS ||
                             assign->operation == LiftedOperation::SETTABLEN || assign->operation == LiftedOperation::SETGLOBAL ||
                             assign->operation == LiftedOperation::SETUPVAL) &&
@@ -3682,7 +3729,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
         const OriginStamp stamp{statements, statements.size(), i};
         const auto &inst = m_currentFunction->lpLiftedFunction->instructions[i];
 
-        if (inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 && inst.operands[1].type == LiftedOperandType::ImmediateNil) {
+        if (m_hasClasses && inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 && inst.operands[1].type == LiftedOperandType::ImmediateNil) {
             const SSARef ref{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
             if (const auto className = HoistedClassName(*m_currentFunction, ref)) {
                 // the later `class` statement binds the name for the whole block
@@ -3779,7 +3826,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             const int32_t baseReg = inst.operands[0].value.reg;
             bool declares = false;
             if (auto targets = FoldMultiAssignment(inst, defs, statements, declares); !targets.empty()) {
-                auto spread = std::make_shared<CallExpressionNode>(std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false);
+                auto spread = std::make_shared<CallExpressionNode>(
+                    std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
+                );
                 spread->bSpreadsVarArgs = true;
                 spread->bIsLocalDeclaration = declares;
                 statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
@@ -3801,7 +3850,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                             std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
                         )
                     );
-                auto spread = std::make_shared<CallExpressionNode>(std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false);
+                auto spread = std::make_shared<CallExpressionNode>(
+                    std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
+                );
                 spread->bSpreadsVarArgs = true;
                 spread->bIsLocalDeclaration = defined == 0;
                 statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
@@ -3917,9 +3968,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                             else if (keyDefinition && keyDefinition->operation == LiftedOperation::LOAD)
                                 key = LiftExpression(keyDefinition->operands[1]);
                             else
-                                key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(store->operands[2], false)));
+                                key = std::make_shared<IdentifierExpressionNode>(
+                                    std::make_shared<Identifier>(ResolveVariableName(store->operands[2], false))
+                                );
                         }
-                        elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", key, std::make_shared<IndexExpressionNode>(tableName(), key)));
+                        elements.push_back(
+                            std::make_shared<TableBinaryExpressionNode>("=", key, std::make_shared<IndexExpressionNode>(tableName(), key))
+                        );
                     }
                 }
                 const auto operands = SetListElements(inst);
@@ -4197,11 +4252,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true)
+                        std::make_shared<CommentNode>(
+                            act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true
+                        )
                     );
                     statements.push_back(
                         std::make_shared<VariableDeclarationNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)), this->LiftExpression(act.capInst->operands[1])
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)),
+                            this->LiftExpression(act.capInst->operands[1])
                         )
                     );
                 }
@@ -4240,8 +4298,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
                 auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
                 if (auto n = Deserializer::TryGetTypeName(duplicatedFunction, j)) {
-                    argNames[j] =
-                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n)));
+                    argNames[j] = std::make_shared<FunctionArgumentExpression>(
+                        identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n))
+                    );
                 } else {
                     argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
@@ -4509,16 +4568,21 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true)
+                        std::make_shared<CommentNode>(
+                            act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true
+                        )
                     );
                     statements.push_back(
                         std::make_shared<VariableDeclarationNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)), this->LiftExpression(act.capInst->operands[1])
+                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)),
+                            this->LiftExpression(act.capInst->operands[1])
                         )
                     );
                 }
                 statements.push_back(
-                    std::make_shared<CommentNode>(std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true, true)
+                    std::make_shared<CommentNode>(
+                        std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true, true
+                    )
                 );
             }
 
@@ -4539,8 +4603,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
                 auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
                 if (auto n = Deserializer::TryGetTypeName(proto, j)) {
-                    argNames[j] =
-                        std::make_shared<FunctionArgumentExpression>(identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n)));
+                    argNames[j] = std::make_shared<FunctionArgumentExpression>(
+                        identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n))
+                    );
                 } else {
                     argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
@@ -4743,7 +4808,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                                 m_setListKeySnapshots[user] = name;
                                 statements.push_back(
                                     std::make_shared<VariableDeclarationNode>(
-                                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)), LiftExpression(user->operands[2], false)
+                                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)),
+                                        LiftExpression(user->operands[2], false)
                                     )
                                 );
                             }

@@ -18,7 +18,7 @@ class WhileTrueRepeatRewriter : public ASTRewriter {
             auto w = std::dynamic_pointer_cast<WhileStatementNode>(stmt);
             if (!w || !w->body || w->body->body.empty())
                 continue;
-            auto lit = std::dynamic_pointer_cast<BooleanLiteralNode>(w->condition);
+            auto lit = AsLiteral<BooleanLiteralNode>(w->condition);
             if (!lit || !lit->value)
                 continue;
             auto tail = std::dynamic_pointer_cast<IfStatementNode>(w->body->body.back());

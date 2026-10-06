@@ -28,7 +28,6 @@
 struct ASTFunction {
     AnalyzedFunction *backingFunction = nullptr; // not owned by ASTFunction
     std::vector<std::shared_ptr<Statement>> statements;
-
 };
 
 class ControlFlowTask;
@@ -38,6 +37,7 @@ struct ASTLiftBudgetExceeded {};
 
 // Everything ASTLifter knows about the function it is lifting; Lift starts each function from a fresh one.
 struct ASTLifterFunctionState {
+    bool m_hasClasses = false;
     boost::unordered_flat_set<int32_t> m_definedRegisters;
     std::unordered_set<std::string> m_globalNames;
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_pinnedRegisters;
@@ -137,9 +137,16 @@ struct ASTLifterFunctionState {
     // FindMergeBlock is pure over a fixed CFG.
     // (branchA, branchB, innermost loop exit, loop jumps exit) -> merge
     std::map<std::tuple<uint32_t, uint32_t, uint32_t, bool>, int32_t> m_mergeCache;
+    struct EffectPath {
+        bool complete = false;
+        bool loopsAroundUse = false;
+        std::vector<uint32_t> blocks;
+    };
+    std::map<std::pair<int32_t, int32_t>, EffectPath> m_effectPaths;
 
     // Reverse definition map keeps ShouldInline lookup constant-time.
     std::unordered_map<const LiftedInstruction *, std::vector<SSARef>> m_defsByInstruction;
+    std::vector<int32_t> m_nextDefinitionInstruction;
 
     // Captured SSA references must remain real locals.
     boost::unordered_flat_set<SSARef, std::hash<SSARef>> m_capturedDefs;
@@ -153,10 +160,21 @@ struct ASTLifterFunctionState {
     boost::unordered_flat_map<SSARef, std::shared_ptr<Expression>, std::hash<SSARef>> m_valueTermOverrides;
 
     // ShouldInline inputs remain fixed during a function lift.
-    std::unordered_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
-    std::unordered_map<const LiftedInstruction *, uint8_t> m_inlineBinaryDepth;
-    std::unordered_map<const LiftedInstruction *, bool> m_constructorElementMemo;
-    std::unordered_set<const LiftedInstruction *> m_shouldInlineActive;
+    boost::unordered_flat_map<const LiftedInstruction *, bool> m_shouldInlineMemo;
+    boost::unordered_flat_map<const LiftedInstruction *, uint8_t> m_inlineBinaryDepth;
+    boost::unordered_flat_map<const LiftedInstruction *, bool> m_constructorElementMemo;
+    boost::unordered_flat_set<const LiftedInstruction *> m_shouldInlineActive;
+    struct ValueReads {
+        std::vector<LiftedOperand> registers;
+        size_t directRegisters = 0;
+        bool capturedLocal = false;
+        bool incomplete = false;
+        boost::unordered_flat_set<int32_t> globals, upvalues;
+    };
+    std::unordered_map<const LiftedInstruction *, ValueReads> m_valueReads;
+    // CollectReads never re-enters these traversal buffers.
+    std::vector<const LiftedInstruction *> m_valueReadPending;
+    boost::unordered_flat_set<const LiftedInstruction *> m_valueReadSeen;
     // Materialized LOADB-diamond booleans cannot fold into table literals.
     std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
 
@@ -219,8 +237,7 @@ class ASTLifter : private ASTLifterFunctionState {
         SSARef m_ref;
         bool m_inserted;
 
-        PinnedRegisterScope(ASTLifter *lifter, SSARef ref)
-            : m_lpLifter(lifter), m_ref(ref), m_inserted(lifter->m_pinnedRegisters.insert(ref).second) {}
+        PinnedRegisterScope(ASTLifter *lifter, SSARef ref) : m_lpLifter(lifter), m_ref(ref), m_inserted(lifter->m_pinnedRegisters.insert(ref).second) {}
 
         ~PinnedRegisterScope() {
             if (m_inserted)
@@ -251,12 +268,12 @@ class ASTLifter : private ASTLifterFunctionState {
     template <typename... Args> void Explain(BasicBlock &block, std::format_string<Args...> format, Args &&...args) const {
         if (!m_debugNotes || !m_debugNotes->Enabled())
             return;
-        m_debugNotes->AddBlock(FissionDebugStage::AST, m_debugFunction, block.dwBlockId, block.analysisNotes,
-                               std::format(format, std::forward<Args>(args)...));
+        m_debugNotes->AddBlock(FissionDebugStage::AST, m_debugFunction, block.dwBlockId, block.analysisNotes, std::format(format, std::forward<Args>(args)...));
     }
 
-    void ExplainKeep(const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer = nullptr,
-                     const LiftedInstruction *barrier = nullptr) const;
+    void ExplainKeep(
+        const LiftedInstruction *definition, std::string_view reason, const LiftedInstruction *consumer = nullptr, const LiftedInstruction *barrier = nullptr
+    ) const;
 
     AnalyzedFunction *m_currentFunction = nullptr;
 
@@ -276,9 +293,8 @@ class ASTLifter : private ASTLifterFunctionState {
     std::vector<std::shared_ptr<Statement>> LiftBlockInstructions(const BasicBlock &block, bool forceDefinitions = false);
     std::vector<std::shared_ptr<Statement>> EmitBlockInstructions(const BasicBlock &block, bool forceDefinitions);
     // targets of `a, t.k = <multi-value>` whose temporaries each feed one adjacent move or store; empty when not that shape
-    std::vector<std::shared_ptr<Expression>> FoldMultiAssignment(
-        const LiftedInstruction &def, const std::vector<SSARef> &defs, std::vector<std::shared_ptr<Statement>> &statements, bool &declares
-    );
+    std::vector<std::shared_ptr<Expression>>
+    FoldMultiAssignment(const LiftedInstruction &def, const std::vector<SSARef> &defs, std::vector<std::shared_ptr<Statement>> &statements, bool &declares);
     std::shared_ptr<BlockStatementNode> LatchCopy(uint32_t latchId);
     // clones of the first walk from `fromBlockId` up to `stopBlockId`; `second` when it ran into the innermost loop exit
     std::optional<std::pair<std::vector<std::shared_ptr<Statement>>, bool>> CloneLiftedWalk(uint32_t fromBlockId, uint32_t stopBlockId) const;
@@ -328,8 +344,10 @@ class ASTLifter : private ASTLifterFunctionState {
     bool StaysAsStatement(const LiftedInstruction *e);
     // Defers `def`, read by `reader`, into the loop condition that renders it, and queues its inputs (a constructor's
     // population stores included) for the same decision.
-    void DeferIntoCondition(const LiftedInstruction &def, const SSARef &value, const LiftedInstruction *reader,
-                            std::vector<std::pair<LiftedOperand, const LiftedInstruction *>> &pending);
+    void DeferIntoCondition(
+        const LiftedInstruction &def, const SSARef &value, const LiftedInstruction *reader,
+        std::vector<std::pair<LiftedOperand, const LiftedInstruction *>> &pending
+    );
     // True if the block of `def` dominates every block whose phi reads `value`.
     bool DominatesMerges(const LiftedInstruction &def, const LiftedOperand &value);
     // True if nothing of `inst` renders at its own position: it inlines, peeks at fastcall arguments, or fills an inlined constructor.
@@ -349,14 +367,7 @@ class ASTLifter : private ASTLifterFunctionState {
     // True if `inst` inlines into an operand of `use` that is evaluated after the operand holding `value`, so rendering keeps their order.
     bool RendersAfter(const LiftedInstruction &inst, const SSARef &value, const LiftedInstruction *use);
     // What a value reads once inlined: its own register inputs first, then those of single-use inputs inlined into it.
-    struct ValueReads {
-        std::vector<LiftedOperand> registers;
-        size_t directRegisters = 0;
-        bool capturedLocal = false;
-        bool incomplete = false;
-        boost::unordered_flat_set<int32_t> globals, upvalues;
-    };
-    ValueReads CollectReads(const LiftedInstruction *def);
+    const ValueReads &CollectReads(const LiftedInstruction *def);
     // A LOADB-diamond boolean load: its value is the comparison collapsed later, not the literal.
     bool IsDiamondBoolLoad(const LiftedOperand &operand) const;
     // Registers a SETLIST stores and a call passes, at the versions read.
@@ -393,7 +404,8 @@ class ASTLifter : private ASTLifterFunctionState {
     // Extend safe re-lifting across pure short-circuit regions that reconverge at one merge.
     bool IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) const;
     // Blocks of a forward region entered only at `start` and ending at `stop` or a return.
-    std::optional<std::vector<uint32_t>> SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6, bool singleEntry = true) const;
+    std::optional<std::vector<uint32_t>>
+    SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions = 64, size_t maxBlocks = 6, bool singleEntry = true) const;
 
     // Hoist phi targets that must outlive branch scopes.
     void HoistPhiLocals(

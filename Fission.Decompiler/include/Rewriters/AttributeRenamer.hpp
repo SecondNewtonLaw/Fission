@@ -119,7 +119,7 @@ class AttributeRenamer {
     // `maxHp`), or "" if it is not a string literal or the folded form is not a legal bare identifier
     // (e.g. leading digit, or punctuation the space-fold does not remove).
     static std::string AttrLeaf(const std::shared_ptr<Expression> &arg) {
-        auto s = std::dynamic_pointer_cast<StringLiteralNode>(arg);
+        auto s = AsLiteral<StringLiteralNode>(arg);
         if (!s)
             return "";
         const std::string leaf = CamelCase(s->value);

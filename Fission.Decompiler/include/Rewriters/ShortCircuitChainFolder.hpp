@@ -239,24 +239,24 @@ class ShortCircuitChainFolder : public ASTRewriter {
         if (lhsName || rhsName)
             return lhsName && rhsName && *lhsName == *rhsName;
 
-        if (auto l = std::dynamic_pointer_cast<StringLiteralNode>(lhs)) {
-            auto r = std::dynamic_pointer_cast<StringLiteralNode>(rhs);
+        if (auto l = AsLiteral<StringLiteralNode>(lhs)) {
+            auto r = AsLiteral<StringLiteralNode>(rhs);
             return r && l->value == r->value;
         }
-        if (auto l = std::dynamic_pointer_cast<BooleanLiteralNode>(lhs)) {
-            auto r = std::dynamic_pointer_cast<BooleanLiteralNode>(rhs);
+        if (auto l = AsLiteral<BooleanLiteralNode>(lhs)) {
+            auto r = AsLiteral<BooleanLiteralNode>(rhs);
             return r && l->value == r->value;
         }
-        if (auto l = std::dynamic_pointer_cast<NumberLiteralNode>(lhs)) {
-            auto r = std::dynamic_pointer_cast<NumberLiteralNode>(rhs);
+        if (auto l = AsLiteral<NumberLiteralNode>(lhs)) {
+            auto r = AsLiteral<NumberLiteralNode>(rhs);
             return r && l->value == r->value;
         }
-        if (auto l = std::dynamic_pointer_cast<IntegerLiteralNode>(lhs)) {
-            auto r = std::dynamic_pointer_cast<IntegerLiteralNode>(rhs);
+        if (auto l = AsLiteral<IntegerLiteralNode>(lhs)) {
+            auto r = AsLiteral<IntegerLiteralNode>(rhs);
             return r && l->value == r->value;
         }
-        if (std::dynamic_pointer_cast<NilLiteralNode>(lhs) || std::dynamic_pointer_cast<NilLiteralNode>(rhs))
-            return std::dynamic_pointer_cast<NilLiteralNode>(lhs) && std::dynamic_pointer_cast<NilLiteralNode>(rhs);
+        if (AsLiteral<NilLiteralNode>(lhs) || AsLiteral<NilLiteralNode>(rhs))
+            return AsLiteral<NilLiteralNode>(lhs) && AsLiteral<NilLiteralNode>(rhs);
         if (auto l = std::dynamic_pointer_cast<MemberExpressionNode>(lhs)) {
             auto r = std::dynamic_pointer_cast<MemberExpressionNode>(rhs);
             return r && ExpressionsEquivalent(l->table, r->table) && ExpressionsEquivalent(l->key, r->key);

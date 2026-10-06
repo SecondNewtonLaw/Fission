@@ -93,7 +93,7 @@ std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterializ
     // Only collapse genuine condition jumps; LiftCondition yields BooleanLiteral
     // for opcodes it cannot turn into a comparison/truth test.
     auto cond = LiftCondition(H.lpTail);
-    if (!cond || std::dynamic_pointer_cast<BooleanLiteralNode>(cond))
+    if (!cond || AsLiteral<BooleanLiteralNode>(cond))
         return std::nullopt;
 
     // Control reaches T directly when the jump is taken (cond true -> bT) and via
@@ -238,7 +238,8 @@ bool ASTLifter::IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) con
     return feedsMergePhi;
 }
 
-std::optional<std::vector<uint32_t>> ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions, size_t maxBlocks, bool singleEntry) const {
+std::optional<std::vector<uint32_t>>
+ASTLifter::SharedTailRegion(uint32_t start, uint32_t stop, size_t maxInstructions, size_t maxBlocks, bool singleEntry) const {
     const auto &blocks = m_currentFunction->basicBlocks;
     if (start >= blocks.size() || stop >= blocks.size() || start == stop)
         return std::nullopt;
@@ -449,9 +450,8 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
             }
             // an exit is reachable from x without passing through M; an early `return` leaves the region like `break`.
             // Not when M returns too (arms ending in copies of one `return` are value arms) or M reaches that return (a join).
-            if (block.successors.empty() &&
-                (block.bType != BlockType::Return ||
-                 (loopExit == InvalidBlockId && m < blocks.size() && (blocks[m].bType == BlockType::Return || mergeReaches(cur)))))
+            if (block.successors.empty() && (block.bType != BlockType::Return ||
+                                             (loopExit == InvalidBlockId && m < blocks.size() && (blocks[m].bType == BlockType::Return || mergeReaches(cur)))))
                 return false;
         }
         // an arm that only leaves the region imposes no merge of its own
@@ -488,6 +488,18 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
         const auto follows = [&](const BasicBlock &block, uint32_t cur, uint32_t succ) {
             return succ > cur && (succ != loopExit || succ == branchA) && (!continuesLoop(block, succ) || succ == branchA || succ == branchB);
         };
+        if (!loopJumpsExit && blocks[branchA].successors.size() == 1 && blocks[branchA].successors.front() == branchB &&
+            follows(blocks[branchA], branchA, branchB)) {
+            const auto merge = static_cast<int32_t>(branchB);
+            m_mergeCache.emplace(cacheKey, merge);
+            return merge;
+        }
+        if (!loopJumpsExit && branchA != loopExit && blocks[branchB].successors.size() == 1 && blocks[branchB].successors.front() == branchA &&
+            follows(blocks[branchB], branchB, branchA)) {
+            const auto merge = static_cast<int32_t>(branchA);
+            m_mergeCache.emplace(cacheKey, merge);
+            return merge;
+        }
         // a block post-dominating branchA is reached from it; the rest need no walk
         boost::unordered_flat_set<uint32_t> fromA{branchA};
         if (branchA != loopExit)
@@ -552,8 +564,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
         if (id >= blocks.size())
             return nullptr;
         const auto &b = blocks[id];
-        if (!b.lpTail || (b.lpTail->operation != LiftedOperation::JUMPIF && b.lpTail->operation != LiftedOperation::JUMPIFNOT) ||
-            b.lpTail->operands.empty() || b.lpTail->operands[0].type != LiftedOperandType::Register)
+        if (!b.lpTail || (b.lpTail->operation != LiftedOperation::JUMPIF && b.lpTail->operation != LiftedOperation::JUMPIFNOT) || b.lpTail->operands.empty() ||
+            b.lpTail->operands[0].type != LiftedOperandType::Register)
             return nullptr;
         for (auto *inst = b.lpHead; inst && inst < b.lpTail; ++inst)
             if ((inst->operation == LiftedOperation::NEWCLOSURE || inst->operation == LiftedOperation::DUPCLOSURE) && !inst->operands.empty() &&
@@ -740,14 +752,14 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             return Expr{};
         // a comparison already is the boolean its `true`/`false` arms spell out
         const auto literal = [](const Expr &value, bool expected) {
-            const auto boolean = std::dynamic_pointer_cast<BooleanLiteralNode>(value);
+            const auto boolean = AsLiteral<BooleanLiteralNode>(value);
             return boolean && boolean->value == expected;
         };
         if (literal(*yes, true) && literal(*no, false)) {
             const auto compare = std::dynamic_pointer_cast<BinaryExpressionNode>(condition);
             const auto negation = std::dynamic_pointer_cast<UnaryExpressionNode>(condition);
-            if ((compare && (compare->op == "==" || compare->op == "~=" || compare->op == "<" || compare->op == "<=" || compare->op == ">" ||
-                             compare->op == ">=")) ||
+            if ((compare &&
+                 (compare->op == "==" || compare->op == "~=" || compare->op == "<" || compare->op == "<=" || compare->op == ">" || compare->op == ">=")) ||
                 (negation && negation->op == "not "))
                 return condition;
         }
@@ -864,7 +876,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
             if (!term.region.contains(pred))
                 return std::nullopt;
         // the joined value is read only by the test
-        if (const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(valueReg), phiOut.ssaVersion}); users != m_currentFunction->users.end())
+        if (const auto users = m_currentFunction->users.find(SSARef{static_cast<uint8_t>(valueReg), phiOut.ssaVersion});
+            users != m_currentFunction->users.end())
             for (const auto *user : users->second)
                 if (BlockOf(user) != static_cast<int32_t>(testId))
                     return std::nullopt;
@@ -1008,9 +1021,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
 
     uint32_t body = *leaves.begin(), exit = *leaves.rbegin();
     const uint32_t loopExit = m_loopExitStack.empty() ? InvalidBlockId : m_loopExitStack.back();
-    const bool exitLeavesIteration =
-        exit == loopExit || (loopExit != InvalidBlockId && blocks[exit].bType == BlockType::LoopLatch &&
-                             std::ranges::find(blocks[exit].successors, loopExit) != blocks[exit].successors.end());
+    const bool exitLeavesIteration = exit == loopExit || (loopExit != InvalidBlockId && blocks[exit].bType == BlockType::LoopLatch &&
+                                                          std::ranges::find(blocks[exit].successors, loopExit) != blocks[exit].successors.end());
     if (bareReturn(body) || exitLeavesIteration)
         std::swap(body, exit);
     // pure value arms fold into one short-circuit value expression further up
@@ -1041,8 +1053,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         }
         auto condition = LiftCondition(block.lpTail);
         auto yes = conditions.at(*block.ifStatementTrue), no = conditions.at(*block.ifStatementFalse);
-        const auto yesBool = std::dynamic_pointer_cast<BooleanLiteralNode>(yes);
-        const auto noBool = std::dynamic_pointer_cast<BooleanLiteralNode>(no);
+        const auto yesBool = AsLiteral<BooleanLiteralNode>(yes);
+        const auto noBool = AsLiteral<BooleanLiteralNode>(no);
         Expr result;
         if (yesBool && noBool && yesBool->value != noBool->value)
             result = yesBool->value ? condition : InvertCondition(condition);

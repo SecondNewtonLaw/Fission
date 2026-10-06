@@ -66,7 +66,8 @@ inline int32_t AssignedLocal(const LiftedInstruction &inst) {
         return -1;
     const int32_t target = inst.operands[0].value.reg;
     for (size_t i = 1; i < inst.operands.size(); ++i)
-        if (inst.operands[i].type == LiftedOperandType::Register && inst.operands[i].value.reg > target && SSABuilder::GetRegisterAccess(inst, i) == AccessType::Read)
+        if (inst.operands[i].type == LiftedOperandType::Register && inst.operands[i].value.reg > target &&
+            SSABuilder::GetRegisterAccess(inst, i) == AccessType::Read)
             return target;
     return -1;
 }

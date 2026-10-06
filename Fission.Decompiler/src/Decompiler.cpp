@@ -4,18 +4,20 @@
 #include "AbstractSyntaxTree/Traversal.hpp"
 #include "Analysis/ConstantPropagation.hpp"
 #include "Analysis/RobloxTypeInferer.hpp"
+#include "Luau/Bytecode.h"
 #include "Rewriters/AttributeRenamer.hpp"
 #include "Rewriters/ChildLookupRenamer.hpp"
 #include "Rewriters/ClassMethodRewriter.hpp"
+#include "Rewriters/ConstLocalMarker.hpp"
 #include "Rewriters/ConstructorResultRenamer.hpp"
 #include "Rewriters/DeadLocalEliminator.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
 #include "Rewriters/ExportDeclarationRewriter.hpp"
-#include "Rewriters/InlineRegionMarker.hpp"
 #include "Rewriters/GetterRenamer.hpp"
 #include "Rewriters/GlobalAssignmentRenamer.hpp"
 #include "Rewriters/IfChainSimplifier.hpp"
 #include "Rewriters/IfExpressionFolder.hpp"
+#include "Rewriters/InlineRegionMarker.hpp"
 #include "Rewriters/LengthCountRenamer.hpp"
 #include "Rewriters/LoopVariableRenamer.hpp"
 #include "Rewriters/PcallResultRenamer.hpp"
@@ -30,7 +32,6 @@
 #include "Rewriters/WhileTrueRepeatRewriter.hpp"
 #include "SafetyGuard.hpp"
 #include "SourceGenerator/AstJsonSerializer.hpp"
-#include "Luau/Bytecode.h"
 
 #include <libassert/assert.hpp>
 
@@ -263,15 +264,15 @@ static std::optional<std::string> GetSimpleIdentifierName(const std::shared_ptr<
 static std::optional<std::string> InferExpressionType(const std::shared_ptr<Expression> &expr) {
     if (!expr)
         return std::nullopt;
-    if (std::dynamic_pointer_cast<NilLiteralNode>(expr))
+    if (AsLiteral<NilLiteralNode>(expr))
         return "nil";
-    if (std::dynamic_pointer_cast<BooleanLiteralNode>(expr))
+    if (AsLiteral<BooleanLiteralNode>(expr))
         return "boolean";
-    if (std::dynamic_pointer_cast<NumberLiteralNode>(expr) || std::dynamic_pointer_cast<IntegerLiteralNode>(expr))
+    if (AsLiteral<NumberLiteralNode>(expr) || AsLiteral<IntegerLiteralNode>(expr))
         return "number";
-    if (std::dynamic_pointer_cast<StringLiteralNode>(expr))
+    if (AsLiteral<StringLiteralNode>(expr))
         return "string";
-    if (std::dynamic_pointer_cast<TableLiteralNode>(expr))
+    if (AsLiteral<TableLiteralNode>(expr))
         return "table";
     if (std::dynamic_pointer_cast<FunctionDeclarationNode>(expr))
         return "function";
@@ -325,7 +326,8 @@ static void CollectFunctionsFromExpression(const std::shared_ptr<Expression> &ex
 static void CollectFunctionsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, FunctionMap &functions);
 
 static void CollectFunctionsFromExpression(const std::shared_ptr<Expression> &expr, FunctionMap &functions) {
-    if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr)) {
+    if (expr && expr->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+        const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(expr);
         if (!fn->functionName.empty())
             functions[fn->functionName].push_back(fn);
         if (fn->lpFunctionBody)
@@ -337,7 +339,8 @@ static void CollectFunctionsFromExpression(const std::shared_ptr<Expression> &ex
 
 static void CollectFunctionsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, FunctionMap &functions) {
     for (const auto &stmt : stmts) {
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+        if (stmt && stmt->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(stmt);
             CollectFunctionsFromExpression(fn, functions);
             continue;
         }
@@ -417,10 +420,12 @@ static void CollectCallFactsFromExpression(const std::shared_ptr<Expression> &ex
     if (!expr)
         return;
 
-    if (auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr)) {
+    if (expr->nodeKind == ASTNodeKind::CallExpression) {
+        const auto call = std::static_pointer_cast<CallExpressionNode>(expr);
         auto calleeName = GetSimpleIdentifierName(call->callee);
-        if (calleeName && functions.contains(*calleeName) && functions.at(*calleeName).size() == 1) {
-            auto *fn = functions.at(*calleeName).front().get();
+        const auto found = calleeName ? functions.find(*calleeName) : functions.end();
+        if (found != functions.end() && found->second.size() == 1) {
+            auto *fn = found->second.front().get();
             auto &fnFacts = facts[fn];
             if (fnFacts.size() < static_cast<size_t>(fn->argumentCount))
                 fnFacts.resize(fn->argumentCount);
@@ -428,15 +433,20 @@ static void CollectCallFactsFromExpression(const std::shared_ptr<Expression> &ex
                 fnFacts[i].Add(InferExpressionType(call->arguments[i]));
         }
     }
-    if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(expr); fn && fn->lpFunctionBody)
-        CollectCallFactsFromStatements(fn->lpFunctionBody->body, functions, facts);
-    else
+    if (expr->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+        const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(expr);
+        if (fn->lpFunctionBody)
+            CollectCallFactsFromStatements(fn->lpFunctionBody->body, functions, facts);
+        else
+            ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectCallFactsFromExpression(child, functions, facts); });
+    } else
         ForEachSubExpression(expr, [&](const std::shared_ptr<Expression> &child) { CollectCallFactsFromExpression(child, functions, facts); });
 }
 
 static void CollectCallFactsFromStatements(const std::vector<std::shared_ptr<Statement>> &stmts, const FunctionMap &functions, InferenceFacts &facts) {
     for (const auto &stmt : stmts) {
-        if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {
+        if (stmt && stmt->nodeKind == ASTNodeKind::FunctionDeclarationNode) {
+            const auto fn = std::static_pointer_cast<FunctionDeclarationNode>(stmt);
             CollectCallFactsFromExpression(fn, functions, facts);
             continue;
         }
@@ -460,9 +470,9 @@ static void AnnotateLocalDeclarations(std::vector<std::shared_ptr<Statement>> &s
 }
 
 static std::optional<bool> EvaluateBooleanConstant(const std::shared_ptr<Expression> &expr) {
-    if (auto boolean = std::dynamic_pointer_cast<BooleanLiteralNode>(expr))
+    if (auto boolean = AsLiteral<BooleanLiteralNode>(expr))
         return boolean->value;
-    if (auto nil = std::dynamic_pointer_cast<NilLiteralNode>(expr)) {
+    if (auto nil = AsLiteral<NilLiteralNode>(expr)) {
         (void)nil;
         return false;
     }
@@ -487,11 +497,11 @@ static std::optional<bool> EvaluateBooleanConstant(const std::shared_ptr<Express
                 return left >= right;
             return std::nullopt;
         };
-        if (const auto left = std::dynamic_pointer_cast<NumberLiteralNode>(binary->left))
-            if (const auto right = std::dynamic_pointer_cast<NumberLiteralNode>(binary->right))
+        if (const auto left = AsLiteral<NumberLiteralNode>(binary->left))
+            if (const auto right = AsLiteral<NumberLiteralNode>(binary->right))
                 return compare(left->value, right->value);
-        if (const auto left = std::dynamic_pointer_cast<IntegerLiteralNode>(binary->left))
-            if (const auto right = std::dynamic_pointer_cast<IntegerLiteralNode>(binary->right))
+        if (const auto left = AsLiteral<IntegerLiteralNode>(binary->left))
+            if (const auto right = AsLiteral<IntegerLiteralNode>(binary->right))
                 return compare(left->value, right->value);
     }
     return std::nullopt;
@@ -621,8 +631,10 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     const auto bytecodeLiftStart = std::chrono::steady_clock::now();
     auto liftedBytecode = bytecodeLifter.LiftDeserializedBytecode(*deserializedBytecode);
     const auto bytecodeLiftEnd = std::chrono::steady_clock::now();
-    m_debugNotes.Add(FissionDebugStage::Pipeline, "bytecode lift produced {} root instructions and {} nested functions", liftedBytecode.instructions.size(),
-                     liftedBytecode.subfunctions.size());
+    m_debugNotes.Add(
+        FissionDebugStage::Pipeline, "bytecode lift produced {} root instructions and {} nested functions", liftedBytecode.instructions.size(),
+        liftedBytecode.subfunctions.size()
+    );
     const auto inlineSources = BuildInlineSourceMap(*deserializedBytecode, decoder, liftedBytecode);
     AssignInlineOrigins(liftedBytecode, *inlineSources);
 
@@ -737,6 +749,7 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     if (deserializedBytecode->lpMainFunction->flags & LPF_USES_EXPORT)
         ExportDeclarationRewriter::Run(liftedAST.statements);
     ScopeAwareRenamer::PruneStaleRenameComments(liftedAST.statements);
+    ConstLocalMarker{}.Run(liftedAST.statements);
     const auto robloxPropagationEnd = std::chrono::steady_clock::now();
 
     RootNode root{liftedAST.statements};
