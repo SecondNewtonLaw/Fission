@@ -906,10 +906,19 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                             owner->second.reset();
                             break;
                         }
-            for (const auto &[ref, definition] : analyzedFunction.definitionMap)
-                if (!analyzedFunction.ssaOverrides.contains(ref) && !analyzedFunction.variableNames.contains(ref))
-                    if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
-                        analyzedFunction.SetVariableName(ref.regIndex, ref.version, debugNames[*owner->second]);
+            for (const auto &[ref, definition] : analyzedFunction.definitionMap) {
+                if (analyzedFunction.variableNames.contains(ref))
+                    continue;
+                const auto owner = componentLocals.find(root(ref));
+                if (owner == componentLocals.end() || !owner->second)
+                    continue;
+                if (const auto captured = analyzedFunction.ssaOverrides.find(ref); captured != analyzedFunction.ssaOverrides.end()) {
+                    if (m_valueCapturedValues.contains(ref) || m_referenceCapturedValues.contains(ref))
+                        captured->second = debugNames[*owner->second];
+                } else {
+                    analyzedFunction.SetVariableName(ref.regIndex, ref.version, debugNames[*owner->second]);
+                }
+            }
         }
     }
 
