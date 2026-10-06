@@ -4,6 +4,7 @@
 
 #include "ASTLifter.hpp"
 #include "ASTLifterShared.hpp"
+#include "FissionAllocator.hpp"
 #include "SafetyGuard.hpp"
 
 #include <algorithm>
@@ -32,19 +33,19 @@ std::shared_ptr<Expression> ASTLifter::ConstantLiteral(int32_t index) const {
     const auto &k = ConstantAt(index);
     switch (k.kType) {
     case LUA_TNIL:
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
     case LUA_TBOOLEAN:
-        return std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+        return Fission::MakeShared<BooleanLiteralNode>(std::get<bool>(k.constantData));
     case LUA_TNUMBER:
-        return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+        return Fission::MakeShared<NumberLiteralNode>(std::get<double>(k.constantData));
     case LUA_TINTEGER:
-        return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
+        return Fission::MakeShared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
     case LUA_TSTRING:
-        return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+        return Fission::MakeShared<StringLiteralNode>(std::get<std::string>(k.constantData));
     case LUA_TVECTOR:
         return LiftVectorConstant(k);
     default:
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
     }
 }
 
@@ -67,7 +68,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             overridden != m_valueTermOverrides.end())
             return overridden->second;
         if (m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion}))
-            return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
+            return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
         SSARef closureRef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion};
         if (m_inlineableClosures.contains(closureRef))
             break;
@@ -84,7 +85,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     }
 
     if (operand.type == LiftedOperandType::Register && m_pinnedRegisters.contains({operand.value.reg, operand.ssaVersion})) {
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
+        return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
 
     // a closure parked for its single argument use renders once; erasing it keeps a second use from duplicating the literal
@@ -99,11 +100,11 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     }
 
     if (operand.type == LiftedOperandType::ImmediateNil)
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
     if (operand.type == LiftedOperandType::ImmediateBool)
-        return std::make_shared<BooleanLiteralNode>(operand.value.imm.b);
+        return Fission::MakeShared<BooleanLiteralNode>(operand.value.imm.b);
     if (operand.type == LiftedOperandType::ImmediateInteger)
-        return std::make_shared<NumberLiteralNode>(operand.value.imm.n);
+        return Fission::MakeShared<NumberLiteralNode>(operand.value.imm.n);
     if (operand.type == LiftedOperandType::ImmediateConstant)
         return ConstantLiteral(operand.value.imm.k);
 
@@ -116,28 +117,28 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             m_emission.InlineConsumed(def->instructionIndex) && (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::GETIMPORT ||
                                                                  def->operation == LiftedOperation::GETGLOBAL || def->operation == LiftedOperation::GETUPVAL);
         if (!consumedByInline)
-            return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
+            return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
 
     if (def && def->operation == LiftedOperation::GETVARARGS) {
-        auto vararg = std::make_shared<VarArgExpression>();
+        auto vararg = Fission::MakeShared<VarArgExpression>();
         vararg->bAdjustToOne = def->operands.size() > 1 && def->operands[1].value.imm.n == 2;
         return vararg;
     }
 
     if (!def || (!forceExpression && !ShouldInline(def) && !m_deferToConditionInline.contains(def))) {
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
+        return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
 
     if (def->operation == LiftedOperation::LOADNJUMP && def->operands.size() >= 2 && def->operands[1].type == LiftedOperandType::ImmediateBool)
-        return std::make_shared<BooleanLiteralNode>(def->operands[1].value.imm.b);
+        return Fission::MakeShared<BooleanLiteralNode>(def->operands[1].value.imm.b);
     if (def->operation == LiftedOperation::LOAD) {
         if (def->operands[1].type == LiftedOperandType::ImmediateNil)
-            return std::make_shared<NilLiteralNode>();
+            return Fission::MakeShared<NilLiteralNode>();
         if (def->operands[1].type == LiftedOperandType::ImmediateBool)
-            return std::make_shared<BooleanLiteralNode>(def->operands[1].value.imm.b);
+            return Fission::MakeShared<BooleanLiteralNode>(def->operands[1].value.imm.b);
         if (def->operands[1].type == LiftedOperandType::ImmediateInteger)
-            return std::make_shared<NumberLiteralNode>(def->operands[1].value.imm.n);
+            return Fission::MakeShared<NumberLiteralNode>(def->operands[1].value.imm.n);
         if (def->operands[1].type == LiftedOperandType::ImmediateConstant)
             return ConstantLiteral(def->operands[1].value.imm.k);
     }
@@ -209,21 +210,21 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             auto value = std::move(values.back());
             values.pop_back();
             if (binary)
-                value = std::make_shared<BinaryExpressionNode>(binary, frame.left, value);
+                value = Fission::MakeShared<BinaryExpressionNode>(binary, frame.left, value);
             else if (current->operation == LiftedOperation::GETTABLE)
-                value = std::make_shared<IndexExpressionNode>(frame.left, value);
+                value = Fission::MakeShared<IndexExpressionNode>(frame.left, value);
             else if (current->operation == LiftedOperation::GETTABLEKS) {
                 const auto &key = ConstantAt(current->operands[2].value.imm.k);
-                value = std::make_shared<MemberExpressionNode>(value, std::get<std::string>(key.constantData));
+                value = Fission::MakeShared<MemberExpressionNode>(value, std::get<std::string>(key.constantData));
             } else if (current->operation == LiftedOperation::GETTABLEN)
-                value = std::make_shared<IndexExpressionNode>(
-                    value, std::make_shared<NumberLiteralNode>(static_cast<double>(current->operands[2].value.imm.n) + 1.0)
+                value = Fission::MakeShared<IndexExpressionNode>(
+                    value, Fission::MakeShared<NumberLiteralNode>(static_cast<double>(current->operands[2].value.imm.n) + 1.0)
                 );
             else if (callCallee(current))
                 value = LiftCall(*current, current->instructionIndex, true, std::move(value));
             else {
                 const char *symbol = current->operation == LiftedOperation::NOT ? "not " : current->operation == LiftedOperation::MINUS ? "-" : "#";
-                value = std::make_shared<UnaryExpressionNode>(symbol, value);
+                value = Fission::MakeShared<UnaryExpressionNode>(symbol, value);
             }
             frames.pop_back();
             values.push_back(std::move(value));
@@ -235,7 +236,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
 
     case LiftedOperation::CONDVALUE: {
         if (def->operands.size() < 3)
-            return std::make_shared<BooleanLiteralNode>(false);
+            return Fission::MakeShared<BooleanLiteralNode>(false);
         const LiftedInstruction branch{
             static_cast<LiftedOperation>(def->operands[def->operands.size() - 2].value.imm.n), def->instructionIndex,
             std::vector<LiftedOperand>(def->operands.begin() + 1, def->operands.end() - 2)
@@ -249,12 +250,12 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         // `k - r` / `k / r`: the constant index sits in operand 1
         auto left = ConstantLiteral(def->operands[1].value.imm.k);
         auto right = LiftExpression(def->operands[2]);
-        return std::make_shared<BinaryExpressionNode>(def->operation == LiftedOperation::SUBRK ? "-" : "/", left, right);
+        return Fission::MakeShared<BinaryExpressionNode>(def->operation == LiftedOperation::SUBRK ? "-" : "/", left, right);
     }
     case LiftedOperation::MOVE:
         return LiftExpression(def->operands[1], forceExpression);
     case LiftedOperation::GETVARARGS:
-        return std::make_shared<VarArgExpression>();
+        return Fission::MakeShared<VarArgExpression>();
 
     case LiftedOperation::CONCAT: {
         int startReg = def->operands[1].value.reg;
@@ -310,8 +311,8 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             parts.push_back(LiftExpression(op));
         std::shared_ptr<Expression> expr = nullptr;
         for (auto part = parts.rbegin(); part != parts.rend(); ++part)
-            expr = expr ? std::make_shared<BinaryExpressionNode>("..", *part, expr) : *part;
-        return expr ? expr : std::make_shared<StringLiteralNode>("");
+            expr = expr ? Fission::MakeShared<BinaryExpressionNode>("..", *part, expr) : *part;
+        return expr ? expr : Fission::MakeShared<StringLiteralNode>("");
     }
 
     case LiftedOperation::DUPTABLE:
@@ -325,11 +326,11 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
 
     case LiftedOperation::GETGLOBAL: {
         const auto &k = ConstantAt(def->operands[1].value.imm.k);
-        return std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(k.constantData)));
+        return Fission::MakeShared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(k.constantData)));
     }
     case LiftedOperation::GETUPVAL: {
-        return std::make_shared<IdentifierExpressionNode>(
-            std::make_shared<Identifier>(this->m_currentFunction->GetUpvalueName(def->operands[1].value.imm.n))
+        return Fission::MakeShared<IdentifierExpressionNode>(
+            Fission::MakeShared<Identifier>(this->m_currentFunction->GetUpvalueName(def->operands[1].value.imm.n))
         );
     }
     case LiftedOperation::GETIMPORT: {
@@ -349,15 +350,15 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
             parts.push_back(std::get<std::string>(constants.at(id2).constantData));
 
         if (parts.empty())
-            return std::make_shared<NilLiteralNode>();
+            return Fission::MakeShared<NilLiteralNode>();
 
-        std::shared_ptr<Expression> curr = std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(parts[0]));
+        std::shared_ptr<Expression> curr = Fission::MakeShared<IdentifierExpressionNode>(GlobalIdentifier(parts[0]));
         for (size_t i = 1; i < parts.size(); ++i)
-            curr = std::make_shared<MemberExpressionNode>(curr, parts[i]);
+            curr = Fission::MakeShared<MemberExpressionNode>(curr, parts[i]);
         return curr;
     }
     default:
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(operand, false)));
+        return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
 }
 
@@ -440,11 +441,11 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
     int32_t callInfoIndex = isNameCall ? resolvedIdx + 2 : resolvedIdx;
 
     if (static_cast<size_t>(callInfoIndex) >= m_currentFunction->lpLiftedFunction->instructions.size())
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
 
     const auto &callInfoInst = m_currentFunction->lpLiftedFunction->instructions[callInfoIndex];
     if (callInfoInst.operands.empty() || resolvedInst.operands.size() < (isNameCall ? 2u : 1u))
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
     int regFunc = callInfoInst.operands[0].value.reg;
 
     std::vector<std::shared_ptr<Expression>> args;
@@ -488,7 +489,7 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
             }
             if (def && def->operation == LiftedOperation::GETVARARGS && !m_emission.Emitted(def->instructionIndex)) {
                 isVararg = true;
-                auto vararg = std::make_shared<VarArgExpression>();
+                auto vararg = Fission::MakeShared<VarArgExpression>();
                 vararg->bAdjustToOne = def->operands.size() > 1 && def->operands[1].value.imm.n == 2 && k + 1 == argVersions.size();
                 args.push_back(vararg);
                 adjustArgCallDef = nullptr;
@@ -529,11 +530,11 @@ ASTLifter::LiftCall(const LiftedInstruction &inst, int32_t instructionIndex, boo
         auto kIdx = resolvedInst.operands[2].value.imm.k;
         std::string method = std::get<std::string>(m_currentFunction->lpLiftedFunction->lpDeserialized->constants.at(kIdx).constantData);
 
-        return std::make_shared<NameCallExpressionNode>(
-            callee, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(method)), args, rets, isVararg, isNested
+        return Fission::MakeShared<NameCallExpressionNode>(
+            callee, Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(method)), args, rets, isVararg, isNested
         );
     } else {
-        return std::make_shared<CallExpressionNode>(callee, args, rets, isVararg, isNested);
+        return Fission::MakeShared<CallExpressionNode>(callee, args, rets, isVararg, isNested);
     }
 }
 
@@ -553,16 +554,16 @@ static bool IsLegalLuauIdentifier(const std::string &str) {
 
 static std::shared_ptr<Expression> MakeTableKey(const std::string &keyStr) {
     if (IsLegalLuauIdentifier(keyStr))
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(keyStr));
-    return std::make_shared<StringLiteralNode>(keyStr);
+        return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(keyStr));
+    return Fission::MakeShared<StringLiteralNode>(keyStr);
 }
 
 std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstruction &setList, size_t k, bool forceComputed) {
     if (!m_currentFunction->implicitUses.contains(&setList))
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
     const auto &versions = m_currentFunction->implicitUses.at(&setList);
     if (k >= versions.size())
-        return std::make_shared<NilLiteralNode>();
+        return Fission::MakeShared<NilLiteralNode>();
 
     const int startReg = setList.operands[1].value.reg;
     LiftedOperand itemOp{};
@@ -603,7 +604,7 @@ std::shared_ptr<Expression> ASTLifter::LiftSetListElement(const LiftedInstructio
     }
 
     // an unwritten register reads nil
-    return expr ? expr : std::static_pointer_cast<Expression>(std::make_shared<NilLiteralNode>());
+    return expr ? expr : std::static_pointer_cast<Expression>(Fission::MakeShared<NilLiteralNode>());
 }
 
 bool ASTLifter::RenderClosureInPlace(const LiftedInstruction &closure, const std::shared_ptr<FunctionDeclarationNode> &function, bool anonymous) {
@@ -671,23 +672,23 @@ bool ASTLifter::RenderClosureInPlace(const LiftedInstruction &closure, const std
 std::shared_ptr<Expression> ASTLifter::LiftStoreTarget(const LiftedInstruction &store) {
     switch (store.operation) {
     case LiftedOperation::SETGLOBAL:
-        return std::make_shared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(ConstantAt(store.operands[1].value.imm.k).constantData)));
+        return Fission::MakeShared<IdentifierExpressionNode>(GlobalIdentifier(std::get<std::string>(ConstantAt(store.operands[1].value.imm.k).constantData)));
     case LiftedOperation::SETUPVAL:
-        return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(m_currentFunction->GetUpvalueName(store.operands[1].value.imm.n)));
+        return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(m_currentFunction->GetUpvalueName(store.operands[1].value.imm.n)));
     case LiftedOperation::SETTABLEKS: {
         auto table = LiftExpression(store.operands[1]);
-        return std::make_shared<MemberExpressionNode>(table, std::get<std::string>(ConstantAt(store.operands[2].value.imm.k).constantData));
+        return Fission::MakeShared<MemberExpressionNode>(table, std::get<std::string>(ConstantAt(store.operands[2].value.imm.k).constantData));
     }
     case LiftedOperation::SETTABLEN: {
         // the immediate is index - 1
         auto table = LiftExpression(store.operands[1]);
-        return std::make_shared<IndexExpressionNode>(
-            table, std::make_shared<NumberLiteralNode>(static_cast<double>(store.operands[2].value.imm.n) + 1.0)
+        return Fission::MakeShared<IndexExpressionNode>(
+            table, Fission::MakeShared<NumberLiteralNode>(static_cast<double>(store.operands[2].value.imm.n) + 1.0)
         );
     }
     default: {
         auto table = LiftExpression(store.operands[1]);
-        return std::make_shared<IndexExpressionNode>(table, LiftExpression(store.operands[2]));
+        return Fission::MakeShared<IndexExpressionNode>(table, LiftExpression(store.operands[2]));
     }
     }
 }
@@ -735,7 +736,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         if (complete && chain.size() > 1) {
             std::shared_ptr<Expression> value = LiftSetListElement(*chain.back().second, 0, true);
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
-                value = std::make_shared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
+                value = Fission::MakeShared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
                 m_emission.MarkEmitted(it->second->instructionIndex);
                 if (it->first != &inst) {
                     m_emission.MarkInlineConsumed(it->first->instructionIndex);
@@ -746,7 +747,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
         }
     }
     const auto plan = PlanTableLiteral(inst, false);
-    return plan ? RenderTableLiteral(inst, *plan) : std::make_shared<TableLiteralNode>();
+    return plan ? RenderTableLiteral(inst, *plan) : Fission::MakeShared<TableLiteralNode>();
 }
 
 static std::unordered_set<std::string> TemplateKeys(const LiftedInstruction &inst, const std::vector<LuauConstant> &constants) {
@@ -1285,8 +1286,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
             for (size_t i = 0; i < tableData.keys.size() && i < tableData.valueConstantIndices.size(); i++) {
                 const auto valIdx = tableData.valueConstantIndices[i];
                 const bool hasValue = valIdx >= 0 && static_cast<size_t>(valIdx) < constants.size();
-                auto entry = std::make_shared<BinaryExpressionNode>(
-                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : std::make_shared<NilLiteralNode>()
+                auto entry = Fission::MakeShared<BinaryExpressionNode>(
+                    "=", MakeTableKey(tableData.keys[i]), hasValue ? ConstantLiteral(valIdx) : Fission::MakeShared<NilLiteralNode>()
                 );
                 if (!hasValue)
                     templateSlots.try_emplace(tableData.keys[i], entry);
@@ -1298,7 +1299,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
     const auto value = [&](const LiftedOperand &operand, bool closureSlot) -> std::shared_ptr<Expression> {
         if (!closureSlot || !plan.tableIsLocal)
             return LiftExpression(operand);
-        auto slot = std::make_shared<FunctionDeclarationNode>(
+        auto slot = Fission::MakeShared<FunctionDeclarationNode>(
             "", 0, std::unordered_map<int32_t, std::shared_ptr<FunctionArgumentExpression>>{}, false, nullptr, false
         );
         m_closureSlots[SSARef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion}].push_back(slot);
@@ -1325,7 +1326,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
         } else if (candidate.operation == LiftedOperation::SETTABLEKS) {
             const auto &k = ConstantAt(candidate.operands[2].value.imm.k);
             elements.push_back(
-                std::make_shared<BinaryExpressionNode>(
+                Fission::MakeShared<BinaryExpressionNode>(
                     "=", MakeTableKey(std::get<std::string>(k.constantData)), value(candidate.operands[0], store.closureSlots[0])
                 )
             );
@@ -1334,8 +1335,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
             // the immediate is index - 1
             const int idx = candidate.operands[2].value.imm.n + 1;
             elements.push_back(
-                std::make_shared<BinaryExpressionNode>(
-                    "=", std::make_shared<MemberExpressionNode>(std::make_shared<NumberLiteralNode>(idx)),
+                Fission::MakeShared<BinaryExpressionNode>(
+                    "=", Fission::MakeShared<MemberExpressionNode>(Fission::MakeShared<NumberLiteralNode>(idx)),
                     value(candidate.operands[0], store.closureSlots[0])
                 )
             );
@@ -1343,7 +1344,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
         } else if (candidate.operation == LiftedOperation::SETTABLE) {
             auto keyExpr = value(candidate.operands[2], store.closureSlots[1]);
             auto valExpr = value(candidate.operands[0], store.closureSlots[0]);
-            elements.push_back(std::make_shared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
+            elements.push_back(Fission::MakeShared<TableBinaryExpressionNode>("=", keyExpr, valExpr));
             ConsumeInlinedDefs(candidate.operands[0]);
             ConsumeInlinedDefs(candidate.operands[2]);
         }
@@ -1358,7 +1359,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
     for (auto &element : elements)
         if (const auto keyed = std::dynamic_pointer_cast<TableBinaryExpressionNode>(element))
             if (const auto str = AsLiteral<StringLiteralNode>(keyed->left); str && (bFoundSetList || templateKeys.contains(str->value)))
-                element = std::make_shared<BinaryExpressionNode>("=", MakeTableKey(str->value), keyed->right);
+                element = Fission::MakeShared<BinaryExpressionNode>("=", MakeTableKey(str->value), keyed->right);
     const auto literal = [](const std::shared_ptr<Expression> &value) {
         return AsLiteral<NilLiteralNode>(value) || AsLiteral<BooleanLiteralNode>(value) || AsLiteral<NumberLiteralNode>(value) ||
                AsLiteral<StringLiteralNode>(value);
@@ -1383,5 +1384,5 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
         elements.erase(elements.begin() + static_cast<std::ptrdiff_t>(i));
     }
 
-    return elements.empty() ? std::make_shared<TableLiteralNode>() : std::make_shared<TableLiteralNode>(elements);
+    return elements.empty() ? Fission::MakeShared<TableLiteralNode>() : Fission::MakeShared<TableLiteralNode>(elements);
 }

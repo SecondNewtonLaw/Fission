@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "FissionAllocator.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
 
 #include <algorithm>
@@ -20,8 +21,8 @@ class IfExpressionFolder {
         if (const auto inverse = std::dynamic_pointer_cast<UnaryExpressionNode>(condition); inverse && inverse->op == "not ")
             return inverse->operand;
         if (const auto compare = std::dynamic_pointer_cast<BinaryExpressionNode>(condition); compare && (compare->op == "==" || compare->op == "~="))
-            return std::make_shared<BinaryExpressionNode>(compare->op == "==" ? "~=" : "==", compare->left, compare->right);
-        return std::make_shared<UnaryExpressionNode>("not ", condition);
+            return Fission::MakeShared<BinaryExpressionNode>(compare->op == "==" ? "~=" : "==", compare->left, compare->right);
+        return Fission::MakeShared<UnaryExpressionNode>("not ", condition);
     }
 
     static bool EndsInBareReturn(const std::shared_ptr<BlockStatementNode> &arm) {
@@ -57,7 +58,7 @@ class IfExpressionFolder {
             if (!chain || !guard || guard->elseBranch || !guard->thenBranch || guard->thenBranch->body.size() < 2 || !EndsInBareReturn(guard->thenBranch))
                 return;
             guard->thenBranch->body.pop_back();
-            guard->elseBranch = std::make_shared<BlockStatementNode>();
+            guard->elseBranch = Fission::MakeShared<BlockStatementNode>();
             guard->elseBranch->body.push_back(chain);
             body.pop_back();
         }
@@ -81,7 +82,7 @@ class IfExpressionFolder {
             if (auto inverse = std::dynamic_pointer_cast<UnaryExpressionNode>(guard->condition); inverse && inverse->op == "not ")
                 guard->condition = inverse->operand;
             else
-                guard->condition = std::make_shared<UnaryExpressionNode>("not ", guard->condition);
+                guard->condition = Fission::MakeShared<UnaryExpressionNode>("not ", guard->condition);
             guard->thenBranch->body.assign(body.begin() + static_cast<std::ptrdiff_t>(i), body.end());
             body.erase(body.begin() + static_cast<std::ptrdiff_t>(i), body.end());
             break;
@@ -159,8 +160,8 @@ class IfExpressionFolder {
         name = tn;
         if (auto inverse = std::dynamic_pointer_cast<UnaryExpressionNode>(ifStmt->condition);
             inverse && inverse->op == "not " && !std::dynamic_pointer_cast<IfExpressionNode>(elseExpr))
-            return std::make_shared<IfExpressionNode>(inverse->operand, elseExpr, tv);
-        return std::make_shared<IfExpressionNode>(ifStmt->condition, tv, elseExpr);
+            return Fission::MakeShared<IfExpressionNode>(inverse->operand, elseExpr, tv);
+        return Fission::MakeShared<IfExpressionNode>(ifStmt->condition, tv, elseExpr);
     }
 
     static bool SameOperand(const std::shared_ptr<Expression> &a, const std::shared_ptr<Expression> &b) {
@@ -183,10 +184,10 @@ class IfExpressionFolder {
         const auto thenExpr = Simplify(iff->thenExpr);
         const auto elseExpr = Simplify(iff->elseExpr);
         if (const auto either = AsLogical(thenExpr, "or"); either && SameOperand(either->right, elseExpr))
-            return std::make_shared<BinaryExpressionNode>("or", std::make_shared<BinaryExpressionNode>("and", iff->condition, either->left), elseExpr);
+            return Fission::MakeShared<BinaryExpressionNode>("or", Fission::MakeShared<BinaryExpressionNode>("and", iff->condition, either->left), elseExpr);
         if (const auto both = AsLogical(elseExpr, "and"); both && SameOperand(both->right, thenExpr))
-            return std::make_shared<BinaryExpressionNode>("and", std::make_shared<BinaryExpressionNode>("or", iff->condition, both->left), thenExpr);
-        return std::make_shared<IfExpressionNode>(iff->condition, thenExpr, elseExpr);
+            return Fission::MakeShared<BinaryExpressionNode>("and", Fission::MakeShared<BinaryExpressionNode>("or", iff->condition, both->left), thenExpr);
+        return Fission::MakeShared<IfExpressionNode>(iff->condition, thenExpr, elseExpr);
     }
 
     // `local v = <value expression>; return v` closing a block returns the expression directly.
@@ -229,14 +230,14 @@ class IfExpressionFolder {
             if (!yes || !no || yes->value == no->value || !second || (second->op != "==" && second->op != "~="))
                 continue;
             std::unordered_set<std::string> names;
-            ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(first), names);
-            ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(second), names);
+            ScopeAwareRenamer::CollectIdentifierNames(Fission::MakeShared<ExpressionStatementNode>(first), names);
+            ScopeAwareRenamer::CollectIdentifierNames(Fission::MakeShared<ExpressionStatementNode>(second), names);
             for (size_t j = i + 3; j < stmts.size(); ++j)
                 ScopeAwareRenamer::CollectIdentifierNames(stmts[j], names);
             if (names.contains(branchName))
                 continue;
             auto destination = std::static_pointer_cast<AssignmentStatementNode>(stmts[i + 2]);
-            destination->right = std::make_shared<BinaryExpressionNode>("or", first, yes->value ? second : Negate(second));
+            destination->right = Fission::MakeShared<BinaryExpressionNode>("or", first, yes->value ? second : Negate(second));
             stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i), stmts.begin() + static_cast<std::ptrdiff_t>(i + 2));
         }
     }
@@ -270,7 +271,7 @@ class IfExpressionFolder {
                     if (auto did = std::dynamic_pointer_cast<IdentifierExpressionNode>(decl->identifier);
                         did && did->identifier && did->identifier->name == name) {
                         std::unordered_set<std::string> names;
-                        ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(ifExpr), names);
+                        ScopeAwareRenamer::CollectIdentifierNames(Fission::MakeShared<ExpressionStatementNode>(ifExpr), names);
                         const bool shadowsEarlierBinding =
                             names.contains(name) && std::any_of(stmts.begin(), stmts.begin() + static_cast<std::ptrdiff_t>(i - 1), [&](const auto &statement) {
                                 auto earlier = std::dynamic_pointer_cast<VariableDeclarationNode>(statement);
@@ -278,7 +279,7 @@ class IfExpressionFolder {
                                 return id && id->identifier && id->identifier->name == name;
                             });
                         if (!names.contains(name) || shadowsEarlierBinding) {
-                            stmts[i - 1] = std::make_shared<VariableDeclarationNode>(decl->identifier, ifExpr);
+                            stmts[i - 1] = Fission::MakeShared<VariableDeclarationNode>(decl->identifier, ifExpr);
                             stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i));
                             --i;
                             continue;
@@ -290,8 +291,8 @@ class IfExpressionFolder {
             // stay statements, as a chain assigning an existing local reads.
             if (Calls(ifExpr))
                 continue;
-            auto lhs = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
-            stmts[i] = std::make_shared<AssignmentStatementNode>(lhs, ifExpr);
+            auto lhs = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(name));
+            stmts[i] = Fission::MakeShared<AssignmentStatementNode>(lhs, ifExpr);
         }
     }
 

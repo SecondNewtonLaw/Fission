@@ -1,4 +1,5 @@
 #include "Decompiler.hpp"
+#include "FissionAllocator.hpp"
 
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
@@ -250,7 +251,7 @@ static void AddDecompilerOptionsToHeader(ASTFunction &ast, DecompilerFlags flags
 }
 
 static std::shared_ptr<Expression> MakeTypeAnnotation(const std::string &typeName) {
-    return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(typeName));
+    return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(typeName));
 }
 
 static std::optional<std::string> GetSimpleIdentifierName(const std::shared_ptr<Expression> &expr) {

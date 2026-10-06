@@ -4,6 +4,7 @@
 
 #include "ASTLifter.hpp"
 #include "ASTLifterShared.hpp"
+#include "FissionAllocator.hpp"
 
 #include "AbstractSyntaxTree/Clone.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
@@ -40,7 +41,7 @@ const LuauConstant &ASTLifter::ConstantAt(long idx) const {
 #endif
 
 static std::shared_ptr<BlockStatementNode> CreateBlock(const std::vector<std::shared_ptr<Statement>> &stmts) {
-    auto block = std::make_shared<BlockStatementNode>();
+    auto block = Fission::MakeShared<BlockStatementNode>();
     block->body = stmts;
     return block;
 }
@@ -262,7 +263,7 @@ std::shared_ptr<Expression> ASTLifter::InvertCondition(const std::shared_ptr<Exp
         // branch, preserving operand order and the raised error.)
     }
 
-    return std::make_shared<UnaryExpressionNode>("not ", cond);
+    return Fission::MakeShared<UnaryExpressionNode>("not ", cond);
 }
 
 ASTLifter::ASTLifter() {}
@@ -1111,7 +1112,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
                 if (shared.declaration) {
                     sharedDeclarations.push_back(std::move(shared.declaration));
                 } else if (!shared.name.empty() && !shared.captures.empty() && shared.sameCaptures) {
-                    sharedDeclarations.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(shared.name)));
+                    sharedDeclarations.push_back(Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(shared.name)));
                 }
             }
         ast.statements.insert(ast.statements.begin(), sharedDeclarations.begin(), sharedDeclarations.end());
@@ -1121,7 +1122,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             bool declared = false, assigned = false;
             ScanBinding(ast.statements, renamed, declared, assigned);
             if (assigned && !declared)
-                ast.statements.insert(ast.statements.begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(renamed)));
+                ast.statements.insert(ast.statements.begin(), Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(renamed)));
         }
         Explain("function {}: control-flow lift produced {} top-level statements", m_debugFunction, ast.statements.size());
 
@@ -1156,7 +1157,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         for (const auto &renamed : analyzedFunction.disambiguatedNames)
             ast.statements.insert(
                 ast.statements.begin(),
-                std::make_shared<CommentNode>(
+                Fission::MakeShared<CommentNode>(
                     std::format("Fission: INFO: binding '{}' has been suffixed to avoid shadowing an existing, upper scope variable.", renamed.first), true,
                     true
                 )
@@ -1165,7 +1166,7 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
         for (const auto &renamed : analyzedFunction.prefixedLocalRenames)
             ast.statements.insert(
                 ast.statements.begin(),
-                std::make_shared<CommentNode>(
+                Fission::MakeShared<CommentNode>(
                     std::format(
                         "Fission: INFO: local '{}' was prefixed (from '{}') to avoid overwriting a global of the same name.", renamed.first, renamed.second
                     ),
@@ -1177,13 +1178,13 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             m_inlineSources->sources.size() > 1)
             ast.statements.insert(
                 ast.statements.begin(),
-                std::make_shared<CommentNode>(
+                Fission::MakeShared<CommentNode>(
                     "Fission: INFO: no line info (debug level 0); calls the compiler inlined at O2 cannot be located and stay expanded in place.", true, true
                 )
             );
 
         // The main banner stays; the per-function info block is informational.
-        ast.statements.insert(ast.statements.begin(), std::make_shared<CommentNode>(s, true, !analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain));
+        ast.statements.insert(ast.statements.begin(), Fission::MakeShared<CommentNode>(s, true, !analyzedFunction.lpLiftedFunction->lpDeserialized->bIsMain));
     }
 
     return ast;
@@ -1218,7 +1219,7 @@ void ASTLifter::ExplainKeep(
 
 std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *inst) {
     if (!inst)
-        return std::make_shared<BooleanLiteralNode>(false);
+        return Fission::MakeShared<BooleanLiteralNode>(false);
 
     // The compiler canonicalizes `a > b` to LT(b, a), losing source operand order. When both
     // operands inline effectful defs, emitting them re-swapped changes evaluation (and first-error)
@@ -1232,7 +1233,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
             if (da && db && da->instructionIndex > db->instructionIndex && ShouldInline(da) && ShouldInline(db)) {
                 auto left = LiftExpression(b);
                 auto right = LiftExpression(a);
-                return std::make_shared<BinaryExpressionNode>(mirrored, left, right);
+                return Fission::MakeShared<BinaryExpressionNode>(mirrored, left, right);
             }
         }
         auto left = LiftExpression(a);
@@ -1240,8 +1241,8 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
         // `x > 3` lowers to LT(3, x); a literal has no evaluation order, so read it back variable-first
         const bool pureLiteral = std::dynamic_pointer_cast<LiteralNode>(left) && !AsLiteral<TableLiteralNode>(left) && !AsLiteral<VectorNode>(left);
         if (std::string_view(op) != mirrored && pureLiteral && !std::dynamic_pointer_cast<LiteralNode>(right))
-            return std::make_shared<BinaryExpressionNode>(mirrored, right, left);
-        return std::make_shared<BinaryExpressionNode>(op, left, right);
+            return Fission::MakeShared<BinaryExpressionNode>(mirrored, right, left);
+        return Fission::MakeShared<BinaryExpressionNode>(op, left, right);
     };
 
     // negated relational branches (JUMPIFNOTLT/LE) mean "jump if NOT (a </<= b)". Their faithful
@@ -1250,7 +1251,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     // different "attempt to compare" error (operator + operand order change). Keep the exact compare
     // and negate it. (`==`/`~=` are exact negations, so those flip directly.)
     const auto notWrap = [](std::shared_ptr<Expression> e) -> std::shared_ptr<Expression> {
-        return std::make_shared<UnaryExpressionNode>("not ", std::move(e));
+        return Fission::MakeShared<UnaryExpressionNode>("not ", std::move(e));
     };
 
     switch (inst->operation) {
@@ -1269,7 +1270,7 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
     case LiftedOperation::JUMPIF:
         return LiftExpression(inst->operands[0]);
     case LiftedOperation::JUMPIFNOT:
-        return std::make_shared<UnaryExpressionNode>("not ", LiftExpression(inst->operands[0]));
+        return Fission::MakeShared<UnaryExpressionNode>("not ", LiftExpression(inst->operands[0]));
     case LiftedOperation::JUMPXEQK: {
         if (inst->operands[2].type == LiftedOperandType::ImmediateConstant) {
             auto kIdx = inst->operands[2].value.imm.k;
@@ -1278,52 +1279,52 @@ std::shared_ptr<Expression> ASTLifter::LiftCondition(const LiftedInstruction *in
             const auto &k = ConstantAt(kIdx);
             switch (k.kType) {
             case LUA_TNIL:
-                rhs = std::make_shared<NilLiteralNode>();
+                rhs = Fission::MakeShared<NilLiteralNode>();
                 break;
             case LUA_TBOOLEAN:
-                rhs = std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                rhs = Fission::MakeShared<BooleanLiteralNode>(std::get<bool>(k.constantData));
                 break;
             case LUA_TNUMBER:
-                rhs = std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                rhs = Fission::MakeShared<NumberLiteralNode>(std::get<double>(k.constantData));
                 break;
             case LUA_TINTEGER:
-                rhs = std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
+                rhs = Fission::MakeShared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
                 break;
             case LUA_TSTRING:
-                rhs = std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                rhs = Fission::MakeShared<StringLiteralNode>(std::get<std::string>(k.constantData));
                 break;
             default:
-                rhs = std::make_shared<NilLiteralNode>();
+                rhs = Fission::MakeShared<NilLiteralNode>();
                 break;
             }
 
             if (notFlag)
-                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+                return Fission::MakeShared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
 
-            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+            return Fission::MakeShared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
         }
         if (inst->operands[2].type == LiftedOperandType::ImmediateBool) {
             auto bValue = inst->operands[2].value.imm.b;
             auto notFlag = inst->operands[3].value.imm.b;
-            std::shared_ptr<Expression> rhs = std::make_shared<BooleanLiteralNode>(bValue);
+            std::shared_ptr<Expression> rhs = Fission::MakeShared<BooleanLiteralNode>(bValue);
             if (notFlag)
-                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+                return Fission::MakeShared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
 
-            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+            return Fission::MakeShared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
         }
 
         if (inst->operands[2].type == LiftedOperandType::ImmediateNil) {
             auto notFlag = inst->operands[3].value.imm.b;
-            std::shared_ptr<Expression> rhs = std::make_shared<NilLiteralNode>();
+            std::shared_ptr<Expression> rhs = Fission::MakeShared<NilLiteralNode>();
             if (notFlag)
-                return std::make_shared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
+                return Fission::MakeShared<BinaryExpressionNode>("~=", LiftExpression(inst->operands[0]), rhs);
 
-            return std::make_shared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
+            return Fission::MakeShared<BinaryExpressionNode>("==", LiftExpression(inst->operands[0]), rhs);
         }
-        return std::make_shared<BooleanLiteralNode>(false);
+        return Fission::MakeShared<BooleanLiteralNode>(false);
     }
     default:
-        return std::make_shared<BooleanLiteralNode>(false);
+        return Fission::MakeShared<BooleanLiteralNode>(false);
     }
 }
 std::optional<uint32_t> ASTLifter::DetectInfiniteWhileLatch(uint32_t headerId, uint32_t innerLatchId) {
@@ -1369,8 +1370,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     const auto markEarlyForExit = [&](uint32_t target) {
         for (auto it = m_earlyForExits.rbegin(); it != m_earlyForExits.rend(); ++it)
             if (it->first == target) {
-                auto name = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(it->second));
-                nodes.push_back(std::make_shared<AssignmentStatementNode>(name, std::make_shared<BooleanLiteralNode>(true)));
+                auto name = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(it->second));
+                nodes.push_back(Fission::MakeShared<AssignmentStatementNode>(name, Fission::MakeShared<BooleanLiteralNode>(true)));
                 break;
             }
     };
@@ -1460,7 +1461,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             nodes.insert(nodes.end(), copy->first.begin(), copy->first.end());
             if (copy->second) {
                 markEarlyForExit(m_loopExitStack.back());
-                nodes.push_back(std::make_shared<BreakStatementNode>());
+                nodes.push_back(Fission::MakeShared<BreakStatementNode>());
             }
             recordTrailer();
             return true;
@@ -1554,9 +1555,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 nodes.insert(nodes.end(), body.begin(), guard);
                                 body.erase(body.begin(), guard);
                             }
-                            auto repeat = std::make_shared<RepeatStatementNode>();
+                            auto repeat = Fission::MakeShared<RepeatStatementNode>();
                             repeat->body = CreateBlock(body);
-                            repeat->condition = std::make_shared<BooleanLiteralNode>(true);
+                            repeat->condition = Fission::MakeShared<BooleanLiteralNode>(true);
                             nodes.push_back(repeat);
                             previousLift = nullptr;
                             currentBlockId = static_cast<uint32_t>(exitId);
@@ -1571,7 +1572,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         // don't mark visited; exit is still lifted once after the loop.
         if (!m_loopExitStack.empty() && currentBlockId == m_loopExitStack.back()) {
             markEarlyForExit(currentBlockId);
-            nodes.push_back(std::make_shared<BreakStatementNode>());
+            nodes.push_back(Fission::MakeShared<BreakStatementNode>());
             recordTrailer();
             break;
         }
@@ -1579,7 +1580,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         if (currentBlockId != stopBlockId && stopBlockId != InvalidBlockId && isInnermostLatch(currentBlockId)) {
             // `continue` skips what the source places before the loop test, so the latch's own statements run here too
             nodes.push_back(LatchCopy(currentBlockId));
-            nodes.push_back(std::make_shared<ContinueStatementNode>());
+            nodes.push_back(Fission::MakeShared<ContinueStatementNode>());
             recordTrailer();
             break;
         }
@@ -1739,7 +1740,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             size_t from;
             uint32_t block;
             ~LiftRecord() {
-                auto lift = std::make_shared<BlockLift>(
+                auto lift = Fission::MakeShared<BlockLift>(
                     block, next, std::vector<std::shared_ptr<Statement>>(nodes.begin() + static_cast<std::ptrdiff_t>(std::min(from, nodes.size())), nodes.end())
                 );
                 if (previous)
@@ -1902,7 +1903,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     isInnermostLatch(latchArm) && (flowingArm == stopBlockId || CanReach(flowingArm, stopBlockId, latchArm, {currentBlockId})))
                     mergeIdx = stopBlockId;
 
-                auto ifStmt = std::make_shared<IfStatementNode>();
+                auto ifStmt = Fission::MakeShared<IfStatementNode>();
                 auto visitedCopy = visited;
                 if (mergeIdx != InvalidBlockId)
                     visitedCopy.insert(mergeIdx);
@@ -1991,7 +1992,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 break;
                             chainVisited.insert(chainBlockId);
                             auto chainStmts = LiftBlockInstructions(chainBlock);
-                            auto newIf = std::make_shared<IfStatementNode>();
+                            auto newIf = Fission::MakeShared<IfStatementNode>();
                             newIf->condition = InvertCondition(LiftCondition(chainBlock.lpTail));
                             std::vector<std::shared_ptr<Statement>> blockBody;
                             blockBody.insert(blockBody.end(), chainStmts.begin(), chainStmts.end());
@@ -2040,7 +2041,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             visitedCopy.insert(link);
                             const auto &part = m_currentFunction->basicBlocks[link];
                             auto prefix = LiftBlockInstructions(part);
-                            auto child = std::make_shared<IfStatementNode>();
+                            auto child = Fission::MakeShared<IfStatementNode>();
                             child->condition = InvertCondition(LiftCondition(part.lpTail));
                             child->thenBranch = CreateBlock(co_await LiftControlFlow(*part.ifStatementFalse, mergeIdx, visitedCopy));
                             prefix.push_back(child);
@@ -2124,7 +2125,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     nextBlockId = mergeIdx;
 
             } else {
-                nodes.push_back(std::make_shared<CommentNode>("Fission: Warning - Malformed IfHeader", true));
+                nodes.push_back(Fission::MakeShared<CommentNode>("Fission: Warning - Malformed IfHeader", true));
             }
             break;
         }
@@ -2212,9 +2213,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             name = std::format("__fission_early_for_{}_{}", currentBlockId, suffix);
                         earlyForExit = std::make_pair(natural, name);
                         nodes.push_back(
-                            std::make_shared<VariableDeclarationNode>(
-                                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)),
-                                std::make_shared<BooleanLiteralNode>(false)
+                            Fission::MakeShared<VariableDeclarationNode>(
+                                Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(name)),
+                                Fission::MakeShared<BooleanLiteralNode>(false)
                             )
                         );
                         for (const auto &phi : m_currentFunction->basicBlocks[*block.loopExit].phiNodes) {
@@ -2231,8 +2232,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             }
                             if (early && normal) {
                                 nodes.push_back(
-                                    std::make_shared<VariableDeclarationNode>(
-                                        std::make_shared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
+                                    Fission::MakeShared<VariableDeclarationNode>(
+                                        Fission::MakeShared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
                                     )
                                 );
                                 m_definedRegisters.insert(phi.operands[0].value.reg);
@@ -2259,7 +2260,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             }
                     }
 
-                    auto repeatNode = std::make_shared<RepeatStatementNode>();
+                    auto repeatNode = Fission::MakeShared<RepeatStatementNode>();
                     auto &latch = m_currentFunction->basicBlocks[latchIdx];
 
                     // two repeat-until shapes: cond in latch (JUMPIF) vs cond in header (latch is plain JUMP).
@@ -2436,7 +2437,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (bodyBlk != InvalidBlockId) {
                                 // header pre-branch statements (the condition's operands inline, not emitted here)
                                 std::vector<std::shared_ptr<Statement>> bodyStmts = LiftBlockInstructions(block);
-                                auto innerIf = std::make_shared<IfStatementNode>();
+                                auto innerIf = Fission::MakeShared<IfStatementNode>();
                                 innerIf->condition = InvertCondition(LiftCondition(block.lpTail)); // body runs on the not-jump path
                                 const uint32_t thenStop = (skipBlk != InvalidBlockId) ? skipBlk : latchIdx;
                                 boost::unordered_flat_set<uint32_t> ifVisited = loopVisited;
@@ -2451,7 +2452,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                     auto tailStmts = co_await LiftControlFlow(skipBlk, latchIdx, tailVisited);
                                     bodyStmts.insert(bodyStmts.end(), tailStmts.begin(), tailStmts.end());
                                 }
-                                repeatNode->condition = std::make_shared<BooleanLiteralNode>(false); // `until false`; infinite
+                                repeatNode->condition = Fission::MakeShared<BooleanLiteralNode>(false); // `until false`; infinite
                                 repeatNode->body = CreateBlock(bodyStmts);
                                 Explain(block, "emit repeat-until-false because both header branches remain inside loop and B{} is its latch", latchIdx);
                                 infiniteHandled = true;
@@ -2556,7 +2557,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             if (!exitConds.empty()) {
                                 auto combined = exitConds[0];
                                 for (size_t i = 1; i < exitConds.size(); ++i) {
-                                    combined = std::make_shared<BinaryExpressionNode>("or", combined, exitConds[i]);
+                                    combined = Fission::MakeShared<BinaryExpressionNode>("or", combined, exitConds[i]);
                                 }
                                 repeatNode->condition = combined;
                             } else {
@@ -2619,7 +2620,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 exitIdx = succ;
                     }
 
-                    auto forNode = std::make_shared<ForNumericNode>();
+                    auto forNode = Fission::MakeShared<ForNumericNode>();
                     auto forPrepInst = block.lpTail;
                     int32_t limitVer = -1, stepVer = -1, startVer = -1;
 
@@ -2674,7 +2675,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 idOp.ssaVersion = startVer;
                                 const auto resolved = ResolveVariableName(idOp);
                                 forNode->loopVariable =
-                                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(resolved.empty() ? loopVarName : resolved));
+                                    Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(resolved.empty() ? loopVarName : resolved));
                             }
                             m_currentFunction->SetVariableName(loopVariableReg, startVer, startValueName);
 
@@ -2703,28 +2704,28 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 m_emission.MarkEmitted(effDef->instructionIndex);
                                 auto &valOp = effDef->operands[1];
                                 if (valOp.type == LiftedOperandType::ImmediateInteger)
-                                    return std::make_shared<NumberLiteralNode>(valOp.value.imm.n);
+                                    return Fission::MakeShared<NumberLiteralNode>(valOp.value.imm.n);
                                 if (valOp.type == LiftedOperandType::ImmediateNil)
-                                    return std::make_shared<NilLiteralNode>();
+                                    return Fission::MakeShared<NilLiteralNode>();
                                 if (valOp.type == LiftedOperandType::ImmediateBool)
-                                    return std::make_shared<BooleanLiteralNode>(valOp.value.imm.b);
+                                    return Fission::MakeShared<BooleanLiteralNode>(valOp.value.imm.b);
                                 if (valOp.type == LiftedOperandType::ImmediateConstant) {
                                     const auto &k = ConstantAt(valOp.value.imm.k);
                                     switch (k.kType) {
                                     case LUA_TNIL:
-                                        return std::make_shared<NilLiteralNode>();
+                                        return Fission::MakeShared<NilLiteralNode>();
                                     case LUA_TBOOLEAN:
-                                        return std::make_shared<BooleanLiteralNode>(std::get<bool>(k.constantData));
+                                        return Fission::MakeShared<BooleanLiteralNode>(std::get<bool>(k.constantData));
                                     case LUA_TNUMBER:
-                                        return std::make_shared<NumberLiteralNode>(std::get<double>(k.constantData));
+                                        return Fission::MakeShared<NumberLiteralNode>(std::get<double>(k.constantData));
                                     case LUA_TINTEGER:
-                                        return std::make_shared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
+                                        return Fission::MakeShared<IntegerLiteralNode>(std::get<int64_t>(k.constantData));
                                     case LUA_TSTRING:
-                                        return std::make_shared<StringLiteralNode>(std::get<std::string>(k.constantData));
+                                        return Fission::MakeShared<StringLiteralNode>(std::get<std::string>(k.constantData));
                                     case LUA_TVECTOR:
                                         return LiftVectorConstant(k);
                                     default:
-                                        return std::make_shared<NilLiteralNode>();
+                                        return Fission::MakeShared<NilLiteralNode>();
                                     }
                                 }
                             }
@@ -2825,7 +2826,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     if (!loopVariableWasDefined)
                         m_definedRegisters.erase(loopVariableReg);
                 } else if ((block.dwBlockFlags & LoopBlockFlags::WhileLoop) == LoopBlockFlags::WhileLoop) {
-                    auto whileNode = std::make_shared<WhileStatementNode>();
+                    auto whileNode = Fission::MakeShared<WhileStatementNode>();
                     const bool infiniteWhile = block.bTerminator != BlockTerminator::Conditional;
 
                     if (block.loopExit.has_value())
@@ -2875,7 +2876,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     // a header that does not exit itself (`while a or b`) lifts as `while true` whose exit edges break
                     const bool deferredExit = deferredWhileHeader && block.loopExit && *block.loopExit != latchIdx && *block.loopExit != currentBlockId;
                     if (deferredWhileHeader && (!block.loopExit || deferredExit)) {
-                        whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                        whileNode->condition = Fission::MakeShared<BooleanLiteralNode>(true);
                         auto &headerBlock = m_currentFunction->basicBlocks[currentBlockId];
                         constexpr uint32_t kAllLoopFlags =
                             static_cast<uint32_t>(LoopBlockFlags::WhileLoop) | static_cast<uint32_t>(LoopBlockFlags::ForNumericLoop) |
@@ -2931,8 +2932,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 if (!writtenInLoop)
                                     continue;
                                 nodes.push_back(
-                                    std::make_shared<VariableDeclarationNode>(
-                                        std::make_shared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
+                                    Fission::MakeShared<VariableDeclarationNode>(
+                                        Fission::MakeShared<Identifier>(m_currentFunction->GetVarName(phi.operands[0].value.reg, phi.operands[0].ssaVersion))
                                     )
                                 );
                                 m_definedRegisters.insert(phi.operands[0].value.reg);
@@ -2974,7 +2975,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                 const bool exitIsHeaderSucc = realExit != InvalidBlockId &&
                                                               std::find(block.successors.begin(), block.successors.end(), realExit) != block.successors.end();
                                 if (realExit != InvalidBlockId && !exitIsHeaderSucc) {
-                                    whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                                    whileNode->condition = Fission::MakeShared<BooleanLiteralNode>(true);
                                     auto &hdr = m_currentFunction->basicBlocks[currentBlockId];
                                     if (deferredWhileHeader)
                                         stmts = LiftBlockInstructions(hdr);
@@ -3058,7 +3059,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                                     const auto &rhs = bb2[id];
                                     auto term =
                                         rhs.ifStatementTrue.value() == bodyStart ? LiftCondition(rhs.lpTail) : InvertCondition(LiftCondition(rhs.lpTail));
-                                    condition = std::make_shared<BinaryExpressionNode>("or", condition, term);
+                                    condition = Fission::MakeShared<BinaryExpressionNode>("or", condition, term);
                                 }
                                 whileOrCondition = condition;
                                 visited.insert(rhsBlocks.begin(), rhsBlocks.end());
@@ -3075,7 +3076,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         if (whileOrCondition)
                             whileNode->condition = whileOrCondition;
                         else if (headerHasBody || infiniteWhile)
-                            whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                            whileNode->condition = Fission::MakeShared<BooleanLiteralNode>(true);
                         else if (block.ifStatementTrue.has_value() && block.ifStatementTrue.value() == bodyStart)
                             whileNode->condition = LiftCondition(block.lpTail);
                         else
@@ -3099,10 +3100,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
                             if (headerHasBody && block.bTerminator == BlockTerminator::Conditional) {
                                 // header body -> `if <exit cond> then break end` -> rest of body.
-                                auto breakIf = std::make_shared<IfStatementNode>();
+                                auto breakIf = Fission::MakeShared<IfStatementNode>();
                                 const bool exitOnFalse = block.ifStatementFalse.has_value() && block.ifStatementFalse.value() == exitIdx;
                                 breakIf->condition = exitOnFalse ? InvertCondition(LiftCondition(block.lpTail)) : LiftCondition(block.lpTail);
-                                breakIf->thenBranch = CreateBlock({std::make_shared<BreakStatementNode>()});
+                                breakIf->thenBranch = CreateBlock({Fission::MakeShared<BreakStatementNode>()});
                                 bodyStmts.insert(bodyStmts.begin(), breakIf);
                             }
                             bodyStmts.insert(bodyStmts.begin(), stmts.begin(), stmts.end());
@@ -3132,7 +3133,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             exitIdx = resolved;
                     }
 
-                    auto forNode = std::make_shared<ForGeneralNode>();
+                    auto forNode = Fission::MakeShared<ForGeneralNode>();
                     // a well-formed generic-for has a FORGPREP* header tail (>=1 operand: the base register)
                     // and a FORGLOOP latch tail (>=3 operands: base, count, numVars). A malformed CFG can
                     // pair this header with a latch whose tail is neither; reading those operands would be
@@ -3207,7 +3208,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             // LiftExpression (which inlines a reused register's value -> `for <expr> in ...`,
                             // a syntax error). Mirrors the numeric-for loop-variable handling above.
                             forNode->loopVariables.push_back(
-                                std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(varOp)))
+                                Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(varOp)))
                             );
                         }
 
@@ -3250,7 +3251,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                             forNode->index = LiftExpression(op, false);
                             if (indexDef && indexDef->operation == LiftedOperation::LOAD && indexDef->operands.size() > 1 &&
                                 indexDef->operands[1].type == LiftedOperandType::ImmediateNil)
-                                forNode->index = std::make_shared<NilLiteralNode>();
+                                forNode->index = Fission::MakeShared<NilLiteralNode>();
 
                             // `for k,v in t do` lowers to [t, nil, nil] (Luau pads to 3). the nil state/control
                             // aren't idiomatic/portable, so collapse to the single-generator form.
@@ -3271,9 +3272,9 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     auto normalVisited = visited;
                     auto normal = co_await LiftControlFlow(earlyForExit->first, exitIdx, normalVisited);
                     if (!normal.empty()) {
-                        auto guard = std::make_shared<IfStatementNode>();
-                        guard->condition = std::make_shared<UnaryExpressionNode>(
-                            "not ", std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(earlyForExit->second))
+                        auto guard = Fission::MakeShared<IfStatementNode>();
+                        guard->condition = Fission::MakeShared<UnaryExpressionNode>(
+                            "not ", Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(earlyForExit->second))
                         );
                         guard->thenBranch = CreateBlock(normal);
                         nodes.push_back(guard);
@@ -3315,7 +3316,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     condition = InvertCondition(condition);
 
                 nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
-                auto repeatNode = std::make_shared<RepeatStatementNode>();
+                auto repeatNode = Fission::MakeShared<RepeatStatementNode>();
                 repeatNode->body = CreateBlock(loopBody);
                 repeatNode->condition = condition;
                 nodes.push_back(repeatNode);
@@ -3390,8 +3391,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 std::vector<std::shared_ptr<Statement>> loopBody(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
                 loopBody.insert(loopBody.end(), tail.begin(), tail.end());
                 nodes.erase(nodes.begin() + static_cast<std::ptrdiff_t>(loopNodesStart), nodes.end());
-                auto whileNode = std::make_shared<WhileStatementNode>();
-                whileNode->condition = std::make_shared<BooleanLiteralNode>(true);
+                auto whileNode = Fission::MakeShared<WhileStatementNode>();
+                whileNode->condition = Fission::MakeShared<BooleanLiteralNode>(true);
                 whileNode->body = CreateBlock(loopBody);
                 nodes.push_back(whileNode);
                 nextBlockId = wrapExit;
@@ -3403,7 +3404,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
             nodes.insert(nodes.end(), stmts.begin(), stmts.end());
             if (!block.successors.empty())
                 markEarlyForExit(block.successors.front());
-            nodes.push_back(std::make_shared<BreakStatementNode>());
+            nodes.push_back(Fission::MakeShared<BreakStatementNode>());
             break;
         case BlockType::Return:
             nodes.insert(nodes.end(), stmts.begin(), stmts.end());
@@ -3411,7 +3412,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
         case BlockType::LoopLatch:
             if ((block.dwBlockFlags & LoopBlockFlags::RepeatUntilLoop) == LoopBlockFlags::RepeatUntilLoop && block.loopHeader == block.dwBlockId &&
                 block.loopExit.has_value()) {
-                auto repeatNode = std::make_shared<RepeatStatementNode>();
+                auto repeatNode = Fission::MakeShared<RepeatStatementNode>();
                 repeatNode->condition = InvertCondition(LiftCondition(block.lpTail));
                 repeatNode->body = CreateBlock(stmts);
                 nodes.push_back(repeatNode);
@@ -3438,7 +3439,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 }
 
 std::shared_ptr<BlockStatementNode> ASTLifter::LatchCopy(uint32_t latchId) {
-    auto copy = std::make_shared<BlockStatementNode>();
+    auto copy = Fission::MakeShared<BlockStatementNode>();
     m_latchCopyNodes.insert(copy.get());
     auto &copies = m_latchCopies[static_cast<int32_t>(latchId)];
     if (copies.lifted)
@@ -3567,10 +3568,10 @@ std::vector<std::shared_ptr<Expression>> ASTLifter::FoldMultiAssignment(
             continue;
         }
         const bool bare = !declares && !declared(assign);
-        auto name = std::make_shared<Identifier>(ResolveVariableName(assign->operands[0]));
+        auto name = Fission::MakeShared<Identifier>(ResolveVariableName(assign->operands[0]));
         if (bare)
-            statements.push_back(std::make_shared<VariableDeclarationNode>(name));
-        targets.push_back(std::make_shared<IdentifierExpressionNode>(name));
+            statements.push_back(Fission::MakeShared<VariableDeclarationNode>(name));
+        targets.push_back(Fission::MakeShared<IdentifierExpressionNode>(name));
     }
     return targets;
 }
@@ -3745,7 +3746,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 throw Fission::DecompilerError("malformed NEWCLASS: AUX is not a class-shape constant");
             const auto &shape = std::get<LuauClassShape>(shapeConst.constantData);
             auto classNode =
-                std::make_shared<ClassDeclarationNode>(shape.className, shape.propertyNames, std::vector<std::shared_ptr<FunctionDeclarationNode>>{});
+                Fission::MakeShared<ClassDeclarationNode>(shape.className, shape.propertyNames, std::vector<std::shared_ptr<FunctionDeclarationNode>>{});
             classNode->bOpen = inst.operands[2].type == LiftedOperandType::ImmediateBool && inst.operands[2].value.imm.b;
             if (inst.operands[1].type == LiftedOperandType::Register)
                 classNode->superclass = LiftExpression(inst.operands[1]);
@@ -3770,7 +3771,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 const SSARef classRef{static_cast<uint8_t>(inst.operands[0].value.reg), inst.operands[0].ssaVersion};
 
                 auto classNode =
-                    std::make_shared<ClassDeclarationNode>(shape.className, shape.propertyNames, std::vector<std::shared_ptr<FunctionDeclarationNode>>{});
+                    Fission::MakeShared<ClassDeclarationNode>(shape.className, shape.propertyNames, std::vector<std::shared_ptr<FunctionDeclarationNode>>{});
                 m_pendingClasses[classRef] = classNode;
                 if (!shape.className.empty())
                     m_currentFunction->SetVariableName(classRef.regIndex, classRef.version, shape.className);
@@ -3815,7 +3816,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             const auto &op = *compound->second.operation;
             auto target = LiftStoreTarget(inst);
             auto rhs = HasConstantRightOperand(op.operation) ? ConstantLiteral(op.operands[2].value.imm.k) : LiftExpression(op.operands[2]);
-            statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(BinaryOperatorSymbol(op.operation), target, rhs));
+            statements.push_back(Fission::MakeShared<CompoundBinaryExpressionNode>(BinaryOperatorSymbol(op.operation), target, rhs));
             continue;
         }
 
@@ -3826,12 +3827,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             const int32_t baseReg = inst.operands[0].value.reg;
             bool declares = false;
             if (auto targets = FoldMultiAssignment(inst, defs, statements, declares); !targets.empty()) {
-                auto spread = std::make_shared<CallExpressionNode>(
-                    std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
+                auto spread = Fission::MakeShared<CallExpressionNode>(
+                    Fission::MakeShared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
                 );
                 spread->bSpreadsVarArgs = true;
                 spread->bIsLocalDeclaration = declares;
-                statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
+                statements.push_back(Fission::MakeShared<ExpressionStatementNode>(spread));
                 m_emission.MarkEmitted(inst.instructionIndex);
                 break;
             }
@@ -3846,16 +3847,16 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 std::vector<std::shared_ptr<Expression>> targets;
                 for (const auto &ref : defs)
                     targets.push_back(
-                        std::make_shared<IdentifierExpressionNode>(
-                            std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
+                        Fission::MakeShared<IdentifierExpressionNode>(
+                            Fission::MakeShared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
                         )
                     );
-                auto spread = std::make_shared<CallExpressionNode>(
-                    std::make_shared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
+                auto spread = Fission::MakeShared<CallExpressionNode>(
+                    Fission::MakeShared<VarArgExpression>(), std::vector<std::shared_ptr<Expression>>{}, targets, false, false
                 );
                 spread->bSpreadsVarArgs = true;
                 spread->bIsLocalDeclaration = defined == 0;
-                statements.push_back(std::make_shared<ExpressionStatementNode>(spread));
+                statements.push_back(Fission::MakeShared<ExpressionStatementNode>(spread));
                 m_emission.MarkEmitted(inst.instructionIndex);
                 break;
             }
@@ -3866,17 +3867,17 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 output.ssaVersion = ref.version;
 
                 const bool isDefined = m_definedRegisters.contains(ref.regIndex);
-                auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output)));
-                std::shared_ptr<Expression> value = std::make_shared<VarArgExpression>();
+                auto target = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(output)));
+                std::shared_ptr<Expression> value = Fission::MakeShared<VarArgExpression>();
                 if (ref.regIndex != baseReg) {
-                    auto values = std::make_shared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
-                    value = std::make_shared<IndexExpressionNode>(values, std::make_shared<NumberLiteralNode>(ref.regIndex - baseReg + 1));
+                    auto values = Fission::MakeShared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
+                    value = Fission::MakeShared<IndexExpressionNode>(values, Fission::MakeShared<NumberLiteralNode>(ref.regIndex - baseReg + 1));
                 }
 
                 if (isDefined)
-                    statements.push_back(std::make_shared<AssignmentStatementNode>(target, value));
+                    statements.push_back(Fission::MakeShared<AssignmentStatementNode>(target, value));
                 else
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, value));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(target, value));
             }
             m_emission.MarkEmitted(inst.instructionIndex);
             break;
@@ -3891,12 +3892,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     table && delayedVariadicSetList(*table) && storeSiteSnapshotableKey(*table, inst)) {
                     const auto snapshot = m_setListKeySnapshots.find(&inst);
                     const std::string name = snapshot == m_setListKeySnapshots.end() ? freshKeyName(inst) : snapshot->second;
-                    auto key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name));
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(key, LiftExpression(inst.operands[2])));
+                    auto key = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(name));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(key, LiftExpression(inst.operands[2])));
                     m_setListKeySnapshots[&inst] = name;
                     statements.push_back(
-                        std::make_shared<AssignmentStatementNode>(
-                            std::make_shared<IndexExpressionNode>(LiftExpression(inst.operands[1]), key), LiftExpression(inst.operands[0])
+                        Fission::MakeShared<AssignmentStatementNode>(
+                            Fission::MakeShared<IndexExpressionNode>(LiftExpression(inst.operands[1]), key), LiftExpression(inst.operands[0])
                         )
                     );
                     break;
@@ -3906,7 +3907,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 if (const auto *table = m_currentFunction->GetDefinition(inst.operands[1]); table && ShouldInline(table))
                     break;
             auto target = LiftStoreTarget(inst);
-            statements.push_back(std::make_shared<AssignmentStatementNode>(target, LiftExpression(inst.operands[0])));
+            statements.push_back(Fission::MakeShared<AssignmentStatementNode>(target, LiftExpression(inst.operands[0])));
             break;
         }
         case LiftedOperation::NEWCLASSMEMBER: {
@@ -3933,8 +3934,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             }
 
             // Otherwise a bare member registration on a plain table: `class.member = <value>`.
-            auto memExpr = std::make_shared<MemberExpressionNode>(LiftExpression(inst.operands[0]), memberName);
-            statements.push_back(std::make_shared<AssignmentStatementNode>(memExpr, LiftExpression(inst.operands[1])));
+            auto memExpr = Fission::MakeShared<MemberExpressionNode>(LiftExpression(inst.operands[0]), memberName);
+            statements.push_back(Fission::MakeShared<AssignmentStatementNode>(memExpr, LiftExpression(inst.operands[1])));
             break;
         }
         case LiftedOperation::SETLIST: {
@@ -3942,7 +3943,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 std::vector<std::shared_ptr<Expression>> elements;
                 const SSARef ref{inst.operands[0].value.reg, inst.operands[0].ssaVersion};
                 const std::string name = ResolveVariableName(inst.operands[0], false);
-                const auto tableName = [&]() { return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)); };
+                const auto tableName = [&]() { return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(name)); };
                 std::vector<const LiftedInstruction *> prior;
                 for (const auto *user : m_currentFunction->users.at(ref))
                     if (user->instructionIndex < inst.instructionIndex)
@@ -3953,27 +3954,27 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                         const int first = store->operands[3].value.imm.n;
                         const int count = store->operands[2].value.imm.n - 1;
                         for (int k = 0; k < count; ++k)
-                            elements.push_back(std::make_shared<IndexExpressionNode>(tableName(), std::make_shared<NumberLiteralNode>(first + k)));
+                            elements.push_back(Fission::MakeShared<IndexExpressionNode>(tableName(), Fission::MakeShared<NumberLiteralNode>(first + k)));
                     } else {
                         std::shared_ptr<Expression> key;
                         if (store->operation == LiftedOperation::SETTABLEKS)
-                            key = std::make_shared<StringLiteralNode>(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData));
+                            key = Fission::MakeShared<StringLiteralNode>(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData));
                         else if (store->operation == LiftedOperation::SETTABLEN)
-                            key = std::make_shared<NumberLiteralNode>(store->operands[2].value.imm.n + 1);
+                            key = Fission::MakeShared<NumberLiteralNode>(store->operands[2].value.imm.n + 1);
                         else {
                             const auto snapshot = m_setListKeySnapshots.find(store);
                             const auto *keyDefinition = m_currentFunction->GetDefinition(store->operands[2]);
                             if (snapshot != m_setListKeySnapshots.end())
-                                key = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(snapshot->second));
+                                key = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(snapshot->second));
                             else if (keyDefinition && keyDefinition->operation == LiftedOperation::LOAD)
                                 key = LiftExpression(keyDefinition->operands[1]);
                             else
-                                key = std::make_shared<IdentifierExpressionNode>(
-                                    std::make_shared<Identifier>(ResolveVariableName(store->operands[2], false))
+                                key = Fission::MakeShared<IdentifierExpressionNode>(
+                                    Fission::MakeShared<Identifier>(ResolveVariableName(store->operands[2], false))
                                 );
                         }
                         elements.push_back(
-                            std::make_shared<TableBinaryExpressionNode>("=", key, std::make_shared<IndexExpressionNode>(tableName(), key))
+                            Fission::MakeShared<TableBinaryExpressionNode>("=", key, Fission::MakeShared<IndexExpressionNode>(tableName(), key))
                         );
                     }
                 }
@@ -3982,9 +3983,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     elements.push_back(LiftSetListElement(inst, k, false));
                 auto target = tableName();
                 if (prior.empty())
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, std::make_shared<TableLiteralNode>(elements)));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(target, Fission::MakeShared<TableLiteralNode>(elements)));
                 else
-                    statements.push_back(std::make_shared<AssignmentStatementNode>(target, std::make_shared<TableLiteralNode>(elements)));
+                    statements.push_back(Fission::MakeShared<AssignmentStatementNode>(target, Fission::MakeShared<TableLiteralNode>(elements)));
                 break;
             }
             // A SETLIST that LiftTableLiteral declined to fold into a `{ ... }` constructor (an element
@@ -4012,10 +4013,10 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                         continue;
                 }
                 auto elem = LiftSetListElement(inst, k, false);
-                auto idxExpr = std::make_shared<IndexExpressionNode>(
-                    LiftExpression(inst.operands[0]), std::make_shared<NumberLiteralNode>(static_cast<double>(aux + static_cast<int32_t>(k)))
+                auto idxExpr = Fission::MakeShared<IndexExpressionNode>(
+                    LiftExpression(inst.operands[0]), Fission::MakeShared<NumberLiteralNode>(static_cast<double>(aux + static_cast<int32_t>(k)))
                 );
-                auto assignment = std::make_shared<AssignmentStatementNode>(idxExpr, elem);
+                auto assignment = Fission::MakeShared<AssignmentStatementNode>(idxExpr, elem);
                 statements.push_back(assignment);
             }
             break;
@@ -4073,13 +4074,13 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                         this->m_currentFunction->basicBlocks.at(pred).bType == BlockType::LoopHeader ||
                         this->m_currentFunction->basicBlocks.at(pred).bType ==
                             BlockType::LoopLatch) { // the compiler may inline the break as a RETURN instruction instead.
-                        statements.push_back(std::make_shared<ReturnStatementNode>(rets));
+                        statements.push_back(Fission::MakeShared<ReturnStatementNode>(rets));
                         break;
                     }
                 continue; // ignore last return if and only if there's no returns.
             }
 
-            statements.push_back(std::make_shared<ReturnStatementNode>(rets));
+            statements.push_back(Fission::MakeShared<ReturnStatementNode>(rets));
             break;
         }
         case LiftedOperation::CALL:
@@ -4106,8 +4107,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             if (!folded)
                 for (const auto &ref : defs)
                     lhs.push_back(
-                        std::make_shared<IdentifierExpressionNode>(
-                            std::make_shared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
+                        Fission::MakeShared<IdentifierExpressionNode>(
+                            Fission::MakeShared<Identifier>(ResolveVariableName({LiftedOperandType::Register, {ref.regIndex}, ref.version}))
                         )
                     );
 
@@ -4123,7 +4124,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 }
             }
 
-            statements.push_back(std::make_shared<ExpressionStatementNode>(callExpr));
+            statements.push_back(Fission::MakeShared<ExpressionStatementNode>(callExpr));
 
             m_emission.MarkEmitted(resultInst.instructionIndex);
 
@@ -4230,7 +4231,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 if (srcOp.value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams && IsValidLuauIdent(act.upName))
                     m_currentFunction->SetGlobalName(srcOp.value.reg, act.upName);
                 statements.push_back(
-                    std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
+                    Fission::MakeShared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
                 );
             }
 
@@ -4244,7 +4245,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
             if (anyEmit) {
                 statements.push_back(
-                    std::make_shared<CommentNode>(
+                    Fission::MakeShared<CommentNode>(
                         std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true, true
                     )
                 );
@@ -4252,19 +4253,19 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(
+                        Fission::MakeShared<CommentNode>(
                             act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true
                         )
                     );
                     statements.push_back(
-                        std::make_shared<VariableDeclarationNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)),
+                        Fission::MakeShared<VariableDeclarationNode>(
+                            Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(act.upName)),
                             this->LiftExpression(act.capInst->operands[1])
                         )
                     );
                 }
                 statements.push_back(
-                    std::make_shared<CommentNode>(
+                    Fission::MakeShared<CommentNode>(
                         std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(duplicatedFunction)), true, true
                     )
                 );
@@ -4296,27 +4297,27 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 if (argName.empty() || argName == std::format("v{}", j))
                     argName = std::format("a{}", j);
 
-                auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
+                auto identifier = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(argName));
                 if (auto n = Deserializer::TryGetTypeName(duplicatedFunction, j)) {
-                    argNames[j] = std::make_shared<FunctionArgumentExpression>(
-                        identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n))
+                    argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(
+                        identifier, Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(*n))
                     );
                 } else {
-                    argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
+                    argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
             }
 
             if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
-                argNames[duplicatedFunction->numparams] = std::make_shared<FunctionArgumentExpression>(
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("...")), std::nullopt
+                argNames[duplicatedFunction->numparams] = Fission::MakeShared<FunctionArgumentExpression>(
+                    Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>("...")), std::nullopt
                 ); // insert vararg.
 
-            auto bodyBlock = std::make_shared<BlockStatementNode>();
+            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;
             // literally almost the same handler as NEWCLOSURE.
 
             auto fnDecl =
-                std::make_shared<FunctionDeclarationNode>(funcName, duplicatedFunction->numparams, argNames, duplicatedFunction->isvararg, bodyBlock, true);
+                Fission::MakeShared<FunctionDeclarationNode>(funcName, duplicatedFunction->numparams, argNames, duplicatedFunction->isvararg, bodyBlock, true);
             for (const auto &capture : captureActions)
                 fnDecl->capturedNames.insert(capture.upName);
             auto &shared = m_sharedClosures[constantIndex];
@@ -4327,12 +4328,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 }
                 const auto &output = inst.operands[0];
                 m_valueTermOverrides[{static_cast<uint8_t>(output.value.reg), output.ssaVersion}] =
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name));
+                    Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(shared.name));
                 if (m_currentFunction->IsConsumedByPhi(output))
                     statements.push_back(
-                        std::make_shared<AssignmentStatementNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output))),
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name))
+                        Fission::MakeShared<AssignmentStatementNode>(
+                            Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(output))),
+                            Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(shared.name))
                         )
                     );
                 m_emission.MarkEmitted(i);
@@ -4343,14 +4344,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     shared.name = funcName;
                 fnDecl->bAnonymousInline = true;
                 fnDecl->bIsLocalDeclaration = false;
-                const auto cache = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(shared.name));
-                statements.push_back(std::make_shared<AssignmentStatementNode>(cache, std::make_shared<BinaryExpressionNode>("or", cache, fnDecl)));
+                const auto cache = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(shared.name));
+                statements.push_back(Fission::MakeShared<AssignmentStatementNode>(cache, Fission::MakeShared<BinaryExpressionNode>("or", cache, fnDecl)));
                 const auto &output = inst.operands[0];
                 m_valueTermOverrides[{static_cast<uint8_t>(output.value.reg), output.ssaVersion}] = cache;
                 if (m_currentFunction->IsConsumedByPhi(output))
                     statements.push_back(
-                        std::make_shared<AssignmentStatementNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(output))), cache
+                        Fission::MakeShared<AssignmentStatementNode>(
+                            Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(output))), cache
                         )
                     );
                 m_emission.MarkEmitted(i);
@@ -4403,12 +4404,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
                 if ((!m_definedRegisters.contains(saveWhere.value.reg) || RegisterHeldOtherVariable(inst, saveWhere)) &&
                     !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }
                 statements.push_back(
-                    std::make_shared<AssignmentStatementNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))), fnDecl
+                    Fission::MakeShared<AssignmentStatementNode>(
+                        Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(saveWhere))), fnDecl
                     )
                 );
                 break;
@@ -4547,7 +4548,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 if (srcOp.value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams && IsValidLuauIdent(act.upName))
                     m_currentFunction->SetGlobalName(srcOp.value.reg, act.upName);
                 statements.push_back(
-                    std::make_shared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
+                    Fission::MakeShared<CommentNode>(std::format("Fission: INFO: Name '{}' propagated from upvalue names.", act.upName), true, true)
                 );
             }
 
@@ -4560,7 +4561,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 
             if (anyEmit) {
                 statements.push_back(
-                    std::make_shared<CommentNode>(
+                    Fission::MakeShared<CommentNode>(
                         std::format("Fission: Beginning captures for function with name '{}'", this->GetFunctionName(proto)), true, true
                     )
                 );
@@ -4568,19 +4569,19 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     if (!act.shouldEmit)
                         continue;
                     statements.push_back(
-                        std::make_shared<CommentNode>(
+                        Fission::MakeShared<CommentNode>(
                             act.hasDebugName ? "Fission: name from debug information." : "Fission: autogenerated name.", true, true
                         )
                     );
                     statements.push_back(
-                        std::make_shared<VariableDeclarationNode>(
-                            std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(act.upName)),
+                        Fission::MakeShared<VariableDeclarationNode>(
+                            Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(act.upName)),
                             this->LiftExpression(act.capInst->operands[1])
                         )
                     );
                 }
                 statements.push_back(
-                    std::make_shared<CommentNode>(
+                    Fission::MakeShared<CommentNode>(
                         std::format("Fission: Ending captures for function with name '{}'", this->GetFunctionName(proto)), true, true
                     )
                 );
@@ -4601,25 +4602,25 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 if (argName.empty() || argName == std::format("v{}", j))
                     argName = std::format("a{}", j);
 
-                auto identifier = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(argName));
+                auto identifier = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(argName));
                 if (auto n = Deserializer::TryGetTypeName(proto, j)) {
-                    argNames[j] = std::make_shared<FunctionArgumentExpression>(
-                        identifier, std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*n))
+                    argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(
+                        identifier, Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(*n))
                     );
                 } else {
-                    argNames[j] = std::make_shared<FunctionArgumentExpression>(identifier, std::nullopt);
+                    argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(identifier, std::nullopt);
                 }
             }
 
             if (targetFunc->lpLiftedFunction->lpDeserialized->isvararg) /* marker indicates vararg is required at the end of the function's arguments. */
-                argNames[proto->numparams] = std::make_shared<FunctionArgumentExpression>(
-                    std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>("...")), std::nullopt
+                argNames[proto->numparams] = Fission::MakeShared<FunctionArgumentExpression>(
+                    Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>("...")), std::nullopt
                 ); // insert vararg.
 
-            auto bodyBlock = std::make_shared<BlockStatementNode>();
+            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
             bodyBlock->body = subAst.statements;
 
-            auto fnDecl = std::make_shared<FunctionDeclarationNode>(funcName, proto->numparams, argNames, proto->isvararg, bodyBlock, true);
+            auto fnDecl = Fission::MakeShared<FunctionDeclarationNode>(funcName, proto->numparams, argNames, proto->isvararg, bodyBlock, true);
             for (const auto &capture : captureActions)
                 fnDecl->capturedNames.insert(capture.upName);
             if (RenderClosureInPlace(inst, fnDecl, !proto->debugName.has_value()))
@@ -4668,12 +4669,12 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 // merge's hoist declares it. `local f = function` would hide a self-reference.
                 if ((!m_definedRegisters.contains(saveWhere.value.reg) || RegisterHeldOtherVariable(inst, saveWhere)) &&
                     !m_hoistedRegisters.contains(saveWhere.value.reg) && DominatesMerges(inst, saveWhere)) {
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(ResolveVariableName(saveWhere))));
                     m_definedRegisters.insert(saveWhere.value.reg);
                 }
                 statements.push_back(
-                    std::make_shared<AssignmentStatementNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(saveWhere))), fnDecl
+                    Fission::MakeShared<AssignmentStatementNode>(
+                        Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(saveWhere))), fnDecl
                     )
                 );
                 break;
@@ -4722,7 +4723,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             const bool isNewDef = !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]);
             m_definedRegisters.insert(inst.operands[0].value.reg);
 
-            auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
+            auto target = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(inst.operands[0])));
             auto val = LiftExpression(inst.operands[1], false);
 
             if (auto valId = std::dynamic_pointer_cast<IdentifierExpressionNode>(val); valId && valId->identifier) {
@@ -4731,9 +4732,9 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             }
 
             if (isNewDef)
-                statements.push_back(std::make_shared<VariableDeclarationNode>(target, val));
+                statements.push_back(Fission::MakeShared<VariableDeclarationNode>(target, val));
             else
-                statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
+                statements.push_back(Fission::MakeShared<AssignmentStatementNode>(target, val));
             break;
         }
 
@@ -4776,7 +4777,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             const auto *def = m_currentFunction->GetDefinition(inst.operands[0]);
             if (def == &inst) {
                 auto isDefined = m_definedRegisters.contains(inst.operands[0].value.reg);
-                auto target = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(inst.operands[0])));
+                auto target = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(inst.operands[0])));
                 if (inst.operation == LiftedOperation::NEWTABLE)
                     if (const auto *setList = delayedVariadicSetList(inst); setList)
                         for (const auto *user : m_currentFunction->users.at(SSARef{inst.operands[0].value.reg, inst.operands[0].ssaVersion}))
@@ -4791,14 +4792,14 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     const bool unreadNil = inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 &&
                                            inst.operands[1].type == LiftedOperandType::ImmediateNil &&
                                            (users == m_currentFunction->users.end() || users->second.empty());
-                    statements.push_back(std::make_shared<VariableDeclarationNode>(target, unreadNil ? nullptr : val));
+                    statements.push_back(Fission::MakeShared<VariableDeclarationNode>(target, unreadNil ? nullptr : val));
                 } else {
                     const auto binary = std::dynamic_pointer_cast<BinaryExpressionNode>(val);
                     const auto left = binary ? std::dynamic_pointer_cast<IdentifierExpressionNode>(binary->left) : nullptr;
                     if (left && left->identifier->name == target->identifier->name)
-                        statements.push_back(std::make_shared<CompoundBinaryExpressionNode>(binary->op, binary->left, binary->right));
+                        statements.push_back(Fission::MakeShared<CompoundBinaryExpressionNode>(binary->op, binary->left, binary->right));
                     else
-                        statements.push_back(std::make_shared<AssignmentStatementNode>(target, val));
+                        statements.push_back(Fission::MakeShared<AssignmentStatementNode>(target, val));
                 }
                 if (inst.operation == LiftedOperation::NEWTABLE)
                     if (const auto *setList = delayedVariadicSetList(inst); setList)
@@ -4807,8 +4808,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                                 const std::string name = freshKeyName(*user);
                                 m_setListKeySnapshots[user] = name;
                                 statements.push_back(
-                                    std::make_shared<VariableDeclarationNode>(
-                                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(name)),
+                                    Fission::MakeShared<VariableDeclarationNode>(
+                                        Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(name)),
                                         LiftExpression(user->operands[2], false)
                                     )
                                 );

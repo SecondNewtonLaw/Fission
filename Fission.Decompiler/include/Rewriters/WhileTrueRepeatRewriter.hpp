@@ -6,6 +6,7 @@
 
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
+#include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 
 #include <memory>
@@ -29,7 +30,7 @@ class WhileTrueRepeatRewriter : public ASTRewriter {
             if (HasOwnContinue(w->body->body))
                 continue;
 
-            auto repeat = std::make_shared<RepeatStatementNode>();
+            auto repeat = Fission::MakeShared<RepeatStatementNode>();
             repeat->condition = tail->condition;
             repeat->body = w->body;
             repeat->body->body.pop_back();

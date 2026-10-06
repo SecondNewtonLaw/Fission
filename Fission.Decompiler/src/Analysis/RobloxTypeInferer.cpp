@@ -1,4 +1,5 @@
 #include "Analysis/RobloxTypeInferer.hpp"
+#include "FissionAllocator.hpp"
 
 #include "AbstractSyntaxTree/Nodes/RootNode.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
@@ -7,7 +8,7 @@
 #include <format>
 
 std::shared_ptr<Expression> RobloxTypeInferer::MakeTypeAnnotation(const std::string &typeName) {
-    return std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(typeName));
+    return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(typeName));
 }
 
 std::optional<std::string> RobloxTypeInferer::IdentifierName(const std::shared_ptr<Expression> &expr) {

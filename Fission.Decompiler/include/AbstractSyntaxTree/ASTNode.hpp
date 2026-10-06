@@ -3,6 +3,7 @@
 //
 
 #pragma once
+#include "FissionAllocator.hpp"
 #include "Visitor.hpp"
 
 #include <array>
@@ -330,7 +331,7 @@ class MemberExpressionNode : public Expression {
     }
 
     MemberExpressionNode(std::shared_ptr<Expression> table, std::string keyName)
-        : table(std::move(table)), key(std::dynamic_pointer_cast<Expression>(std::make_shared<StringLiteralNode>(std::move(keyName)))) {
+        : table(std::move(table)), key(std::dynamic_pointer_cast<Expression>(Fission::MakeShared<StringLiteralNode>(std::move(keyName)))) {
         this->nodeKind = ASTNodeKind::MemberExpression;
     }
 
@@ -352,7 +353,7 @@ class VariableDeclarationNode : public Declaration {
     bool bExported = false;
     bool bConst = false;
     std::optional<std::shared_ptr<Expression>> type = std::nullopt;
-    VariableDeclarationNode(std::shared_ptr<Identifier> identifier) : identifier(std::make_shared<IdentifierExpressionNode>(identifier)), value(nullptr) {
+    VariableDeclarationNode(std::shared_ptr<Identifier> identifier) : identifier(Fission::MakeShared<IdentifierExpressionNode>(identifier)), value(nullptr) {
         this->nodeKind = ASTNodeKind::VariableDeclaration;
     }
     VariableDeclarationNode(std::shared_ptr<Expression> identifier, std::shared_ptr<Expression> expr) : identifier(identifier), value(expr) {

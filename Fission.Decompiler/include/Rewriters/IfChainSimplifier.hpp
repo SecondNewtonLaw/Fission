@@ -5,6 +5,7 @@
 // Flips inverted branches so nested else blocks render as elseif chains.
 
 #pragma once
+#include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 #include "SourceGenerator/Generator.hpp"
 
@@ -35,13 +36,13 @@ class IfChainSimplifier : public ASTRewriter {
         }
         if (stmts.size() - first < 3)
             return;
-        auto tail = std::make_shared<BlockStatementNode>();
+        auto tail = Fission::MakeShared<BlockStatementNode>();
         tail->body.push_back(stmts.back());
         for (size_t i = stmts.size() - 1; i-- > first;) {
             auto branch = std::static_pointer_cast<IfStatementNode>(stmts[i]);
             branch->thenBranch->body.pop_back();
             branch->elseBranch = tail;
-            tail = std::make_shared<BlockStatementNode>();
+            tail = Fission::MakeShared<BlockStatementNode>();
             tail->body.push_back(branch);
         }
         auto chain = tail->body.front();
@@ -109,7 +110,7 @@ class IfChainSimplifier : public ASTRewriter {
             if (k + 1 != block.size()) {
                 if (branch->elseBranch || branch->thenBranch->body.empty() || Render(branch->thenBranch->body.back()) != returned)
                     continue;
-                auto rest = std::make_shared<BlockStatementNode>();
+                auto rest = Fission::MakeShared<BlockStatementNode>();
                 rest->body.assign(block.begin() + static_cast<std::ptrdiff_t>(k + 1), block.end());
                 block.resize(k + 1);
                 branch->elseBranch = rest;
@@ -215,7 +216,7 @@ class IfChainSimplifier : public ASTRewriter {
                 auto inner = std::dynamic_pointer_cast<IfStatementNode>(ifS->elseBranch->body.front());
                 if (!inner || !SameBody(ifS->thenBranch, inner->thenBranch))
                     break;
-                ifS->condition = std::make_shared<BinaryExpressionNode>("or", ifS->condition, inner->condition);
+                ifS->condition = Fission::MakeShared<BinaryExpressionNode>("or", ifS->condition, inner->condition);
                 ifS->elseBranch = inner->elseBranch;
             }
         }
@@ -225,13 +226,13 @@ class IfChainSimplifier : public ASTRewriter {
             if (first && next && !first->elseBranch && first->thenBranch && first->thenBranch->body.size() == 1 &&
                 std::dynamic_pointer_cast<ReturnStatementNode>(first->thenBranch->body.front())) {
                 if (SameBody(first->thenBranch, next->thenBranch)) {
-                    first->condition = std::make_shared<BinaryExpressionNode>("or", first->condition, next->condition);
+                    first->condition = Fission::MakeShared<BinaryExpressionNode>("or", first->condition, next->condition);
                     first->elseBranch = next->elseBranch;
                     stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
                     continue;
                 }
                 if (SameBody(first->thenBranch, next->elseBranch)) {
-                    first->condition = std::make_shared<BinaryExpressionNode>("or", first->condition, InvertCondition(next->condition));
+                    first->condition = Fission::MakeShared<BinaryExpressionNode>("or", first->condition, InvertCondition(next->condition));
                     first->elseBranch = next->thenBranch;
                     stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i + 1));
                     continue;
@@ -265,8 +266,8 @@ class IfChainSimplifier : public ASTRewriter {
             else if (b->op == "~=")
                 inv = "==";
             if (!inv.empty())
-                return std::make_shared<BinaryExpressionNode>(inv, b->left, b->right);
+                return Fission::MakeShared<BinaryExpressionNode>(inv, b->left, b->right);
         }
-        return std::make_shared<UnaryExpressionNode>("not ", cond);
+        return Fission::MakeShared<UnaryExpressionNode>("not ", cond);
     }
 };

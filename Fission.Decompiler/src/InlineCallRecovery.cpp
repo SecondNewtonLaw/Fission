@@ -3,6 +3,7 @@
 //
 
 #include "InlineCallRecovery.hpp"
+#include "FissionAllocator.hpp"
 
 #include "SSABuilder.hpp"
 
@@ -30,7 +31,7 @@ static std::optional<int32_t> SourceLine(const DeserializedFunction &function, i
 
 std::shared_ptr<const InlineSourceMap>
 BuildInlineSourceMap(const DeserializedBytecode &bytecode, Fission::InstructionDecoder *decoder, const LiftedFunction &root) {
-    auto map = std::make_shared<InlineSourceMap>();
+    auto map = Fission::MakeShared<InlineSourceMap>();
     std::vector<const LiftedFunction *> pending{&root};
     while (!pending.empty()) {
         const auto *function = pending.back();

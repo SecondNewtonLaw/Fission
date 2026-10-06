@@ -3,6 +3,7 @@
 //
 
 #include "Deserializer.hpp"
+#include "FissionAllocator.hpp"
 #include <cstring>
 #include <limits>
 #include <sstream>
@@ -41,7 +42,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         result.stringTable.emplace_back(rS);
     }
 
-    auto userdataTypeNames = std::make_shared<LuauUserdataTypeNames>();
+    auto userdataTypeNames = Fission::MakeShared<LuauUserdataTypeNames>();
     if (result.typesVersion == 3) {
         std::uint8_t index = reader.Read<uint8_t>();
         while (index != 0) {

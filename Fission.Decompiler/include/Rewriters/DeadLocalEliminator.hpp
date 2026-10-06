@@ -5,6 +5,7 @@
 // Removes unread local declarations only when their initializer cannot raise or have effects.
 
 #pragma once
+#include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 
 #include <algorithm>
@@ -72,7 +73,7 @@ class DeadLocalEliminator : public ASTRewriter {
     template <typename Call> void RecordCallShadows(const std::shared_ptr<Call> &call, std::unordered_map<std::string, bool> &later) {
         if (!call || call->inlineCall || !call->bIsLocalDeclaration || call->rets.empty())
             return;
-        auto initializer = std::make_shared<Call>(*call);
+        auto initializer = Fission::MakeShared<Call>(*call);
         initializer->rets.clear();
         std::unordered_set<std::string> initializerNames;
         bool collected = false;

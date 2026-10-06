@@ -5,6 +5,7 @@
 // Collapses short-circuit diamonds only when all duplicated tails render identically.
 
 #pragma once
+#include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 #include "SourceGenerator/Generator.hpp"
 
@@ -101,9 +102,9 @@ class ShortCircuitFolder : public ASTRewriter {
                     primary = selected->left;
                 InlineifyValue(primary);
                 InlineifyValue(fallback);
-                auto andExpr = std::make_shared<BinaryExpressionNode>("and", un->operand, primary);
-                auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallback);
-                stmts[i + 1] = std::make_shared<AssignmentStatementNode>(decl->identifier, orExpr);
+                auto andExpr = Fission::MakeShared<BinaryExpressionNode>("and", un->operand, primary);
+                auto orExpr = Fission::MakeShared<BinaryExpressionNode>("or", andExpr, fallback);
+                stmts[i + 1] = Fission::MakeShared<AssignmentStatementNode>(decl->identifier, orExpr);
                 return true;
             }
         }
@@ -122,8 +123,8 @@ class ShortCircuitFolder : public ASTRewriter {
 
         InlineifyValue(primary);
         InlineifyValue(fallback);
-        auto andExpr = std::make_shared<BinaryExpressionNode>("and", un->operand, primary);
-        auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallback);
+        auto andExpr = Fission::MakeShared<BinaryExpressionNode>("and", un->operand, primary);
+        auto orExpr = Fission::MakeShared<BinaryExpressionNode>("or", andExpr, fallback);
         decl->value = orExpr;                                            // local V = C and P or F
         stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1); // drop the diamond
         return true;

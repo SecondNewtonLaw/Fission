@@ -2,6 +2,7 @@ cmake_minimum_required(VERSION 3.31)
 project(Fission)
 
 include(CTest)
+include(CMakeDependentOption)
 find_package(Threads REQUIRED)
 
 
@@ -20,6 +21,7 @@ option(ENABLE_PGO_CLANG_USE "Enable Clang PGO usage." OFF)
 
 option(ENABLE_ASAN "Enable AddressSanitizer." OFF)
 option(ENABLE_UBSAN "Enable UndefinedBehaviorSanitizer." OFF)
+cmake_dependent_option(USE_MIMALLOC "Use mimalloc for Fission-owned allocations." OFF "NOT ENABLE_ASAN" OFF)
 
 if (CMAKE_C_COMPILER_FRONTEND_VARIANT STREQUAL "GNU")
     # Third-party C sources still use legacy declarations and pointer conversions.
@@ -113,6 +115,16 @@ CPMAddPackage(
         GITHUB_REPOSITORY luau-lang/luau
         GIT_TAG 0.738
 )
+
+if (USE_MIMALLOC)
+    CPMAddPackage(
+            NAME mimalloc
+            GITHUB_REPOSITORY microsoft/mimalloc
+            GIT_TAG f8401befa675adb13b98decababd7fdc59572477
+            OPTIONS "MI_BUILD_SHARED OFF" "MI_BUILD_STATIC ON" "MI_BUILD_OBJECT OFF"
+            "MI_BUILD_TESTS OFF" "MI_OVERRIDE OFF" "MI_STATS OFF"
+    )
+endif ()
 
 # Override stale Boost component lists cached before these dependencies were added.
 set(BOOST_INCLUDE_LIBRARIES beast json container CACHE STRING "Boost libraries required by Fission" FORCE)
@@ -250,6 +262,10 @@ add_library(Fission.Common STATIC
         Fission.Common/include/BinaryReader.hpp
 )
 target_include_directories(Fission.Common PUBLIC Fission.Common/include)
+if (USE_MIMALLOC)
+    target_link_libraries(Fission.Common PUBLIC mimalloc-static)
+    target_compile_definitions(Fission.Common PUBLIC FISSION_USE_MIMALLOC)
+endif ()
 target_compile_options(Fission.Common PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Common PRIVATE ${CXX_LINK_OPTIONS})
 

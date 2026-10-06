@@ -9,6 +9,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "FissionAllocator.hpp"
 #include "InlineCallRecovery.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
 
@@ -106,7 +107,7 @@ class InlineRegionMarker {
             while (i < statements.size() && origins[i] == origin)
                 ++i;
             const auto &source = m_sources->sources[origin];
-            auto comment = std::make_shared<CommentNode>(
+            auto comment = Fission::MakeShared<CommentNode>(
                 std::format(
                     "Fission: INFO: inlined call to {} (defined at line {}, bytecode ID {})",
                     source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function"), source.firstLine,
@@ -142,7 +143,7 @@ class InlineRegionMarker {
             }
             for (size_t k = start; k < body; ++k)
                 rebuilt.push_back(std::move(statements[k]));
-            auto region = std::make_shared<BlockStatementNode>();
+            auto region = Fission::MakeShared<BlockStatementNode>();
             region->bEmitAsDoBlock = true;
             region->body.push_back(comment);
             for (size_t k = body; k < i; ++k)

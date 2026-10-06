@@ -4,6 +4,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "FissionAllocator.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -185,7 +186,7 @@ class ScopeBlockIntroducer {
                 for (size_t k = 0; k < lead; ++k)
                     rebuilt.push_back(seg[k]);
                 if (lead < seg.size()) {
-                    auto block = std::make_shared<BlockStatementNode>();
+                    auto block = Fission::MakeShared<BlockStatementNode>();
                     block->bEmitAsDoBlock = true;
                     block->body.assign(seg.begin() + lead, seg.end());
                     rebuilt.push_back(block);
@@ -233,7 +234,7 @@ class ScopeBlockIntroducer {
 
     static void DemoteLocal(std::shared_ptr<Statement> &stmt) {
         if (auto declaration = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt)) {
-            stmt = std::make_shared<AssignmentStatementNode>(declaration->identifier, declaration->value);
+            stmt = Fission::MakeShared<AssignmentStatementNode>(declaration->identifier, declaration->value);
             return;
         }
         if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(stmt)) {

@@ -5,6 +5,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "FissionAllocator.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
 
 #include <memory>
@@ -159,8 +160,8 @@ class ExportDeclarationRewriter {
                 for (const auto &key : entryOrder) {
                     if (functionSources.contains(key))
                         continue;
-                    auto decl = std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key)),
+                    auto decl = Fission::MakeShared<VariableDeclarationNode>(
+                        Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(key)),
                         foldedInitializers.contains(key) ? foldedInitializers.at(key) : entries.at(key)
                     );
                     decl->bExported = true;
@@ -188,8 +189,8 @@ class ExportDeclarationRewriter {
                 if (key && functionNames.contains(key->value) && IsName(assignment->right, key->value))
                     continue;
                 if (key && !declared.contains(key->value)) {
-                    auto decl = std::make_shared<VariableDeclarationNode>(
-                        std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key->value)), assignment->right
+                    auto decl = Fission::MakeShared<VariableDeclarationNode>(
+                        Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(key->value)), assignment->right
                     );
                     decl->bExported = true;
                     stmt = std::move(decl);
@@ -231,7 +232,7 @@ class ExportDeclarationRewriter {
                 if (!key || !keys.contains(key->value))
                     return false;
                 if (rewrite)
-                    expr = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(key->value));
+                    expr = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(key->value));
                 return true;
             }
             return WalkExpression(member->table, table, keys, rewrite) && WalkExpression(member->key, table, keys, rewrite);

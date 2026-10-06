@@ -4,6 +4,7 @@
 
 #include "ASTLifter.hpp"
 #include "ASTLifterShared.hpp"
+#include "FissionAllocator.hpp"
 
 #include <algorithm>
 #include <functional>
@@ -106,13 +107,13 @@ std::optional<ASTLifter::BoolMaterialization> ASTLifter::DetectBooleanMaterializ
             target = phi.operands[0];
     const bool isDefined = m_definedRegisters.contains(reg);
     const bool isParameter = reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
-    auto ident = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(ResolveVariableName(target)));
+    auto ident = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(target)));
 
     std::shared_ptr<Statement> assignment;
     if ((target.ssaVersion <= 1 && !isParameter) || !isDefined)
-        assignment = std::make_shared<VariableDeclarationNode>(ident, value);
+        assignment = Fission::MakeShared<VariableDeclarationNode>(ident, value);
     else
-        assignment = std::make_shared<AssignmentStatementNode>(ident, value);
+        assignment = Fission::MakeShared<AssignmentStatementNode>(ident, value);
     m_definedRegisters.insert(reg);
 
     // Consume both boolean loads so block lifting does not re-emit them.
@@ -174,7 +175,7 @@ void ASTLifter::HoistPhiLocals(
                     if (!ident || !ident->identifier || ident->identifier->name != name)
                         continue;
 
-                    stmt = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value);
+                    stmt = Fission::MakeShared<AssignmentStatementNode>(decl->identifier, decl->value);
                     needsHoist = true;
                     continue;
                 }
@@ -201,7 +202,7 @@ void ASTLifter::HoistPhiLocals(
         // Declare only new branch-local merges. Existing outer bindings and enclosing stop-block phis
         // must keep their owning scope or branch declarations will shadow the value seen after the merge.
         if (needsHoist && !definedBeforeBranches.contains(reg) && mergeIdx != static_cast<int32_t>(stopBlockId)) {
-            nodes.push_back(std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+            nodes.push_back(Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(name)));
             m_definedRegisters.insert(reg);
         }
     }
@@ -669,7 +670,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
     conditions.reserve(links.size());
     for (const auto &lk : links) {
         auto c = truthyClosure(lk.blockId)
-                     ? std::shared_ptr<Expression>(std::make_shared<BooleanLiteralNode>(blocks[lk.blockId].lpTail->operation == LiftedOperation::JUMPIF))
+                     ? std::shared_ptr<Expression>(Fission::MakeShared<BooleanLiteralNode>(blocks[lk.blockId].lpTail->operation == LiftedOperation::JUMPIF))
                      : LiftCondition(blocks[lk.blockId].lpTail);
         if (lk.invert)
             c = InvertCondition(c);
@@ -682,7 +683,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectOrChain(uint32_t headerId
             if (i + 1 == conditions.size())
                 next.push_back(std::move(conditions[i]));
             else
-                next.push_back(std::make_shared<BinaryExpressionNode>("or", std::move(conditions[i]), std::move(conditions[i + 1])));
+                next.push_back(Fission::MakeShared<BinaryExpressionNode>("or", std::move(conditions[i]), std::move(conditions[i + 1])));
         }
         conditions = std::move(next);
     }
@@ -716,7 +717,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         const auto &input = target.phiNodes.front().operands[index];
         const auto *definition = input.type == LiftedOperandType::Register ? m_currentFunction->GetDefinition(input) : nullptr;
         if (definition && (definition->operation == LiftedOperation::NEWCLOSURE || definition->operation == LiftedOperation::DUPCLOSURE))
-            return std::make_shared<BooleanLiteralNode>(true);
+            return Fission::MakeShared<BooleanLiteralNode>(true);
         return LiftExpression(input, true);
     };
     const auto diamond = [&](const ValueTerm &term, uint32_t x, uint32_t join, bool build) -> std::optional<Expr> {
@@ -739,7 +740,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
                     const auto rest = arm(yesArm == join ? noArm : yesArm);
                     if (!rest)
                         return std::nullopt;
-                    return build ? Expr(std::make_shared<BinaryExpressionNode>(truthyToJoin ? "or" : "and", left, *rest)) : Expr{};
+                    return build ? Expr(Fission::MakeShared<BinaryExpressionNode>(truthyToJoin ? "or" : "and", left, *rest)) : Expr{};
                 }
             }
         }
@@ -764,8 +765,8 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
                 return condition;
         }
         if (const auto negated = std::dynamic_pointer_cast<UnaryExpressionNode>(condition); negated && negated->op == "not ")
-            return Expr(std::make_shared<IfExpressionNode>(negated->operand, *no, *yes));
-        return Expr(std::make_shared<IfExpressionNode>(condition, *yes, *no));
+            return Expr(Fission::MakeShared<IfExpressionNode>(negated->operand, *no, *yes));
+        return Expr(Fission::MakeShared<IfExpressionNode>(condition, *yes, *no));
     };
     valueOf = [&](const ValueTerm &term, uint32_t x, uint32_t join, bool build) -> std::optional<Expr> {
         if (x == join || !term.region.contains(x))
@@ -1038,10 +1039,10 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
     chainBlocks.insert(chainBlocks.end(), termBlocks.begin(), termBlocks.end());
     if (!build)
         return OrChainInfo{nullptr, body, exit, std::move(chainBlocks)};
-    const auto binary = [](const char *op, const Expr &lhs, const Expr &rhs) -> Expr { return std::make_shared<BinaryExpressionNode>(op, lhs, rhs); };
+    const auto binary = [](const char *op, const Expr &lhs, const Expr &rhs) -> Expr { return Fission::MakeShared<BinaryExpressionNode>(op, lhs, rhs); };
     std::map<uint32_t, Expr> conditions;
-    conditions[body] = std::make_shared<BooleanLiteralNode>(true);
-    conditions[exit] = std::make_shared<BooleanLiteralNode>(false);
+    conditions[body] = Fission::MakeShared<BooleanLiteralNode>(true);
+    conditions[exit] = Fission::MakeShared<BooleanLiteralNode>(false);
     const auto overridesBefore = m_valueTermOverrides;
     for (auto it = headers.rbegin(); it != headers.rend(); ++it) {
         const auto &block = blocks[*it];
@@ -1059,7 +1060,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         if (yesBool && noBool && yesBool->value != noBool->value)
             result = yesBool->value ? condition : InvertCondition(condition);
         else if (yesBool && noBool)
-            result = std::make_shared<IfExpressionNode>(condition, yes, no);
+            result = Fission::MakeShared<IfExpressionNode>(condition, yes, no);
         else if (yesBool)
             result = yesBool->value ? binary("or", condition, no) : binary("and", InvertCondition(condition), no);
         else if (noBool)
@@ -1069,7 +1070,7 @@ std::optional<ASTLifter::OrChainInfo> ASTLifter::DetectGuardRegion(uint32_t head
         else if (auto either = std::dynamic_pointer_cast<BinaryExpressionNode>(yes); either && either->op == "or" && either->right == no)
             result = binary("or", binary("and", condition, either->left), no);
         else
-            result = std::make_shared<IfExpressionNode>(condition, yes, no);
+            result = Fission::MakeShared<IfExpressionNode>(condition, yes, no);
         conditions[*it] = result;
         if (termEntry != termEntryOf.end())
             conditions[termEntry->second] = result;

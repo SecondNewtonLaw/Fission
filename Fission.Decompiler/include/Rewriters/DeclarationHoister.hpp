@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "FissionAllocator.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -135,7 +136,7 @@ class DeclarationHoister {
                     auto value = declaration->value;
                     declaration->value.reset();
                     statements.insert(
-                        statements.begin() + static_cast<std::ptrdiff_t>(++i), std::make_shared<AssignmentStatementNode>(declaration->identifier, value)
+                        statements.begin() + static_cast<std::ptrdiff_t>(++i), Fission::MakeShared<AssignmentStatementNode>(declaration->identifier, value)
                     );
                 }
                 continue;
@@ -536,7 +537,7 @@ class DeclarationHoister {
     static void InsertLeadingDeclaration(std::vector<std::shared_ptr<Statement>> &body, const std::string &name) {
         const auto position =
             std::find_if(body.begin(), body.end(), [](const auto &statement) { return !statement || statement->nodeKind != ASTNodeKind::Comment; });
-        body.insert(position, std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(name)));
+        body.insert(position, Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(name)));
     }
 
     bool AllAccessesCovered(const std::string &name) {
@@ -590,7 +591,7 @@ class DeclarationHoister {
         for (const int scopeId : scopes)
             for (auto &stmt : *m_scopes[scopeId].body) {
                 if (auto vd = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt); vd && vd->value && DeclName(vd) == name) {
-                    stmt = std::make_shared<AssignmentStatementNode>(vd->identifier, vd->value);
+                    stmt = Fission::MakeShared<AssignmentStatementNode>(vd->identifier, vd->value);
                 } else if (auto call = LocalDeclCall(stmt)) {
                     bool multi = false;
                     const auto callName = call->nodeKind == ASTNodeKind::CallExpression
@@ -636,7 +637,7 @@ class DeclarationHoister {
                 for (auto &stmt : body) {
                     if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt);
                         asn && IsBareIdentifier(asn->left, name) && !ExpressionMentions(asn->right, name)) {
-                        stmt = std::make_shared<VariableDeclarationNode>(asn->left, asn->right);
+                        stmt = Fission::MakeShared<VariableDeclarationNode>(asn->left, asn->right);
                         return true;
                     }
                     if (StatementMentions(stmt, name))
@@ -816,7 +817,7 @@ class DeclarationHoister {
             else {
                 auto vd = std::static_pointer_cast<VariableDeclarationNode>((*declBody)[declIdx]);
                 (*declBody)[declIdx] =
-                    std::make_shared<AssignmentStatementNode>(vd->identifier, vd->value ? vd->value : std::make_shared<NilLiteralNode>());
+                    Fission::MakeShared<AssignmentStatementNode>(vd->identifier, vd->value ? vd->value : Fission::MakeShared<NilLiteralNode>());
             }
             bool alreadyDeclared = false;
             for (const auto &stmt : *m_scopes[target].body)
@@ -1031,7 +1032,7 @@ class DeclarationHoister {
                     const auto name = DeclName(decl);
                     if (name.empty() || !ExpressionMentions(loop->condition, name))
                         continue;
-                    *it = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : std::make_shared<NilLiteralNode>());
+                    *it = Fission::MakeShared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : Fission::MakeShared<NilLiteralNode>());
                     names.push_back(name);
                 } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(*it); fn && fn->bIsLocalDeclaration) {
                     if (!ExpressionMentions(loop->condition, fn->functionName))
@@ -1058,7 +1059,7 @@ class DeclarationHoister {
                 }
             }
             for (auto name = names.rbegin(); name != names.rend(); ++name)
-                body.insert(body.begin(), std::make_shared<VariableDeclarationNode>(std::make_shared<Identifier>(*name)));
+                body.insert(body.begin(), Fission::MakeShared<VariableDeclarationNode>(Fission::MakeShared<Identifier>(*name)));
         }
     }
 
@@ -1071,7 +1072,7 @@ class DeclarationHoister {
         for (auto &s : block->body) {
             if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(s)) {
                 if (named(DeclName(decl)))
-                    s = std::make_shared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : std::make_shared<NilLiteralNode>());
+                    s = Fission::MakeShared<AssignmentStatementNode>(decl->identifier, decl->value ? decl->value : Fission::MakeShared<NilLiteralNode>());
             } else if (auto fn = std::dynamic_pointer_cast<FunctionDeclarationNode>(s); fn && fn->bIsLocalDeclaration) {
                 if (named(fn->functionName))
                     fn->bIsLocalDeclaration = false;

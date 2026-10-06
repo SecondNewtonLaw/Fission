@@ -5,6 +5,7 @@
 #pragma once
 
 #include "ASTLifter.hpp"
+#include "FissionAllocator.hpp"
 #include "SSABuilder.hpp"
 
 #include <variant>
@@ -12,7 +13,7 @@
 inline constexpr uint32_t InvalidBlockId = static_cast<uint32_t>(-1);
 
 inline std::shared_ptr<Identifier> GlobalIdentifier(std::string name) {
-    auto identifier = std::make_shared<Identifier>(std::move(name));
+    auto identifier = Fission::MakeShared<Identifier>(std::move(name));
     identifier->bIsGlobal = true;
     return identifier;
 }
@@ -79,5 +80,5 @@ inline bool IsFastCall(LiftedOperation op) {
 
 inline std::shared_ptr<VectorNode> LiftVectorConstant(const LuauConstant &constant) {
     const auto &vector = std::get<LuauVectorConstant>(constant.constantData);
-    return std::visit([](const auto &components) { return std::make_shared<VectorNode>(components); }, vector.components);
+    return std::visit([](const auto &components) { return Fission::MakeShared<VectorNode>(components); }, vector.components);
 }

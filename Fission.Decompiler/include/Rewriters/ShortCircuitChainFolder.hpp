@@ -7,6 +7,7 @@
 
 #pragma once
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
+#include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
 
@@ -42,16 +43,16 @@ class ShortCircuitChainFolder : public ASTRewriter {
                 if (!secondForm || secondForm->lhsName != first->lhsName)
                     continue;
                 std::unordered_set<std::string> rhsNames;
-                ScopeAwareRenamer::CollectIdentifierNames(std::make_shared<ExpressionStatementNode>(secondForm->rhs), rhsNames);
+                ScopeAwareRenamer::CollectIdentifierNames(Fission::MakeShared<ExpressionStatementNode>(secondForm->rhs), rhsNames);
                 if (rhsNames.contains(first->lhsName))
                     continue;
 
-                auto folded = std::make_shared<BinaryExpressionNode>(secondForm->op, first->rhs, secondForm->rhs);
+                auto folded = Fission::MakeShared<BinaryExpressionNode>(secondForm->op, first->rhs, secondForm->rhs);
                 if (!first->isDeclaration) {
-                    stmts[i] = std::make_shared<AssignmentStatementNode>(first->lhs, folded);
+                    stmts[i] = Fission::MakeShared<AssignmentStatementNode>(first->lhs, folded);
                 } else {
                     // keep `local` shape so naming stays correct.
-                    stmts[i] = std::make_shared<VariableDeclarationNode>(first->lhs, folded);
+                    stmts[i] = Fission::MakeShared<VariableDeclarationNode>(first->lhs, folded);
                 }
                 stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1);
                 changed = true;
@@ -101,9 +102,9 @@ class ShortCircuitChainFolder : public ASTRewriter {
         if (!condName || *condName != *leftName)
             return nullptr;
 
-        auto lhsRead = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(*leftName));
-        auto combined = std::make_shared<BinaryExpressionNode>(op, lhsRead, assign->right);
-        return std::make_shared<AssignmentStatementNode>(assign->left, combined);
+        auto lhsRead = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(*leftName));
+        auto combined = Fission::MakeShared<BinaryExpressionNode>(op, lhsRead, assign->right);
+        return Fission::MakeShared<AssignmentStatementNode>(assign->left, combined);
     }
 
   protected:
@@ -420,13 +421,13 @@ class ShortCircuitChainFolder : public ASTRewriter {
     static std::shared_ptr<Expression> MakeOrChain(const std::vector<std::shared_ptr<Expression>> &exprs) {
         std::shared_ptr<Expression> chain = exprs.front();
         for (size_t i = 1; i < exprs.size(); ++i)
-            chain = std::make_shared<BinaryExpressionNode>("or", chain, exprs[i]);
+            chain = Fission::MakeShared<BinaryExpressionNode>("or", chain, exprs[i]);
         return chain;
     }
 
     static std::shared_ptr<Statement> BuildTerminalReplacement(TerminalUse terminal, const std::shared_ptr<Expression> &chain) {
         if (terminal.kind == TerminalUseKind::ReturnValue)
-            return std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{chain});
+            return Fission::MakeShared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{chain});
         if (terminal.call) {
             if (terminal.intoIndexKey) {
                 if (auto index = std::dynamic_pointer_cast<IndexExpressionNode>(terminal.call->arguments[terminal.argIndex]))
@@ -434,7 +435,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
             } else {
                 terminal.call->arguments[terminal.argIndex] = chain;
             }
-            return std::make_shared<ExpressionStatementNode>(terminal.call);
+            return Fission::MakeShared<ExpressionStatementNode>(terminal.call);
         }
         if (terminal.intoIndexKey) {
             if (auto index = std::dynamic_pointer_cast<IndexExpressionNode>(terminal.nameCall->arguments[terminal.argIndex]))
@@ -442,7 +443,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
         } else {
             terminal.nameCall->arguments[terminal.argIndex] = chain;
         }
-        return std::make_shared<ExpressionStatementNode>(terminal.nameCall);
+        return Fission::MakeShared<ExpressionStatementNode>(terminal.nameCall);
     }
 
     static bool FoldTerminalMixedAndOr(std::vector<std::shared_ptr<Statement>> &stmts) {
@@ -497,7 +498,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
             auto thenRetName = ExtractIdentifierName(thenRet->returnValues.front());
             if (!thenRetName || *thenRetName != V)
                 return false;
-            fallbackValue = std::make_shared<IdentifierExpressionNode>(std::make_shared<Identifier>(V));
+            fallbackValue = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(V));
         } else if (thenBody.size() == 2) {
             auto thenAsgn = AsAssignmentForm(thenBody[0]);
             if (!thenAsgn || thenAsgn->lhsName != V)
@@ -541,9 +542,9 @@ class ShortCircuitChainFolder : public ASTRewriter {
         if (!elseIfRetName || *elseIfRetName != V)
             return false;
 
-        auto andExpr = std::make_shared<BinaryExpressionNode>("and", COND, primaryValue);
-        auto orExpr = std::make_shared<BinaryExpressionNode>("or", andExpr, fallbackValue);
-        stmts[base] = std::make_shared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{orExpr});
+        auto andExpr = Fission::MakeShared<BinaryExpressionNode>("and", COND, primaryValue);
+        auto orExpr = Fission::MakeShared<BinaryExpressionNode>("or", andExpr, fallbackValue);
+        stmts[base] = Fission::MakeShared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{orExpr});
         stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(base) + 1);
         // drop the redundant hoisted `local V`.
         if (base != start)
@@ -594,7 +595,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
                         break;
                     auto andLeft = exprs.back();
                     exprs.pop_back();
-                    exprs.push_back(std::make_shared<BinaryExpressionNode>("and", andLeft, next->rhs));
+                    exprs.push_back(Fission::MakeShared<BinaryExpressionNode>("and", andLeft, next->rhs));
                     ++cursor;
                     break; // the `and` group closes the chain; the shared consumer follows at `cursor`.
                 }

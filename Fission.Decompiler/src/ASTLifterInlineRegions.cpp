@@ -3,6 +3,7 @@
 //
 
 #include "ASTLifter.hpp"
+#include "FissionAllocator.hpp"
 
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
@@ -27,7 +28,7 @@ void ASTLifter::StampInlineSources(std::vector<std::shared_ptr<Statement>> &stat
         if (call >= 0 && call != lastCall && m_inlineSources) {
             const auto &source = m_inlineSources->sources[lifted.recoveredCalls[call]];
             rebuilt.push_back(
-                std::make_shared<CommentNode>(
+                Fission::MakeShared<CommentNode>(
                     std::format(
                         "Fission: INFO: call to {} recovered from its inlined body",
                         source.function->debugName ? std::format("'{}'", *source.function->debugName) : std::string("an anonymous function")
