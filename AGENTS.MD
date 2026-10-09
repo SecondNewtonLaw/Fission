@@ -1,8 +1,5 @@
 # AGENTS.MD, Fission Project Init
 
-## Global Init (opencode AGENTS.md)
-See `C:\Users\Dottik\.config\opencode\AGENTS.md` — inherited verbatim.
-
 ## Methodologies (read before working)
 
 - **Finding and fixing bugs**: [`Agents/Methodologies/BugHunting.md`](Agents/Methodologies/BugHunting.md). Diagnose first, then fix: find, reduce, diagnose across the pipeline and against the Luau compiler's emitted shapes, fix the root cause, verify with a regression test proven to fail without the fix.
@@ -19,7 +16,8 @@ See `C:\Users\Dottik\.config\opencode\AGENTS.md` — inherited verbatim.
 - **Build (Debug)**: `cmake -S . -B cmake-build-debug -DCMAKE_BUILD_TYPE=Debug && cmake --build cmake-build-debug --target Fission.Tests`
 - **Test**: `cmake --build cmake-build-debug --target Fission.Tests && ctest --test-dir cmake-build-debug --output-on-failure`
 - **Lint/format**: No scripts. Manually: `clang-format -i <file>`, `clang-tidy -p cmake-build-debug <file>`
-- **CI**: None.
+- **CI**: GitHub Actions in `.github/workflows/`: `tests.yml`, `fuzz.yml`, `mem-sanitize.yml`, `decompiler-server-test.yml`, `release-server.yml`.
+- **Build toggles**: `CMakeLists.txt:10-24` (`USE_CCACHE`, `USE_MIMALLOC`, `PRODUCTION_BUILD`, `USE_LTO`, `ENABLE_ASAN`/`ENABLE_UBSAN`, `ENABLE_PGO_*`, `DEBUG_*`). Sanitizers and mimalloc change build behavior; check these before chasing a build-only difference.
 
 ## Command Order + Verification
 
@@ -31,21 +29,21 @@ See `C:\Users\Dottik\.config\opencode\AGENTS.md` — inherited verbatim.
 
 ## Architecture + Structure
 
-- Pipeline: Deserializer → BytecodeLifter → ControlFlowAnalyzer → SSABuilder → ASTLifter → AST rewriters (`Rewriters/`) → SourceGenerator. AST-to-AST rewrites go in a rewriter pass, not in ASTLifter.
-- CMake targets: Fission.Common (static) → Fission.Decompiler (static) → Fission.CLI (exe); Fission.Server (static) + Fission.Server.CLI (exe); Fission.Fuzzing (exe, BUILD_FUZZING); Fission.Tests (exe, BUILD_TESTING)
-- Entry: `Decompiler::CommonDecompilerEntry` in `Fission.Decompiler/src/Decompiler.cpp`
-- Hot paths: Deserializer.hpp, BytecodeLifter.cpp, and the ASTLifter family (`ASTLifter.cpp` core, `ASTLifterInlining.cpp`, `ASTLifterExpressions.cpp`, `ASTLifterConditions.cpp`)
+- Pipeline: Deserializer → BytecodeLifter → ControlFlowAnalyzer → SSABuilder → ASTLifter → AST rewriters (`Fission.Decompiler/include/Rewriters/`) → SourceGenerator. AST-to-AST rewrites go in a rewriter pass, not in ASTLifter.
+- CMake targets: Fission.Common (static) → Fission.Decompiler (static) → Fission.CLI (exe); Fission.Server (static) + Fission.Server.CLI (exe); Fission.Fuzzing (exe, BUILD_FUZZING); Fission.Tests (exe, BUILD_TESTING); Fission.Batch + Fission.Batch.Worker (exe, always built, Boost::json)
+- Entry: `Decompiler::CommonDecompilerEntry` in `Fission.Decompiler/src/Decompiler.cpp:573`
+- Hot paths: `Fission.Decompiler/include/Deserializer.hpp`, `src/BytecodeLifter.cpp`, `src/ASTLifter.cpp`, `src/ASTLifterInlining.cpp`, `src/ASTLifterInlineRegions.cpp`, `src/ASTLifterExpressions.cpp`, `src/ASTLifterConditions.cpp`
 - No DLL exports — all static libs
 
 ## Conventions + Quirks
 
-- `m_` prefix members, `k` prefix statics, `lp`/`dw`/`b` Hungarian-lite params
-- PascalCase for types/fns, #pragma once everywhere
-- Error: ASSERT (libassert) + std::optional + DecompileResult enum. No exceptions in lib core
+- `m_` prefix members, `k` prefix statics, `lp` prefix on Hungarian-lite params (e.g. `lpDeserialized`)
+- PascalCase for types/fns, `#pragma once` in headers
+- Error: ASSERT (libassert) for invariants, std::optional, DecompileResult enum. Malformed bytecode and budget overruns throw `Fission::DecompilerError` (`BytecodeLifter.cpp:286`, `ControlFlowAnalyzer.cpp:91`, `SafetyGuard.hpp:38`), caught at the entry boundary. Hostile-input handling relies on this; do not convert those paths to return codes.
 - Ownership: shared_ptr for AST tree, raw ptr for non-owning backrefs, value+vector for IR/CFG
 - **Load-bearing FFlag**: the CLI's `main.cpp` enables all Luau-prefixed FValue<bool> flags (need for integer literal deserialization)
-- **DenominatorAnalysis** = dominator analysis (non-standard naming)
-- **Roblox bytecode**: opcode * 203 % 256 via RobloxClientDecoder
+- **DenominatorAnalysis** = dominator analysis (`Fission.Decompiler/include/DenominatorAnalysis.hpp`; non-standard naming)
+- **Roblox bytecode**: opcode * 203, truncated to a byte (mod 256), via RobloxClientDecoder (`InstructionDecoder.hpp:21`)
 - **Loop/CF fragility**: Fixing one pattern often breaks another. Always regress-check Samples/ after modifying CFA/SSABuilder/ASTLifter
 
 ## Existing Instruction Sources
@@ -74,15 +72,16 @@ Key project memory files:
 - `projects/Fission/domain/domain-terms.md` — LiftedOperation, SSA, AST nodes, flags
 - `projects/Fission/env/dev-environment.md` — IDE, format, tidy, gitignore
 - `projects/Fission/handoff/session.md` — findings, gaps, open questions
-- `projects/Fission/cross-ref/` — (P8 cross-ref files for deps)
+- `projects/Fission/cross-ref/` — dependency cross-ref notes (boost, luau, libassert, catch2, graphviz)
 
 ## Unwritten Rules
 
-- **No CI means manual regression**: must run Samples/StressTests/run_all.ps1 after any CFA/SSA/AST change
-- **Test gaps accepted**: V7-V9 decode, Roblox decoder, error paths untested — don't assume coverage
+- **Regression sweep**: run `Samples/StressTests/run_all.ps1` after any CFA/SSA/AST change.
+- **Test gaps accepted**: V7-V8 decode untested (V9 covered by the loop in `Fission.Tests/Decoding/BytecodeV10V12Decoding.cpp`); Roblox decoder untested end-to-end; error paths partly untested — don't assume coverage.
 - **RbxCli dual-identity**: PRODUCTION_BUILD strips strings/functions. Fission is both public tool and RbxCli kernel — changes affecting output verbosity must guard behind `#ifndef PRODUCTION_BUILD`
-- **No codegen**: GetLuauBuiltinName (200+ switch) hand-maintained — add new ops there when extending LiftedOperation
-- **const_cast hack**: `BytecodeLifter::LiftFunctionBytecodeInternal` uses `const_cast` to store DeserializedFunction* — intentional workaround, not a cleanup target
+- **No codegen**: GetLuauBuiltinName (`BytecodeLifter.cpp:9`, 200+ switch) hand-maintained — add new ops there when extending LiftedOperation
+- **const_cast hack**: `BytecodeLifter::LiftFunctionBytecodeInternal` (`BytecodeLifter.cpp:290`) and `ControlFlowAnalyzer.cpp:88` use `const_cast` to store `DeserializedFunction*` / leaders — intentional workaround, not a cleanup target
+- **Inlining effect order**: `ASTLifterInlining.cpp:1254` — inlining must not move throws or effects past a staying statement. Check this before touching ASTLifter inlining.
 - **Static lib only**: no DLL visibility macros ever — all targets are STATIC or EXE
 
 ## Testing strategy
