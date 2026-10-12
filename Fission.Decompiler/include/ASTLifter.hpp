@@ -127,8 +127,8 @@ struct ASTLifterFunctionState {
     // Class declarations collect following NEWCLASSMEMBER operations by SSA reference.
     std::unordered_map<SSARef, std::shared_ptr<ClassDeclarationNode>> m_pendingClasses;
 
-    // Bound recursive definition lookup for hostile graphs.
-    int m_expressionDepth = 0;
+    // Definitions mid-lift; revisiting one means the def graph is cyclic.
+    boost::unordered_flat_set<const LiftedInstruction *> m_liftingDefs;
 
     // Cap irreducible CFG re-lifts before memory exhaustion.
     uint64_t m_blockLiftBudget = 0;

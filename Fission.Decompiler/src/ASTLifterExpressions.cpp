@@ -50,15 +50,6 @@ std::shared_ptr<Expression> ASTLifter::ConstantLiteral(int32_t index) const {
 }
 
 std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__operand, bool forceExpression) {
-    // hostile def graphs would overflow the stack; real expressions nest shallowly
-    constexpr int kMaxExpressionDepth = 64;
-    if (m_expressionDepth >= kMaxExpressionDepth)
-        throw Fission::DecompilerError("malformed bytecode: expression nesting too deep");
-    struct DepthGuard {
-        int &d;
-        ~DepthGuard() { --d; }
-    } depthGuard{++m_expressionDepth};
-
     // walk MOVE chains iteratively; deep copy fans would recurse one frame per hop
     LiftedOperand operand = __operand;
     while (true) {
@@ -129,6 +120,15 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
     if (!def || (!forceExpression && !ShouldInline(def) && !m_deferToConditionInline.contains(def))) {
         return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
+
+    // nesting is bounded by the register file in real code; only a def feeding itself recurses forever
+    if (!m_liftingDefs.insert(def).second)
+        throw Fission::DecompilerError("malformed bytecode: expression depends on itself (cycle). Cowardly refusing to decompile!");
+    struct DefGuard {
+        boost::unordered_flat_set<const LiftedInstruction *> &set;
+        const LiftedInstruction *def;
+        ~DefGuard() { set.erase(def); }
+    } defGuard{m_liftingDefs, def};
 
     if (def->operation == LiftedOperation::LOADNJUMP && def->operands.size() >= 2 && def->operands[1].type == LiftedOperandType::ImmediateBool)
         return Fission::MakeShared<BooleanLiteralNode>(def->operands[1].value.imm.b);

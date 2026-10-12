@@ -425,3 +425,30 @@ TEST_CASE("Regress: a deep closure chain decompiles without exhausting the nativ
     const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{});
     REQUIRE(result.resultCode == DecompileResult::Success);
 }
+
+TEST_CASE("Regress: nested table constructors up to the register limit decompile", "[Decompiler][Regression][Robustness]") {
+    EnableLuauFFlagsOnce();
+    constexpr int kLevels = 240;
+    std::string source = "return ";
+    for (int i = 0; i < kLevels; ++i)
+        source += "{";
+    for (int i = 0; i < kLevels; ++i)
+        source += "}";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+}
+
+TEST_CASE("Regress: tables nested through closures past 256 levels decompile", "[Decompiler][Regression][Robustness]") {
+    EnableLuauFFlagsOnce();
+    constexpr int kLevels = 300;
+    std::string source = "return ";
+    for (int i = 0; i < kLevels; ++i)
+        source += "{function() return ";
+    source += "1";
+    for (int i = 0; i < kLevels; ++i)
+        source += " end}";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+}

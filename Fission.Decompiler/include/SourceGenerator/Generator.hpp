@@ -31,10 +31,14 @@ class SourceGenerator : public Visitor {
     // Luau rejects a disambiguating semicolon before a block's first statement.
     bool m_firstStmtInBlock = false;
 
-    // Cache table renderings and bound hostile or cyclic nesting.
-    static constexpr int kMaxTableDepth = 256;
-    int m_tableDepth = 0;
-    std::unordered_map<const TableLiteralNode *, std::string> m_tableInlineCache;
+    // Cached one-line table renderings; `multiline` once a newline or the column limit is certain, after which `text` is partial.
+    struct TableInlineForm {
+        std::string text;
+        bool multiline = false;
+    };
+    std::unordered_map<const TableLiteralNode *, TableInlineForm> m_tableInlineCache;
+    int m_measuring = 0;
+    bool m_measureMultiline = false;
     std::string m_vectorConstructorAlias;
     bool m_sawVectorConstant = false;
 
@@ -299,6 +303,10 @@ class SourceGenerator : public Visitor {
 
         // Caller owns punctuation around an inline anonymous function.
         if (lpNode->bAnonymousInline) {
+            if (m_measuring > 0) {
+                m_measureMultiline = true; // a body always spans lines
+                return;
+            }
             buffer << "function(";
             EmitFunctionArguments(lpNode);
             buffer << ")";
@@ -817,7 +825,8 @@ class SourceGenerator : public Visitor {
         m_sawVectorConstant = false;
         dwIndentationLevel = 0;
         m_minPrecedence = 0;
-        m_tableDepth = 0;
+        m_measuring = 0;
+        m_measureMultiline = false;
         m_tableInlineCache.clear();
         lpRoot->Accept(this);
         return buffer.str();
@@ -865,20 +874,32 @@ class SourceGenerator : public Visitor {
     }
 
     // Render entries separately to choose inline or multi-line layout.
-    std::string RenderTableEntriesInline(const std::vector<std::shared_ptr<Expression>> &entries) {
+    // Stops as soon as a newline or the column limit is certain, so each table is measured in bounded work.
+    TableInlineForm RenderTableEntriesInline(const std::vector<std::shared_ptr<Expression>> &entries) {
         std::stringstream scratch;
         scratch.swap(buffer); // buffer now empty; the real output is parked in `scratch`
         const int savedMin = m_minPrecedence;
+        const bool savedMultiline = m_measureMultiline;
         m_minPrecedence = 0;
+        m_measureMultiline = false;
+        ++m_measuring;
+        TableInlineForm form;
         for (size_t i = 0; i < entries.size(); ++i) {
             EmitTableEntry(entries[i]);
+            if (m_measureMultiline || static_cast<size_t>(buffer.tellp()) + 4 > kTableInlineColumnLimit) {
+                form.multiline = true;
+                break;
+            }
             if (i + 1 < entries.size())
                 buffer << ", ";
         }
+        --m_measuring;
+        m_measureMultiline = savedMultiline;
         m_minPrecedence = savedMin;
-        std::string rendered = buffer.str();
+        form.text = buffer.str();
+        form.multiline = form.multiline || form.text.find('\n') != std::string::npos;
         buffer.swap(scratch); // restore the real output stream
-        return rendered;
+        return form;
     }
 
     void Visit(TableLiteralNode *lpNode) override {
@@ -894,24 +915,22 @@ class SourceGenerator : public Visitor {
             return;
         }
 
-        if (m_tableDepth >= kMaxTableDepth)
-            throw Fission::DecompilerError("table nesting too deep");
-        ++m_tableDepth;
-
         // Cache inline forms so nested width measurement remains linear.
-        std::string inlineForm;
-        if (const auto it = m_tableInlineCache.find(lpNode); it != m_tableInlineCache.end()) {
-            inlineForm = it->second;
-        } else {
-            inlineForm = RenderTableEntriesInline(lpNode->expressions);
-            m_tableInlineCache.emplace(lpNode, inlineForm);
-        }
+        auto cached = m_tableInlineCache.find(lpNode);
+        if (cached == m_tableInlineCache.end())
+            cached = m_tableInlineCache.emplace(lpNode, RenderTableEntriesInline(lpNode->expressions)).first;
+        const TableInlineForm &inlineForm = cached->second;
         const size_t indentWidth = dwIndentationLevel * kIndentationSpaceCount;
         // Split nested blocks or forms that exceed the estimated column limit.
-        const bool multiline = inlineForm.find('\n') != std::string::npos || (indentWidth + inlineForm.size() + 4) > kTableInlineColumnLimit;
+        const bool multiline = inlineForm.multiline || (indentWidth + inlineForm.text.size() + 4) > kTableInlineColumnLimit;
+
+        if (m_measuring > 0 && multiline) {
+            m_measureMultiline = true; // the enclosing table cannot stay on one line either
+            return;
+        }
 
         if (!multiline) {
-            buffer << "{ " << inlineForm << " }";
+            buffer << "{ " << inlineForm.text << " }";
         } else {
             buffer << "{";
             this->NextLine();
@@ -929,7 +948,6 @@ class SourceGenerator : public Visitor {
             buffer << this->GetIndentation() << "}";
         }
 
-        --m_tableDepth;
         if (lpNode->bUseParenthesis)
             buffer << ")";
     }
