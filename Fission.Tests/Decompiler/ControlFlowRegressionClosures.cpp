@@ -411,3 +411,17 @@ return a[1],a[2],a[3])LUA",
         R"DRIVER(print(__integration_subject()))DRIVER"
     );
 }
+
+TEST_CASE("Regress: a deep closure chain decompiles without exhausting the native stack", "[Decompiler][Regression][Robustness]") {
+    EnableLuauFFlagsOnce();
+    std::string source = "local x = ...\n";
+    constexpr int kLevels = 190;
+    for (int i = 0; i < kLevels; ++i)
+        source += "return function(a" + std::to_string(i) + ") if a" + std::to_string(i) + " then print(x) end ";
+    source += "return 1 ";
+    for (int i = 0; i < kLevels; ++i)
+        source += "end ";
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileTestCode(source, static_cast<DecompilerFlags>(0), Luau::CompileOptions{});
+    REQUIRE(result.resultCode == DecompileResult::Success);
+}

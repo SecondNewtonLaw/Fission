@@ -8,9 +8,19 @@
 #include "FissionAllocator.hpp"
 
 #include <memory>
+#include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 std::shared_ptr<Statement> CloneStatement(const std::shared_ptr<Statement> &statement);
+
+// Closure bodies are filled after their parent is lifted. A clone made in between would copy an empty body, so
+// it is recorded here and filled from its source once that source is.
+struct PendingCloneRegistry {
+    std::unordered_set<const BlockStatementNode *> unfilled;
+    std::unordered_multimap<const BlockStatementNode *, std::shared_ptr<BlockStatementNode>> mirrors;
+};
+inline thread_local PendingCloneRegistry *g_pendingClones = nullptr;
 
 // Deep copy; Identifier objects stay shared so a rename still reaches every reference.
 inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Expression> &expression) {
@@ -79,6 +89,10 @@ inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Express
                     argument->type = CloneExpression(*argument->type);
             }
         copy->lpFunctionBody = std::static_pointer_cast<BlockStatementNode>(CloneStatement(copy->lpFunctionBody));
+        if (g_pendingClones && node->lpFunctionBody && g_pendingClones->unfilled.contains(node->lpFunctionBody.get())) {
+            g_pendingClones->mirrors.emplace(node->lpFunctionBody.get(), copy->lpFunctionBody);
+            g_pendingClones->unfilled.insert(copy->lpFunctionBody.get());
+        }
         return copy;
     }
     if (const auto node = std::dynamic_pointer_cast<NameCallExpressionNode>(expression)) {

@@ -5,6 +5,7 @@
 
 #include <libassert/assert.hpp>
 #include <sstream>
+#include <unordered_set>
 
 std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
     switch (id) {
@@ -280,10 +281,7 @@ std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
     }
 }
 
-LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain, int depth) {
-    constexpr int kMaxFunctionNestingDepth = 100;
-    if (depth > kMaxFunctionNestingDepth)
-        throw Fission::DecompilerError("malformed bytecode: function nesting too deep (cycle/nesting too deep). Cowardly refusing to decompile!");
+LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
     DEBUG_ASSERT(function != nullptr);
     LiftedFunction liftedFunction{};
     liftedFunction.numparams = function->numparams;
@@ -1707,15 +1705,38 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
         liftedFunction.instructions.at(currentIndex).instructionIndex = (int32_t)currentIndex;
     }
 
-    for (const auto subFunction : function->subfunctions) {
-        liftedFunction.subfunctions.push_back(LiftFunctionBytecodeInternal(subFunction, false, depth + 1));
-    }
-
     return liftedFunction;
 }
 
 LiftedFunction BytecodeLifter::LiftDeserializedBytecode(const DeserializedBytecode &bytecode) {
-    return LiftFunctionBytecodeInternal(bytecode.lpMainFunction, true);
+    struct Frame {
+        LiftedFunction lifted;
+        size_t nextChild;
+    };
+    std::vector<Frame> stack;
+    std::unordered_set<const DeserializedFunction *> onPath;
+    const auto push = [&](const DeserializedFunction *function, bool bIsMain) {
+        if (!onPath.insert(function).second)
+            throw Fission::DecompilerError("malformed bytecode: function references itself (cycle). Cowardly refusing to decompile!");
+        stack.push_back({LiftFunctionBytecodeInternal(function, bIsMain), 0});
+    };
+
+    push(bytecode.lpMainFunction, true);
+    for (;;) {
+        Fission::CheckDecompileDeadline();
+        auto &top = stack.back();
+        const auto &children = top.lifted.lpDeserialized->subfunctions;
+        if (top.nextChild < children.size()) {
+            push(children[top.nextChild++], false);
+            continue;
+        }
+        LiftedFunction done = std::move(top.lifted);
+        onPath.erase(done.lpDeserialized);
+        stack.pop_back();
+        if (stack.empty())
+            return done;
+        stack.back().lifted.subfunctions.push_back(std::move(done));
+    }
 }
 
 std::string_view OperationToString(LiftedOperation operation) {

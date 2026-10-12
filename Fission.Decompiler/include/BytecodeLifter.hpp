@@ -141,7 +141,8 @@ struct LiftedFunction {
 };
 
 class BytecodeLifter {
-    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false, int depth = 0);
+    // lifts one function's own instructions; subfunctions are attached by LiftDeserializedBytecode.
+    LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
 
     Fission::InstructionDecoder *lpDecoder = nullptr;
 

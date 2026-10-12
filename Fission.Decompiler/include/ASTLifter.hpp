@@ -228,6 +228,10 @@ class ASTLifter : private ASTLifterFunctionState {
     explicit ASTLifter();
 
     ASTFunction Lift(AnalyzedFunction &analyzedFunction);
+    ASTFunction LiftBody(AnalyzedFunction &analyzedFunction);
+    void DeferChildLift(AnalyzedFunction &function, const std::shared_ptr<BlockStatementNode> &body);
+    void DeferChildParam(int32_t index, const std::shared_ptr<Identifier> &name);
+    void FlushChildLifts(AnalyzedFunction &target);
     std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
     void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
     void SetInlineSources(std::shared_ptr<const InlineSourceMap> sources) { m_inlineSources = std::move(sources); }

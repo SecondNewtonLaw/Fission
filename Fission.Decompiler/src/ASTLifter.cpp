@@ -356,7 +356,100 @@ struct OriginStamp {
     }
 };
 
+struct PendingChildLift {
+    AnalyzedFunction *function;
+    std::shared_ptr<BlockStatementNode> body;
+    FissionDebugNotes *debugNotes;
+    std::shared_ptr<const InlineSourceMap> inlineSources;
+    std::vector<std::pair<int32_t, std::shared_ptr<Identifier>>> params;
+    bool done = false;
+};
+static thread_local std::vector<PendingChildLift> *t_pendingChildLifts = nullptr;
+static thread_local int t_flushDepth = 0;
+
+static void RunPendingChildLift(size_t index) {
+    auto &pending = *t_pendingChildLifts;
+    pending[index].done = true;
+    const PendingChildLift item = pending[index]; // the lift below can grow `pending`
+    ASTLifter child;
+    child.SetDebugNotes(item.debugNotes);
+    child.SetInlineSources(item.inlineSources);
+    item.body->body = child.LiftBody(*item.function).statements;
+    for (const auto &[paramIndex, name] : item.params) {
+        name->name = item.function->GetVarName(paramIndex, 0);
+        if (name->name.empty() || name->name == std::format("v{}", paramIndex))
+            name->name = std::format("a{}", paramIndex);
+    }
+    // a clone of this body taken before it was filled is filled from it; those clones may in turn have clones
+    auto &clones = *g_pendingClones;
+    std::vector<std::shared_ptr<BlockStatementNode>> filled{item.body};
+    clones.unfilled.erase(item.body.get());
+    while (!filled.empty()) {
+        const auto source = std::move(filled.back());
+        filled.pop_back();
+        auto [first, last] = clones.mirrors.equal_range(source.get());
+        std::vector<std::shared_ptr<BlockStatementNode>> mirrored;
+        for (auto it = first; it != last; ++it)
+            mirrored.push_back(it->second);
+        clones.mirrors.erase(first, last);
+        for (auto &mirror : mirrored) {
+            mirror->body.clear();
+            for (const auto &statement : source->body)
+                mirror->body.push_back(CloneStatement(statement));
+            clones.unfilled.erase(mirror.get());
+            filled.push_back(std::move(mirror));
+        }
+    }
+}
+
+// A function already waiting to be lifted is lifted before it is prepared again, so every lift sees exactly the
+// state the in-order algorithm gave it. Only functions shared by several closure sites reach the recursion.
+void ASTLifter::FlushChildLifts(AnalyzedFunction &target) {
+    constexpr int kMaxFlushDepth = 32;
+    for (size_t i = 0; i < t_pendingChildLifts->size(); ++i) {
+        if ((*t_pendingChildLifts)[i].done || (*t_pendingChildLifts)[i].function != &target)
+            continue;
+        if (t_flushDepth >= kMaxFlushDepth)
+            throw Fission::DecompilerError("malformed bytecode: shared closure nesting too deep");
+        ++t_flushDepth;
+        struct Unwind {
+            ~Unwind() { --t_flushDepth; }
+        } unwind;
+        RunPendingChildLift(i);
+    }
+}
+
+void ASTLifter::DeferChildLift(AnalyzedFunction &function, const std::shared_ptr<BlockStatementNode> &body) {
+    t_pendingChildLifts->push_back({&function, body, m_debugNotes, m_inlineSources, {}});
+    g_pendingClones->unfilled.insert(body.get());
+}
+
+void ASTLifter::DeferChildParam(int32_t index, const std::shared_ptr<Identifier> &name) { t_pendingChildLifts->back().params.emplace_back(index, name); }
+
+// Nested closures are lifted from a worklist after their parent, so nesting depth never reaches the native stack.
 ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
+    if (t_pendingChildLifts)
+        return LiftBody(analyzedFunction);
+    std::vector<PendingChildLift> pending;
+    PendingCloneRegistry clones;
+    t_pendingChildLifts = &pending;
+    g_pendingClones = &clones;
+    struct Reset {
+        ~Reset() {
+            t_pendingChildLifts = nullptr;
+            g_pendingClones = nullptr;
+        }
+    } reset;
+    auto result = LiftBody(analyzedFunction);
+    for (size_t i = 0; i < pending.size(); ++i) {
+        Fission::CheckDecompileDeadline();
+        if (!pending[i].done)
+            RunPendingChildLift(i);
+    }
+    return result;
+}
+
+ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
     static_cast<ASTLifterFunctionState &>(*this) = {};
     this->m_currentFunction = &analyzedFunction;
     if (m_debugNotes && m_debugNotes->Enabled())
@@ -4153,6 +4246,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             for (auto &inner : m_currentFunction->innerFunctions) {
                 if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == duplicatedFunction->bytecodeId) {
                     targetFunc = &inner;
+                    FlushChildLifts(inner);
                     targetFunc->PopulateNames(); // populate to prevent bad usages.
                     SeedEnclosingNames(*targetFunc);
                     // disambiguate this nested fn's own vN/argN from the upvalues it captures.
@@ -4280,10 +4374,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 );
             }
 
-            ASTLifter subLifter;
-            subLifter.SetDebugNotes(m_debugNotes);
-            subLifter.SetInlineSources(m_inlineSources);
-            ASTFunction subAst = subLifter.Lift(*targetFunc);
+            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
+            DeferChildLift(*targetFunc, bodyBlock);
 
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
                 name != m_currentFunction->ssaOverrides.end())
@@ -4307,6 +4399,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     argName = std::format("a{}", j);
 
                 auto identifier = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(argName));
+                DeferChildParam(j, identifier->identifier);
                 if (auto n = Deserializer::TryGetTypeName(duplicatedFunction, j)) {
                     argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(
                         identifier, Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(*n))
@@ -4321,8 +4414,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>("...")), std::nullopt
                 ); // insert vararg.
 
-            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
-            bodyBlock->body = subAst.statements;
             // literally almost the same handler as NEWCLOSURE.
 
             auto fnDecl =
@@ -4468,6 +4559,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
             for (auto &inner : m_currentFunction->innerFunctions) {
                 if (inner.lpLiftedFunction->lpDeserialized->bytecodeId == proto->bytecodeId) {
                     targetFunc = &inner;
+                    FlushChildLifts(inner);
                     targetFunc->PopulateNames(); // populate to prevent bad usages.
                     SeedEnclosingNames(*targetFunc);
                     // Disambiguate this nested function's own vN/argN names from the
@@ -4596,10 +4688,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 );
             }
 
-            ASTLifter subLifter;
-            subLifter.SetDebugNotes(m_debugNotes);
-            subLifter.SetInlineSources(m_inlineSources);
-            ASTFunction subAst = subLifter.Lift(*targetFunc);
+            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
+            DeferChildLift(*targetFunc, bodyBlock);
 
             if (const auto name = m_currentFunction->ssaOverrides.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
                 name != m_currentFunction->ssaOverrides.end())
@@ -4612,6 +4702,7 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     argName = std::format("a{}", j);
 
                 auto identifier = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(argName));
+                DeferChildParam(j, identifier->identifier);
                 if (auto n = Deserializer::TryGetTypeName(proto, j)) {
                     argNames[j] = Fission::MakeShared<FunctionArgumentExpression>(
                         identifier, Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(*n))
@@ -4626,8 +4717,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>("...")), std::nullopt
                 ); // insert vararg.
 
-            auto bodyBlock = Fission::MakeShared<BlockStatementNode>();
-            bodyBlock->body = subAst.statements;
 
             auto fnDecl = Fission::MakeShared<FunctionDeclarationNode>(funcName, proto->numparams, argNames, proto->isvararg, bodyBlock, true);
             for (const auto &capture : captureActions)
