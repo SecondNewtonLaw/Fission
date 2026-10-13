@@ -9,6 +9,7 @@
 #include "Deserializer.hpp"
 #include "FissionDebugNotes.hpp"
 #include "InlineCallRecovery.hpp"
+#include "SafetyGuard.hpp"
 #include "lua.h"
 
 #include <bitset>
@@ -179,12 +180,22 @@ struct ASTLifterFunctionState {
     std::unordered_set<const LiftedInstruction *> m_diamondBoolLoads;
 
     // Natural loop bodies, one per header, merged over its latches; and the registers each body writes.
+    // Members are stored sparsely: thousands of sequential loops would each cost a dense bitset
+    // here (loops x blocks) while total membership is linear. Membership tests scan the block's
+    // own loop list (m_loopsOfBlock), which is nesting-depth long; a shared mark array cannot
+    // represent overlapping (nested) loops, whose floods would overwrite each other.
     struct LoopBody {
-        std::vector<bool> blocks;
+        std::vector<uint32_t> members;
         std::bitset<256> writes;
+        // Owning header and (first) latch, for merge queries over loop arms.
+        uint32_t header = static_cast<uint32_t>(-1);
+        uint32_t latch = static_cast<uint32_t>(-1);
     };
     std::vector<LoopBody> m_loops;
     std::vector<std::vector<uint32_t>> m_loopsOfBlock;
+    // Whether any block is a loop latch: the top-level if-wrapper retry (endless-loop bodies)
+    // only fires around loop structures, so loop-free functions skip it outright.
+    bool m_hasLoopLatch = false;
     std::vector<int32_t> m_blockOfInstruction;
 
     // Cap value-arm re-lifts for pathological CFGs.
@@ -215,10 +226,31 @@ struct ASTLifterFunctionState {
     std::unordered_map<SSARef, SSARef> m_variableParent;
 
     SSARef VariableOf(const SSARef &ref) {
-        const auto found = m_variableParent.find(ref);
-        if (found == m_variableParent.end() || found->second == ref)
+        auto it = m_variableParent.find(ref);
+        if (it == m_variableParent.end() || it->second == ref)
             return ref;
-        return found->second = VariableOf(found->second);
+        // Iterative path compression: recursion overflows the native stack on version chains
+        // tens of thousands long (one loop-carried register across thousands of sequential
+        // loops links every version forward; debug-local resolution reads the oldest first).
+        // Edges always join two ultimate roots, so the map stays a forest and the walk below
+        // terminates; the bound turns a corrupted map into a graceful failure instead of a hang.
+        SSARef root = it->second;
+        auto jt = m_variableParent.find(root);
+        if (jt == m_variableParent.end() || jt->second == root)
+            return root;
+        std::vector<SSARef> chain{ref};
+        while (true) {
+            if (chain.size() > m_variableParent.size())
+                throw Fission::DecompilerError("malformed bytecode: register version parent cycle");
+            chain.push_back(root);
+            root = jt->second;
+            jt = m_variableParent.find(root);
+            if (jt == m_variableParent.end() || jt->second == root)
+                break;
+        }
+        for (const SSARef &node : chain)
+            m_variableParent[node] = root;
+        return root;
     }
 };
 
@@ -386,6 +418,8 @@ class ASTLifter : private ASTLifterFunctionState {
     std::optional<SSARef> InlinedChainInto(const LiftedInstruction &inst, const LiftedInstruction *target);
     // True if a debug local in `reg` begins right after `inst` (and its AUX word), so `inst` declares it.
     bool BeginsDebugLocal(const LiftedInstruction &inst, int32_t reg) const;
+    // A later write to a captured register whose declaration was never emitted; assigns instead.
+    bool AssignsCapturedOrphan(const LiftedInstruction &inst) const;
     // True if `inst`'s write to `target` declares a local although its register was used before.
     bool DeclaresLocal(const LiftedInstruction &inst, const LiftedOperand &target) const;
     void CollectCompoundAssignments();

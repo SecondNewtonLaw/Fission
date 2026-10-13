@@ -12,6 +12,7 @@
 #include "FissionAllocator.hpp"
 #include "InlineCallRecovery.hpp"
 #include "Rewriters/DeclarationHoister.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <format>
@@ -79,6 +80,7 @@ class InlineRegionMarker {
         constexpr int32_t kCaller = -1;
         std::vector<int32_t> origins(statements.size());
         for (size_t i = 0; i < statements.size(); ++i) {
+            Fission::CheckDecompileDeadline();
             const auto &statement = statements[i];
             if (!statement)
                 continue;

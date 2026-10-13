@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <cctype>
 #include <memory>
@@ -94,8 +95,10 @@ class PcallResultRenamer {
 
     void ProcessScope(std::vector<std::shared_ptr<Statement>> &scope) {
         std::vector<std::vector<std::string>> pcalls;
-        for (const auto &s : scope)
+        for (const auto &s : scope) {
+            Fission::CheckDecompileDeadline();
             CollectPcalls(s, pcalls);
+        }
 
         if (!pcalls.empty()) {
             std::unordered_set<std::string> taken; // names already used somewhere in the scope

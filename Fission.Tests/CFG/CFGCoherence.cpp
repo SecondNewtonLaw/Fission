@@ -1,6 +1,7 @@
 // Assert graph invariants after the full control-flow analysis pipeline.
 
 #include "../Decompiler/IntegrationTestSupport.hpp"
+#include "ASTLifter.hpp"
 #include "BytecodeLifter.hpp"
 #include "ControlFlowAnalyzer.hpp"
 #include "Deserializer.hpp"
@@ -766,6 +767,23 @@ TEST_CASE("CFG: triple-nested loops", "[CFG]") {
     INFO("triple-nested for/while/repeat loops should produce at least 3 LoopHeaders");
     CHECK(CountBlocksByType(f, BlockType::LoopHeader) >= 3);
     CHECK(CountBlocksByType(f, BlockType::Return) >= 1);
+}
+
+TEST_CASE("CFG: version parent chains thousands long resolve without overflowing", "[CFG]") {
+    // Regression: VariableOf recursed once per parent link. One loop-carried register across
+    // thousands of sequential loops links every version forward into a single chain, and
+    // debug-local resolution reads the oldest versions first, overflowing the native stack
+    // (observed as 0xC00000FD past ~13k loops at --debug 2). Resolution must be iterative
+    // with path compression and return the ultimate root.
+    ASTLifterFunctionState state{};
+    constexpr int kChain = 60000;
+    for (int i = 0; i < kChain; ++i)
+        state.m_variableParent[SSARef{0, i}] = SSARef{0, i + 1};
+    const SSARef root = state.VariableOf(SSARef{0, 0});
+    CHECK(root.regIndex == 0);
+    CHECK(root.version == kChain);
+    // the read flattened the entry onto the root
+    CHECK(state.m_variableParent[SSARef{0, 0}].version == kChain);
 }
 
 TEST_CASE("CFG: unreachable trailing instructions preserve returned value", "[CFG][Regression][Integration]") {

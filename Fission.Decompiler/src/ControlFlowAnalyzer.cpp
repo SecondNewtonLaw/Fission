@@ -125,8 +125,12 @@ void ControlFlowAnalyzer::LinkBasicBlocks(std::vector<BasicBlock> &blocks) {
 
                 currentBlock.loopHeader = GetBlockIdAtInstruction((currentBlock.lpTail) + offset, leaderToBlockId);
                 blocks.at(*currentBlock.loopHeader).loopLatch = i; // current block is exit for the loop.
-                ExplainDetail(currentBlock, "link: {} back-edge selects B{} as loop header", OperationToString(currentBlock.lpTail->operation), *currentBlock.loopHeader);
-                ExplainDetail(blocks.at(*currentBlock.loopHeader), "link: B{} {} selects this block as loop header", i, OperationToString(currentBlock.lpTail->operation));
+                ExplainDetail(
+                    currentBlock, "link: {} back-edge selects B{} as loop header", OperationToString(currentBlock.lpTail->operation), *currentBlock.loopHeader
+                );
+                ExplainDetail(
+                    blocks.at(*currentBlock.loopHeader), "link: B{} {} selects this block as loop header", i, OperationToString(currentBlock.lpTail->operation)
+                );
 
                 nextInstructions.push_back(currentBlock.lpTail + 1);
                 currentBlock.loopLatch = i /* self */;
@@ -574,8 +578,36 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     };
 
     auto reachesBefore = [&](uint32_t start, uint32_t target, uint32_t stop) {
+        if (start == target)
+            return true;
+        // The forward search never expands the start when it is the stop; mirror that here so
+        // the reversed search below cannot "find" the barrier itself.
+        if (start == stop)
+            return false;
         if (start >= blocks.size() || target >= blocks.size())
             return false;
+        // When the stop dominates the target (a loop header above its latch), search backward
+        // from the target: the barrier cuts the region small (the loop body), while forward
+        // search from the start would scan everything downstream. Reversal preserves the answer
+        // (a stop-avoiding path exists one way iff it exists the other).
+        if (stop < blocks.size() && dominates(stop, target)) {
+            std::vector<bool> seen(blocks.size());
+            std::vector<uint32_t> pending{target};
+            while (!pending.empty()) {
+                Fission::CheckDecompileDeadline();
+                const uint32_t current = pending.back();
+                pending.pop_back();
+                if (current == start)
+                    return true;
+                if (current >= blocks.size() || seen[current] || current == stop)
+                    continue;
+                seen[current] = true;
+                for (const uint32_t prev : blocks[current].predecessors)
+                    if (prev < blocks.size() && !seen[prev])
+                        pending.push_back(prev);
+            }
+            return false;
+        }
         std::vector<bool> seen(blocks.size());
         std::queue<uint32_t> pending;
         pending.push(start);
@@ -605,7 +637,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
     // Luau leaves a while/repeat loop only through the instruction after its JUMPBACK; both the failing test and
     // every `break` target it. A multi-block condition (`while a or b`) exits from a block other than the header.
-    auto exitAfterLatch = [&](const BasicBlock &latch, const BasicBlock &header) -> std::optional<uint32_t> {
+    auto exitAfterLatchImpl = [&](const BasicBlock &latch, const BasicBlock &header) -> std::optional<uint32_t> {
         if (!latch.lpTail || !header.lpHead || latch.lpTail < header.lpHead)
             return std::nullopt;
         const auto &instructions = func.lpLiftedFunction->instructions;
@@ -645,8 +677,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
     // An O2-inlined `return` leaves the loop through code placed inside it, past the natural exit. Every
     // non-returning exit then runs straight into the return label, which is the loop's real exit.
-    auto joinedExit = [&](uint32_t exit, const BasicBlock &latch, const BasicBlock &header) -> uint32_t {
-        const auto natural = exitAfterLatch(latch, header);
+    auto joinedExitImpl = [&](uint32_t exit, const BasicBlock &latch, const BasicBlock &header) -> uint32_t {
+        const auto natural = exitAfterLatchImpl(latch, header);
         if (!natural)
             return exit;
         std::vector<bool> region(blocks.size());
@@ -678,20 +710,28 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             }
             return path;
         };
-        std::vector<std::vector<uint32_t>> exits;
+        // Collect escaping successors first: chaining each one floods forward through the whole
+        // downstream graph, O(remaining blocks) per loop. Simple loops have a single exit, decided
+        // without computing any chain.
+        std::vector<uint32_t> exitSuccs;
         for (uint32_t id = header.dwBlockId; id <= latch.dwBlockId; ++id) {
             if (!region[id])
                 continue;
             for (const uint32_t succ : blocks[id].successors) {
-                if (succ >= blocks.size() || region[succ] || std::ranges::any_of(exits, [&](const auto &path) { return path.front() == succ; }))
+                if (succ >= blocks.size() || region[succ] || std::ranges::find(exitSuccs, succ) != exitSuccs.end())
                     continue;
                 if (!blocks[succ].successors.empty())
-                    exits.push_back(chain(succ));
+                    exitSuccs.push_back(succ);
             }
         }
+        if (exitSuccs.size() < 2)
+            return exit;
+        std::vector<std::vector<uint32_t>> exits;
+        for (const uint32_t succ : exitSuccs)
+            exits.push_back(chain(succ));
         const bool bypassesNatural =
             std::ranges::any_of(exits, [&](const auto &path) { return path.front() < latch.dwBlockId && std::ranges::find(path, *natural) == path.end(); });
-        if (exits.size() < 2 || !bypassesNatural)
+        if (!bypassesNatural)
             return exit;
         const auto postDominates = [&](uint32_t start, uint32_t candidate) {
             std::vector<uint32_t> pending{start};
@@ -722,21 +762,35 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
         return exit;
     };
 
+    auto exitAfterLatch = [&](const BasicBlock &latch, const BasicBlock &header) -> std::optional<uint32_t> { return exitAfterLatchImpl(latch, header); };
+    auto joinedExit = [&](uint32_t exit, const BasicBlock &latch, const BasicBlock &header) -> uint32_t { return joinedExitImpl(exit, latch, header); };
+
     // True when `start` re-enters `header` through another back-edge without first passing an enclosing loop's
     // header (which precedes it): the loops share this header, so `start` is inside the outer one, not an exit.
+    // Searched backward from the header over predecessors: the latch and sub-header barriers cut the
+    // region to the sharing loops, while forward search from the start would scan everything downstream.
     auto returnsToSharedHeader = [&](uint32_t start, const BasicBlock &header, const BasicBlock &latch) {
+        if (start >= blocks.size() || header.dwBlockId >= blocks.size())
+            return false;
+        // The forward search prunes the latch and sub-header blocks on pop, including the start
+        // itself; a reversed search from the header would otherwise "find" them as predecessors.
+        if (start == latch.dwBlockId || start < header.dwBlockId)
+            return false;
         std::vector<bool> seen(blocks.size());
-        std::vector<uint32_t> pending{start};
+        std::vector<uint32_t> pending{header.dwBlockId};
         while (!pending.empty()) {
+            Fission::CheckDecompileDeadline();
             const uint32_t current = pending.back();
             pending.pop_back();
-            if (current >= blocks.size() || seen[current] || current == latch.dwBlockId || current < header.dwBlockId)
+            if (current >= blocks.size() || seen[current] || current == latch.dwBlockId)
+                continue;
+            if (current != header.dwBlockId && current < header.dwBlockId)
                 continue;
             seen[current] = true;
-            for (const uint32_t next : blocks[current].successors) {
-                if (next == header.dwBlockId)
+            for (const uint32_t prev : blocks[current].predecessors) {
+                if (prev == start)
                     return true;
-                pending.push_back(next);
+                pending.push_back(prev);
             }
         }
         return false;
@@ -756,13 +810,21 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
             continue;
 
         LiftedInstruction *targetInst = blk.lpTail + jmpOff;
+        // Jump targets are block leaders; the index answers in O(1). The scan below is a
+        // fallback for partitioned blocks the index predates (it never fires in practice).
         int32_t headerId = -1;
-        for (const auto &b : blocks) {
-            if (b.lpHead <= targetInst && targetInst <= b.lpTail) {
-                headerId = b.dwBlockId;
-                break;
-            }
+        if (targetInst >= firstInstruction) {
+            const size_t leaderIndex = static_cast<size_t>(targetInst - firstInstruction);
+            if (leaderIndex < blockAtLeader.size())
+                headerId = blockAtLeader[leaderIndex];
         }
+        if (headerId < 0)
+            for (const auto &b : blocks) {
+                if (b.lpHead <= targetInst && targetInst <= b.lpTail) {
+                    headerId = b.dwBlockId;
+                    break;
+                }
+            }
         if (headerId < 0)
             continue;
 
@@ -1010,8 +1072,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             continue;
                         const uint32_t other = pred.successors[0] == block.dwBlockId ? pred.successors[1] : pred.successors[0];
                         const bool bodyCallBeforeTest = std::any_of(successor.lpHead, successor.lpTail, [](const LiftedInstruction &inst) {
-                            return (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) &&
-                                   inst.operands.size() > 2 && inst.operands[2].value.imm.n == 1;
+                            return (inst.operation == LiftedOperation::CALL || inst.operation == LiftedOperation::CALLFB) && inst.operands.size() > 2 &&
+                                   inst.operands[2].value.imm.n == 1;
                         });
                         // overwriting a register live into the header is an assignment, which no while condition holds
                         const bool headerAssigns = [&] {
@@ -1076,8 +1138,7 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                             }
                             if (reachesReturn) {
                                 Explain(
-                                    block,
-                                    "structure: reject repeat candidate B{}; header arm B{} reaches return without passing latch B{} or exit B{}",
+                                    block, "structure: reject repeat candidate B{}; header arm B{} reaches return without passing latch B{} or exit B{}",
                                     conditionalLatch->dwBlockId, headerSucc, block.dwBlockId, conditionalExit
                                 );
                                 conditionalLatch = nullptr;
@@ -1105,16 +1166,21 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
                         conditionalLatch->dwBlockFlags |= static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop);
                         conditionalLatch->loopHeader = successor.dwBlockId;
                         conditionalLatch->loopExit = conditionalExit;
-                        block.dwBlockFlags &= ~(static_cast<uint32_t>(LoopBlockFlags::WhileLoop) |
-                                                static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop));
+                        block.dwBlockFlags &= ~(static_cast<uint32_t>(LoopBlockFlags::WhileLoop) | static_cast<uint32_t>(LoopBlockFlags::RepeatUntilLoop));
                         block.loopExit.reset();
                         block.bType = BlockType::Continue;
                         Explain(
                             successor, "structure: conditional B{} before bridge B{} proves repeat-until; latch B{}, exit B{}", conditionalLatch->dwBlockId,
                             block.dwBlockId, conditionalLatch->dwBlockId, conditionalExit
                         );
-                        Explain(*conditionalLatch, "structure: repeat condition exits to B{} and otherwise returns to header B{}", conditionalExit, successor.dwBlockId);
-                        Explain(block, "structure: bridge into B{} demoted to continue after repeat latch moved to B{}", successor.dwBlockId, conditionalLatch->dwBlockId);
+                        Explain(
+                            *conditionalLatch, "structure: repeat condition exits to B{} and otherwise returns to header B{}", conditionalExit,
+                            successor.dwBlockId
+                        );
+                        Explain(
+                            block, "structure: bridge into B{} demoted to continue after repeat latch moved to B{}", successor.dwBlockId,
+                            conditionalLatch->dwBlockId
+                        );
                         continue;
                     }
 
@@ -1234,8 +1300,8 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
     }
 
     for (BasicBlock &header : blocks) {
-        if (header.bType != BlockType::LoopHeader ||
-            (header.dwBlockFlags & static_cast<uint32_t>(LoopBlockFlags::WhileLoop)) == 0 || !header.loopLatch || !header.loopExit)
+        if (header.bType != BlockType::LoopHeader || (header.dwBlockFlags & static_cast<uint32_t>(LoopBlockFlags::WhileLoop)) == 0 || !header.loopLatch ||
+            !header.loopExit)
             continue;
         if (*header.loopExit >= blocks.size() || blocks[*header.loopExit].bType != BlockType::LoopHeader ||
             !reachesBefore(*header.loopExit, *header.loopLatch, header.dwBlockId))
@@ -1270,12 +1336,18 @@ void ControlFlowAnalyzer::IdentifyStructuresInternal(AnalyzedFunction &func) {
 
         LiftedInstruction *targetInst = blk.lpTail + jmpOffset;
         int32_t targetId = -1;
-        for (const auto &b : blocks) {
-            if (b.lpHead <= targetInst && targetInst <= b.lpTail) {
-                targetId = b.dwBlockId;
-                break;
-            }
+        if (targetInst >= firstInstruction) {
+            const size_t leaderIndex = static_cast<size_t>(targetInst - firstInstruction);
+            if (leaderIndex < blockAtLeader.size())
+                targetId = blockAtLeader[leaderIndex];
         }
+        if (targetId < 0)
+            for (const auto &b : blocks) {
+                if (b.lpHead <= targetInst && targetInst <= b.lpTail) {
+                    targetId = b.dwBlockId;
+                    break;
+                }
+            }
         if (targetId < 0)
             continue;
 

@@ -5,6 +5,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "SafetyGuard.hpp"
 
 #include <memory>
 #include <string>
@@ -98,8 +99,10 @@ class ConstLocalMarker {
     }
 
     void WalkBlock(const std::vector<std::shared_ptr<Statement>> &statements) {
-        for (const auto &statement : statements)
+        for (const auto &statement : statements) {
+            Fission::CheckDecompileDeadline();
             WalkStatement(statement);
+        }
     }
 
     template <typename Call> void WalkCallStatement(Call &call) {

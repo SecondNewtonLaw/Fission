@@ -10,6 +10,7 @@
 #include "FissionAllocator.hpp"
 #include "Rewriters/ASTRewriter.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <memory>
 #include <optional>
@@ -27,6 +28,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
 
         bool changed = true;
         while (changed) {
+            Fission::CheckDecompileDeadline();
             changed = FoldTerminalMixedAndOr(stmts);
             if (changed)
                 continue;

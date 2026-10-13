@@ -7,6 +7,7 @@
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "FissionAllocator.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <memory>
 #include <string>
@@ -34,6 +35,7 @@ class ExportDeclarationRewriter {
         size_t tableIndex = statements.size();
         std::shared_ptr<TableLiteralNode> table;
         for (size_t i = 0; i + 1 < statements.size(); ++i) {
+            Fission::CheckDecompileDeadline();
             const auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(statements[i]);
             if (decl && IsName(decl->identifier, tableName)) {
                 if (tableIndex != statements.size())

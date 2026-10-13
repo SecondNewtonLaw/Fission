@@ -313,7 +313,7 @@ add_library(Fission.Decompiler STATIC
 target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
-target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container Boost::unordered)
+target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container Boost::unordered Threads::Threads)
 
 add_executable(Fission.CLI
         Fission.CLI/src/main.cpp

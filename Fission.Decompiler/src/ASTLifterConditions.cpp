@@ -489,6 +489,53 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
         const auto follows = [&](const BasicBlock &block, uint32_t cur, uint32_t succ) {
             return succ > cur && (succ != loopExit || succ == branchA) && (!continuesLoop(block, succ) || succ == branchA || succ == branchB);
         };
+        // Fast -1 without the downstream search (which otherwise runs once per loop over the rest
+        // of the function, quadratic on sequential loops). Sound only under all of these: the
+        // query is not a loop-jumps-exit retry (whose second search can join at the latch), arm A
+        // reaches its own latch through follows-edges strictly inside its loop, and both A and its
+        // latch sit below the other arm B. Then every candidate the search could test lies past B
+        // while the witness path lies below it, so postDominates walks the witness to the latch
+        // back-edge and fails it: no merge exists.
+        if (!loopJumpsExit) {
+            const auto reachesOwnLatch = [&](uint32_t arm, uint32_t other) {
+                if (arm >= other || arm >= blocks.size() || arm >= m_loopsOfBlock.size() || arm == loopExit)
+                    return false;
+                for (const uint32_t index : m_loopsOfBlock[arm]) {
+                    if (index >= m_loops.size())
+                        continue;
+                    const auto &loop = m_loops[index];
+                    if (loop.header >= arm || loop.header > loop.latch || loop.latch >= other || loop.latch >= blocks.size())
+                        continue;
+                    const auto &latch = blocks[loop.latch];
+                    if (latch.loopHeader != loop.header || std::ranges::find(latch.successors, loop.header) == latch.successors.end())
+                        continue;
+                    const boost::unordered_flat_set<uint32_t> members(loop.members.begin(), loop.members.end());
+                    std::vector<uint32_t> pending{loop.latch};
+                    boost::unordered_flat_set<uint32_t> seen{loop.latch};
+                    while (!pending.empty()) {
+                        const uint32_t cur = pending.back();
+                        pending.pop_back();
+                        if (cur == arm)
+                            return true;
+                        for (const uint32_t prev : blocks[cur].predecessors) {
+                            if (prev == loop.header || !members.contains(prev))
+                                continue;
+                            // the merge walk traverses only follows-edges; anything else abandons
+                            // the path, so the witness must use them too
+                            if (!follows(blocks[prev], prev, cur))
+                                continue;
+                            if (seen.insert(prev).second)
+                                pending.push_back(prev);
+                        }
+                    }
+                }
+                return false;
+            };
+            if (reachesOwnLatch(branchA, branchB) || reachesOwnLatch(branchB, branchA)) {
+                m_mergeCache.emplace(cacheKey, -1);
+                return -1;
+            }
+        }
         if (!loopJumpsExit && blocks[branchA].successors.size() == 1 && blocks[branchA].successors.front() == branchB &&
             follows(blocks[branchA], branchA, branchB)) {
             const auto merge = static_cast<int32_t>(branchB);
@@ -500,6 +547,56 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
             const auto merge = static_cast<int32_t>(branchA);
             m_mergeCache.emplace(cacheKey, merge);
             return merge;
+        }
+        // Both arms flow straight to one shared block through single-successor follows-edges:
+        // the ordered search below tests that block first and both post-dominance walks succeed
+        // trivially, so answer without flooding the rest of the function (quadratic on long
+        // if-chains). The merge is the first block of branchB's chain that also lies on
+        // branchA's chain. This is sound because follows-edges strictly increase block ids:
+        // everything the search could test before the merge sits below it, while anything the
+        // mapped prefix omits (forks past the walk's stop, if any) sits above it, so the two
+        // sets cannot overlap and the merge verifies exactly as the search would. Either arm
+        // shared would itself win or tie there, which only the full search below can decide,
+        // so those fall back. Plain queries only (the retry may join at a shared exit instead),
+        // and neither arm may be the loop exit (which takes a different path through the search).
+        if (!loopJumpsExit && branchA != loopExit && branchB != loopExit) {
+            // Collects single-successor follows-edges from arm into the set; stops at any fork,
+            // barrier, or cap, leaving longer chains to the full search below.
+            constexpr size_t kMaxChainHops = 64;
+            boost::unordered_flat_set<uint32_t> chainA{branchA};
+            for (uint32_t cur = branchA, hops = 0; hops < kMaxChainHops; ++hops) {
+                if (cur >= blocks.size() || blocks[cur].successors.size() != 1)
+                    break;
+                const uint32_t next = blocks[cur].successors.front();
+                if (next >= blocks.size() || !follows(blocks[cur], cur, next) || next == cur)
+                    break;
+                cur = next;
+                chainA.insert(cur);
+            }
+            // Descends branchB's chain in order; the first block shared with A is the merge the
+            // ordered search tests (and verifies) first. Either arm shared would itself win or
+            // tie there, which only the full search below can decide, so those fall back.
+            uint32_t found = InvalidBlockId;
+            for (uint32_t cur = branchB, hops = 0; hops <= kMaxChainHops; ++hops) {
+                if (cur >= blocks.size())
+                    break;
+                if (chainA.contains(cur)) {
+                    if (cur == branchA || cur == branchB)
+                        break;
+                    found = cur;
+                    break;
+                }
+                if (blocks[cur].successors.size() != 1)
+                    break;
+                const uint32_t next = blocks[cur].successors.front();
+                if (next >= blocks.size() || !follows(blocks[cur], cur, next) || next == cur)
+                    break;
+                cur = next;
+            }
+            if (found != InvalidBlockId) {
+                m_mergeCache.emplace(cacheKey, static_cast<int32_t>(found));
+                return static_cast<int32_t>(found);
+            }
         }
         // a block post-dominating branchA is reached from it; the rest need no walk
         boost::unordered_flat_set<uint32_t> fromA{branchA};

@@ -5,6 +5,7 @@
 #include "AbstractSyntaxTree/Nodes/CommentNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
 #include "FissionAllocator.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -35,6 +36,7 @@ class ScopeBlockIntroducer {
         std::vector<std::string> declName(n);
         bool bailMulti = false;
         for (size_t i = 0; i < n; ++i) {
+            Fission::CheckDecompileDeadline();
             bool multi = false;
             declName[i] = DeclaredLocalName(stmts[i], multi);
             if (multi)

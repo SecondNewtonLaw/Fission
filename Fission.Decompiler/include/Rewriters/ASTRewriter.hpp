@@ -7,6 +7,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
+#include "SafetyGuard.hpp"
 
 #include <memory>
 #include <vector>
@@ -27,6 +28,7 @@ class ASTRewriter {
 
     void RewriteBlock(std::vector<std::shared_ptr<Statement>> &stmts, const std::shared_ptr<Expression> &tailScope = nullptr) {
         for (auto &stmt : stmts) {
+            Fission::CheckDecompileDeadline();
             if (auto fn = stmt && stmt->nodeKind == ASTNodeKind::FunctionDeclarationNode ? std::static_pointer_cast<FunctionDeclarationNode>(stmt) : nullptr;
                 fn && fn->lpFunctionBody) {
                 RewriteBlock(fn->lpFunctionBody->body);

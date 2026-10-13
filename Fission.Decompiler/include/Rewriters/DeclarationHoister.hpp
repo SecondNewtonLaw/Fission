@@ -4,6 +4,7 @@
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "AbstractSyntaxTree/Traversal.hpp"
 #include "FissionAllocator.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -31,6 +32,7 @@ class DeclarationHoister {
     void Run(std::vector<std::shared_ptr<Statement>> &statements) {
         std::vector<FunctionWork> functions{{&statements, {}}};
         for (size_t i = 0; i < functions.size(); ++i) {
+            Fission::CheckDecompileDeadline();
             SplitRecursiveInitializers(*functions[i].body);
             m_excludedNames = functions[i].capturedNames;
             m_locallyCapturedNames.clear();
@@ -341,8 +343,10 @@ class DeclarationHoister {
 
     // walk a real scope: record decls + accesses at scopeId, descend into child scopes.
     void WalkBlock(std::vector<std::shared_ptr<Statement>> &stmts, int scopeId) {
-        for (auto &s : stmts)
+        for (auto &s : stmts) {
+            Fission::CheckDecompileDeadline();
             WalkStmt(s, scopeId);
+        }
     }
 
     void WalkStmt(const std::shared_ptr<Statement> &s, int scopeId) {

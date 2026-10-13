@@ -29,6 +29,20 @@ namespace Luau::Compile {
     BuiltinInfo getBuiltinInfo(int bfid);
 } // namespace Luau::Compile
 
+// Length-boundary fidelity helper (defined below): construction history is observable via `#`
+// on holey tables, so the lifter must preserve it there.
+struct TableLengthWindow {
+    bool isNewtable = false;
+    int32_t hintHashRaw = -1;                 // NEWTABLE B operand (encoded hash size); -1 when not NEWTABLE
+    int32_t hintArray = 0;                    // NEWTABLE AUX array size; 0 when not NEWTABLE
+    int32_t sequentialArrayPred = 0;          // TableShape rule over direct numeric stores, in order
+    size_t distinctDotKeys = 0;               // distinct string-constant keys of window SETTABLEKS stores
+    bool possibleHole = false;                // nil-able index with a later non-nil index (absolute)
+    bool bulkHole = false;                    // a later bulk SETLIST with an interior nil (relative positions)
+    std::unordered_set<int32_t> storeIndices; // instruction indices of the window's stores
+};
+static TableLengthWindow AnalyzeTableLengthWindow(const AnalyzedFunction *function, const LiftedInstruction &inst, int32_t tableReg, int32_t tableVersion);
+
 std::shared_ptr<Expression> ASTLifter::ConstantLiteral(int32_t index) const {
     const auto &k = ConstantAt(index);
     switch (k.kType) {
@@ -677,7 +691,24 @@ std::shared_ptr<Expression> ASTLifter::LiftStoreTarget(const LiftedInstruction &
         return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(m_currentFunction->GetUpvalueName(store.operands[1].value.imm.n)));
     case LiftedOperation::SETTABLEKS: {
         auto table = LiftExpression(store.operands[1]);
-        return Fission::MakeShared<MemberExpressionNode>(table, std::get<std::string>(ConstantAt(store.operands[2].value.imm.k).constantData));
+        const std::string &key = std::get<std::string>(ConstantAt(store.operands[2].value.imm.k).constantData);
+        // A keyed store into a table the compiler predicted as hash-free (`local t = {}` with no
+        // dot-assignments) stays in bracket form when the table can hold an interior hole: dot
+        // form would predict a hash entry and, on recompilation, observe a different length
+        // boundary. Hole-free tables keep dot form (and method sugar); their boundary is
+        // history-insensitive. Bracket form is always hint-faithful here: with no prediction
+        // (opt 0, or an untracked table) the hint stays hash-free either way.
+        const auto &tableOperand = store.operands[1];
+        const auto *tableDef = m_currentFunction->GetDefinition(tableOperand);
+        bool bracketKey = false;
+        if (tableDef && tableDef->operation == LiftedOperation::NEWTABLE && tableDef->operands.size() > 1 &&
+            tableDef->operands[1].type == LiftedOperandType::ImmediateInteger && tableDef->operands[1].value.imm.n == 0) {
+            const auto window = AnalyzeTableLengthWindow(m_currentFunction, *tableDef, tableOperand.value.reg, tableOperand.ssaVersion);
+            bracketKey = window.possibleHole;
+        }
+        if (bracketKey)
+            return Fission::MakeShared<IndexExpressionNode>(table, Fission::MakeShared<StringLiteralNode>(key));
+        return Fission::MakeShared<MemberExpressionNode>(table, key);
     }
     case LiftedOperation::SETTABLEN: {
         // the immediate is index - 1
@@ -697,27 +728,40 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
     if (inst.operation == LiftedOperation::NEWTABLE) {
         std::vector<std::pair<const LiftedInstruction *, const LiftedInstruction *>> chain;
         const LiftedInstruction *current = &inst;
+        const LiftedInstruction *emptyBottom = nullptr;
         bool complete = false;
         while (current->operation == LiftedOperation::NEWTABLE) {
             const auto &output = current->operands[0];
             const auto users = m_currentFunction->users.find({static_cast<uint8_t>(output.value.reg), output.ssaVersion});
-            if (users == m_currentFunction->users.end())
-                break;
             const LiftedInstruction *store = nullptr;
-            for (const auto *user : users->second) {
-                const size_t target = user->operation == LiftedOperation::SETLIST ? 0 : 1;
-                if ((user->operation != LiftedOperation::SETLIST && user->operation != LiftedOperation::SETTABLE &&
-                     user->operation != LiftedOperation::SETTABLEKS && user->operation != LiftedOperation::SETTABLEN) ||
-                    user->operands.size() <= target || user->operands[target].type != LiftedOperandType::Register ||
-                    user->operands[target].value.reg != output.value.reg || user->operands[target].ssaVersion != output.ssaVersion)
-                    continue;
-                if (store && store != user) {
-                    store = nullptr;
-                    break;
+            bool conflict = false;
+            if (users != m_currentFunction->users.end())
+                for (const auto *user : users->second) {
+                    const size_t target = user->operation == LiftedOperation::SETLIST ? 0 : 1;
+                    if ((user->operation != LiftedOperation::SETLIST && user->operation != LiftedOperation::SETTABLE &&
+                         user->operation != LiftedOperation::SETTABLEKS && user->operation != LiftedOperation::SETTABLEN) ||
+                        user->operands.size() <= target || user->operands[target].type != LiftedOperandType::Register ||
+                        user->operands[target].value.reg != output.value.reg || user->operands[target].ssaVersion != output.ssaVersion)
+                        continue;
+                    if (store && store != user) {
+                        conflict = true;
+                        break;
+                    }
+                    store = user;
                 }
-                store = user;
+            if (conflict)
+                break;
+            if (!store) {
+                // Nothing populates this table: an empty `{}` bottom closes an otherwise
+                // single-element chain iteratively instead of recursing once per level
+                // (native stack overflow past ~200 nested constructors in debug builds).
+                if (!chain.empty()) {
+                    emptyBottom = current;
+                    complete = true;
+                }
+                break;
             }
-            if (!store || store->operation != LiftedOperation::SETLIST || store->operands.size() < 4 || store->operands[2].value.imm.n != 2 ||
+            if (store->operation != LiftedOperation::SETLIST || store->operands.size() < 4 || store->operands[2].value.imm.n != 2 ||
                 store->operands[3].value.imm.n != 1)
                 break;
             const auto values = SetListElements(*store);
@@ -733,8 +777,8 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                 break;
             current = child;
         }
-        if (complete && chain.size() > 1) {
-            std::shared_ptr<Expression> value = LiftSetListElement(*chain.back().second, 0, true);
+        if (complete && (chain.size() > 1 || emptyBottom)) {
+            std::shared_ptr<Expression> value = emptyBottom ? Fission::MakeShared<TableLiteralNode>() : LiftSetListElement(*chain.back().second, 0, true);
             for (auto it = chain.rbegin(); it != chain.rend(); ++it) {
                 value = Fission::MakeShared<TableLiteralNode>(std::vector<std::shared_ptr<Expression>>{value});
                 m_emission.MarkEmitted(it->second->instructionIndex);
@@ -742,6 +786,10 @@ std::shared_ptr<TableLiteralNode> ASTLifter::LiftTableLiteral(const LiftedInstru
                     m_emission.MarkInlineConsumed(it->first->instructionIndex);
                     ConsumeInlinedInputs(*it->first);
                 }
+            }
+            if (emptyBottom) {
+                m_emission.MarkInlineConsumed(emptyBottom->instructionIndex);
+                ConsumeInlinedInputs(*emptyBottom);
             }
             return std::static_pointer_cast<TableLiteralNode>(value);
         }
@@ -759,6 +807,236 @@ static std::unordered_set<std::string> TemplateKeys(const LiftedInstruction &ins
             keys.insert(shape.keys.begin(), shape.keys.end());
         }
     return keys;
+}
+
+// True when `operand` is statically nil: an explicit nil immediate, a nil constant, or a
+// LOAD/MOVE chain resolving to one. SSA versions pin values, so following the chain is sound.
+static bool TableOperandIsNil(const AnalyzedFunction *function, const LiftedOperand &operand, int depth = 0) {
+    if (depth > 16)
+        return false;
+    switch (operand.type) {
+    case LiftedOperandType::ImmediateNil:
+        return true;
+    case LiftedOperandType::ImmediateConstant: {
+        const auto &constants = function->lpLiftedFunction->lpDeserialized->constants;
+        const auto index = operand.value.imm.k;
+        // Class shapes reuse LUA_TNIL but are not nil values.
+        return index >= 0 && static_cast<size_t>(index) < constants.size() && constants[index].kType == LUA_TNIL && !constants[index].IsClassShape();
+    }
+    case LiftedOperandType::Register: {
+        const auto *def = function->GetDefinition(operand);
+        if (!def || def->operands.size() < 2)
+            return false;
+        if (def->operation == LiftedOperation::LOAD || def->operation == LiftedOperation::MOVE)
+            return TableOperandIsNil(function, def->operands[1], depth + 1);
+        return false;
+    }
+    default:
+        return false;
+    }
+}
+
+// True when `operand` provably cannot hold nil at runtime: closures, fresh tables, non-nil
+// immediates and constants, and LOAD/MOVE chains resolving to those. Anything else (calls,
+// index and global reads, parameters, varargs, phi merges, short-circuit values) can be nil.
+// An over-narrow answer only misses a rescue (status quo); an over-broad one only keeps a
+// constructor (still faithful on dense tables), so this list stays tight on purpose.
+static bool TableOperandIsProvenNonNil(const AnalyzedFunction *function, const LiftedOperand &operand, int depth = 0) {
+    if (depth > 16)
+        return false;
+    switch (operand.type) {
+    case LiftedOperandType::ImmediateNil:
+        return false;
+    case LiftedOperandType::ImmediateInteger:
+    case LiftedOperandType::ImmediateBool:
+    case LiftedOperandType::ImmediateAux:
+        return true;
+    case LiftedOperandType::ImmediateConstant: {
+        const auto &constants = function->lpLiftedFunction->lpDeserialized->constants;
+        const auto index = operand.value.imm.k;
+        return index >= 0 && static_cast<size_t>(index) < constants.size() && constants[index].kType != LUA_TNIL;
+    }
+    case LiftedOperandType::Register: {
+        const auto *def = function->GetDefinition(operand);
+        if (!def || def->operands.empty())
+            return false;
+        switch (def->operation) {
+        case LiftedOperation::NEWCLOSURE:
+        case LiftedOperation::DUPCLOSURE:
+        case LiftedOperation::NEWTABLE:
+        case LiftedOperation::DUPTABLE:
+            return true;
+        case LiftedOperation::LOAD:
+        case LiftedOperation::MOVE:
+            if (def->operands.size() < 2)
+                return false;
+            return TableOperandIsProvenNonNil(function, def->operands[1], depth + 1);
+        default:
+            return false;
+        }
+    }
+    default:
+        return false;
+    }
+}
+
+// 1-based array index written by an incremental store with a statically known numeric key.
+static std::optional<int32_t> TableArrayStoreIndex(const AnalyzedFunction *function, const LiftedInstruction &store) {
+    if (store.operation == LiftedOperation::SETTABLEN && store.operands.size() > 2)
+        return store.operands[2].value.imm.n + 1;
+    if (store.operation == LiftedOperation::SETTABLE && store.operands.size() > 2) {
+        // O0 keeps numeric keys generic (`t[1] = x` via a constant load); only integral keys >= 1 address the array part.
+        LiftedOperand key = store.operands[2];
+        for (int depth = 0; depth < 16; ++depth) {
+            if (key.type == LiftedOperandType::ImmediateInteger)
+                return key.value.imm.n >= 1 ? std::optional<int32_t>(key.value.imm.n) : std::nullopt;
+            if (key.type == LiftedOperandType::ImmediateConstant) {
+                const auto &constants = function->lpLiftedFunction->lpDeserialized->constants;
+                const auto index = key.value.imm.k;
+                if (index < 0 || static_cast<size_t>(index) >= constants.size())
+                    return std::nullopt;
+                const auto &constant = constants[index];
+                if (constant.kType != LUA_TNUMBER)
+                    return std::nullopt;
+                const double value = std::get<LuauNumber>(constant.constantData);
+                if (value < 1.0 || value > 2147483647.0)
+                    return std::nullopt;
+                const auto asIndex = static_cast<int32_t>(value);
+                if (static_cast<double>(asIndex) != value)
+                    return std::nullopt;
+                return asIndex;
+            }
+            if (key.type != LiftedOperandType::Register)
+                return std::nullopt;
+            const auto *def = function->GetDefinition(key);
+            if (!def || def->operands.size() < 2 || (def->operation != LiftedOperation::LOAD && def->operation != LiftedOperation::MOVE))
+                return std::nullopt;
+            key = def->operands[1];
+        }
+    }
+    return std::nullopt;
+}
+
+// Distinct dot-form key count within the NEWTABLE encoded-hash-size range (0 for v=0,
+// ceil(log2(v))+1 otherwise): v=0 -> {0}, v=1 -> {1}, v>=2 -> (2^(e-2), 2^(e-1)].
+static bool DotKeyCountMatchesHint(size_t dots, int32_t hintHashRaw) {
+    if (hintHashRaw == 0)
+        return dots == 0;
+    if (hintHashRaw < 1 || hintHashRaw > 30)
+        return true;
+    const size_t low = hintHashRaw == 1 ? size_t{1} : (size_t{1} << (hintHashRaw - 2)) + 1;
+    const size_t high = hintHashRaw == 1 ? size_t{1} : (size_t{1} << (hintHashRaw - 1));
+    return dots >= low && dots <= high;
+}
+
+// Whether a holey window keeps its constructor: a bulk hole (explicit or nil-able), or a
+// non-sequential bulk shape (explicit keys compiled as hash entries) that refolding alone
+// cannot reproduce. Keeping the constructor is always faithful (dense tables agree across
+// histories), so this may fire on merely possible holes.
+static bool LengthRescueActive(const TableLengthWindow &window) {
+    return window.possibleHole && (window.bulkHole || (window.isNewtable && window.hintHashRaw != 0 && window.hintArray != window.sequentialArrayPred));
+}
+static TableLengthWindow AnalyzeTableLengthWindow(const AnalyzedFunction *function, const LiftedInstruction &inst, int32_t tableReg, int32_t tableVersion) {
+    TableLengthWindow window{};
+    if (inst.operation == LiftedOperation::NEWTABLE && inst.operands.size() > 2 && inst.operands[1].type == LiftedOperandType::ImmediateInteger &&
+        inst.operands[2].type == LiftedOperandType::ImmediateInteger) {
+        window.isNewtable = true;
+        window.hintHashRaw = inst.operands[1].value.imm.n;
+        window.hintArray = inst.operands[2].value.imm.n;
+    }
+    const auto users = function->users.find({static_cast<uint8_t>(tableReg), tableVersion});
+    if (users == function->users.end())
+        return window;
+    struct ArrayWrite {
+        int32_t instructionIndex;
+        int32_t arrayIndex;
+        bool isNil;
+        bool couldBeNil;
+        bool countsForPrediction;
+    };
+    std::vector<ArrayWrite> writes;
+    std::unordered_set<int32_t> dotKeys;
+    for (const auto *user : users->second) {
+        if (!user)
+            continue;
+        const size_t tableOperand = user->operation == LiftedOperation::SETLIST ? 0 : 1;
+        if ((user->operation != LiftedOperation::SETLIST && user->operation != LiftedOperation::SETTABLE && user->operation != LiftedOperation::SETTABLEKS &&
+             user->operation != LiftedOperation::SETTABLEN) ||
+            user->operands.size() <= tableOperand || user->operands[tableOperand].type != LiftedOperandType::Register ||
+            user->operands[tableOperand].value.reg != tableReg || user->operands[tableOperand].ssaVersion != tableVersion)
+            continue;
+        window.storeIndices.insert(user->instructionIndex);
+        if (user->operation == LiftedOperation::SETTABLEKS && user->operands.size() > 2 && user->operands[2].type == LiftedOperandType::ImmediateConstant)
+            dotKeys.insert(user->operands[2].value.imm.k);
+        if (user->operation == LiftedOperation::SETLIST) {
+            if (user->operands.size() < 4 || user->operands[3].type != LiftedOperandType::ImmediateInteger ||
+                user->operands[1].type != LiftedOperandType::Register)
+                continue;
+            const auto versions = function->implicitUses.find(user);
+            if (versions == function->implicitUses.end())
+                continue;
+            const int32_t startReg = user->operands[1].value.reg;
+            // SETLIST indices come from the AUX start index, not the sequential rule
+            int32_t elementIndex = user->operands[3].value.imm.n;
+            if (user->instructionIndex > inst.instructionIndex) {
+                bool seenNil = false;
+                size_t position = 0;
+                for (const int32_t version : versions->second) {
+                    LiftedOperand element{};
+                    element.type = LiftedOperandType::Register;
+                    element.value.reg = startReg + static_cast<int32_t>(position++);
+                    element.ssaVersion = version;
+                    const bool isNil = TableOperandIsNil(function, element);
+                    if (isNil)
+                        seenNil = true;
+                    // only a later non-nil-valued entry forms a second border with the hole
+                    else if (seenNil)
+                        window.bulkHole = true;
+                }
+            }
+            size_t position = 0;
+            for (const int32_t version : versions->second) {
+                LiftedOperand element{};
+                element.type = LiftedOperandType::Register;
+                element.value.reg = startReg + static_cast<int32_t>(position++);
+                element.ssaVersion = version;
+                if (elementIndex >= 1) {
+                    const bool isNil = TableOperandIsNil(function, element);
+                    writes.push_back({user->instructionIndex, elementIndex, isNil, isNil || !TableOperandIsProvenNonNil(function, element), false});
+                }
+                ++elementIndex;
+            }
+            continue;
+        }
+        // Only direct numeric stores predict array size (TableShape sees constants, and only
+        // IndexNumber lowers to SETTABLEN); resolved-through-register keys still leave holes.
+        const bool directNumeric =
+            user->operation == LiftedOperation::SETTABLEN && user->operands.size() > 2 && user->operands[2].type == LiftedOperandType::ImmediateInteger;
+        const auto index = TableArrayStoreIndex(function, *user);
+        if (!index || *index < 1 || user->operands.empty())
+            continue;
+        const bool isNil = TableOperandIsNil(function, user->operands[0]);
+        writes.push_back({user->instructionIndex, *index, isNil, isNil || !TableOperandIsProvenNonNil(function, user->operands[0]), directNumeric});
+    }
+    std::ranges::sort(writes, {}, &ArrayWrite::instructionIndex);
+    window.distinctDotKeys = dotKeys.size();
+    std::unordered_map<int32_t, std::pair<bool, bool>> holeByIndex; // index -> {isNil, couldBeNil}
+    for (const auto &write : writes) {
+        if (write.countsForPrediction && write.arrayIndex == window.sequentialArrayPred + 1)
+            window.sequentialArrayPred = write.arrayIndex;
+        holeByIndex[write.arrayIndex] = {write.isNil, write.couldBeNil};
+    }
+    for (const auto &[index, hole] : holeByIndex) {
+        if (!hole.second)
+            continue;
+        for (const auto &[other, later] : holeByIndex) {
+            if (other > index && !later.first) {
+                window.possibleHole = true;
+                break;
+            }
+        }
+    }
+    return window;
 }
 
 std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const LiftedInstruction &inst, bool assumeInlined) {
@@ -890,6 +1168,12 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
     // Only a field the source constructor held qualifies: an all-record constructor is a DUPTABLE whose template
     // names the key; a mixed one has list items, flushed before its keyed items, and reserves exactly its keyed
     // fields in NEWTABLE's hash size; `local t = {}` has neither, its sizes predicted from later stores.
+    // A later bulk SETLIST holding an interior nil hole forces the constructor to stay regardless of order:
+    // splitting it into stores would observe a different length boundary, so a keyed closure scanned
+    // before that SETLIST still parks in the constructor. A non-sequential bulk shape (explicit keys
+    // compiled as hash entries) likewise pins the constructor: refolding is the only faithful form.
+    const TableLengthWindow lengthWindow = AnalyzeTableLengthWindow(m_currentFunction, inst, tableReg, tableVersion);
+    const bool lengthRescue = LengthRescueActive(lengthWindow);
     size_t keyedFields = 0;
     const int32_t hashSizeLog = inst.operation == LiftedOperation::NEWTABLE ? inst.operands[1].value.imm.n : 0;
     const size_t hashCapacity = hashSizeLog > 0 && hashSizeLog < 32 ? size_t{1} << (hashSizeLog - 1) : 0;
@@ -912,9 +1196,9 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
         if (store->operation == LiftedOperation::SETTABLEKS) {
             if (inst.operation == LiftedOperation::DUPTABLE
                     ? !templateKeys.contains(std::get<std::string>(ConstantAt(store->operands[2].value.imm.k).constantData))
-                    : !bFoundSetList || keyedFields >= hashCapacity)
+                    : (!bFoundSetList && !lengthRescue) || keyedFields >= hashCapacity)
                 return false;
-        } else if (!templateStore && store->operation != LiftedOperation::SETLIST && (!bFoundSetList || keyedFields >= hashCapacity)) {
+        } else if (!templateStore && store->operation != LiftedOperation::SETLIST && ((!bFoundSetList && !lengthRescue) || keyedFields >= hashCapacity)) {
             return false;
         }
         const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
@@ -1205,6 +1489,12 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
                 if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
                     break;
                 if (candidate.operands[1].value.reg == tableReg) {
+                    // A store folded after the bulk part of a hash-free holey bulk table changes
+                    // the shape prediction (and the layout); the bulk stays folded, the tail
+                    // renders as statements with the original history. Keyed stores the source
+                    // constructor held (hash-predicted) keep folding.
+                    if (bFoundSetList && lengthWindow.isNewtable && lengthWindow.hintHashRaw == 0 && lengthWindow.bulkHole)
+                        break;
                     const bool closure = closureField(candidate.operands[0]);
                     if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
                                      (tableIsLocal && readsLaterName(candidate.operands[0]))))
@@ -1216,6 +1506,8 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
                 if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
                     break;
                 if (candidate.operands[1].value.reg == tableReg) {
+                    if (bFoundSetList && lengthWindow.isNewtable && lengthWindow.hintHashRaw == 0 && lengthWindow.bulkHole)
+                        break;
                     const bool closure = closureField(candidate.operands[0]);
                     if (!closure && (readsTableReg(candidate.operands[0]) || !(valueFoldable(candidate.operands[0]) || earlierLocal(candidate.operands[0])) ||
                                      (tableIsLocal && readsLaterName(candidate.operands[0]))))
@@ -1227,6 +1519,8 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
                 if (candidate.operands[1].value.reg == tableReg && candidate.operands[1].ssaVersion != tableVersion)
                     break;
                 if (candidate.operands[1].value.reg == tableReg) {
+                    if (bFoundSetList && lengthWindow.isNewtable && lengthWindow.hintHashRaw == 0 && lengthWindow.bulkHole)
+                        break;
                     if (m_setListKeySnapshots.contains(&candidate))
                         break;
                     const bool closure = closureField(candidate.operands[0]);
@@ -1268,8 +1562,27 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
         const auto stranded = std::ranges::find_if(carried, [&](const auto &effect) {
             return std::ranges::none_of(plan.stores, [&](const auto &store) { return store.index == effect.second; });
         });
-        if (stranded == carried.end())
+        if (stranded == carried.end()) {
+            // Merging incremental stores into a bulk constructor changes the length boundary Luau
+            // observes for a table with an interior hole (`#t` depends on construction history, not
+            // just content). A plan without any bulk SETLIST folds pure stores, so decline it when
+            // the window is stores-origin (the hint array matches the sequential prediction, or the
+            // table carries no usable hint) and the fold would change history: any partial fold, or
+            // a full fold whose dot keys the hint never predicted. Bulk-origin plans (a SETLIST, or
+            // explicit keys compiled as hash entries) keep their history either way.
+            if (!bFoundSetList && lengthWindow.possibleHole &&
+                (!lengthWindow.isNewtable ||
+                 (lengthWindow.hintArray == lengthWindow.sequentialArrayPred
+                      ? (std::ranges::any_of(
+                             lengthWindow.storeIndices,
+                             [&](int32_t index) { return std::ranges::none_of(plan.stores, [&](const auto &store) { return store.index == index; }); }
+                         ) ||
+                         !DotKeyCountMatchesHint(lengthWindow.distinctDotKeys, lengthWindow.hintHashRaw))
+                      : (lengthWindow.hintHashRaw == 0)))) {
+                plan.stores.clear();
+            }
             return plan;
+        }
         scanEnd = stranded->first;
     }
 }
@@ -1295,6 +1608,20 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
             }
         }
     const size_t templateEntries = elements.size();
+
+    // A rescued plan preserves a General-flavored bulk shape: without any bulk SETLIST of its
+    // own, string keys render bracketed so the recompile keeps them out of the record count
+    // (which would reallocate the array part and move the length boundary). Templates and
+    // bulk-positional plans keep their existing forms.
+    const auto renderWindow = AnalyzeTableLengthWindow(m_currentFunction, inst, inst.operands[0].value.reg, inst.operands[0].ssaVersion);
+    const bool generalKeys =
+        inst.operation == LiftedOperation::NEWTABLE && LengthRescueActive(renderWindow) &&
+        std::ranges::none_of(plan.stores, [&](const auto &store) { return instructions[store.index].operation == LiftedOperation::SETLIST; });
+    const auto tableKey = [&](const std::string &key) -> std::shared_ptr<Expression> {
+        if (generalKeys)
+            return Fission::MakeShared<StringLiteralNode>(key);
+        return MakeTableKey(key);
+    };
 
     const auto value = [&](const LiftedOperand &operand, bool closureSlot) -> std::shared_ptr<Expression> {
         if (!closureSlot || !plan.tableIsLocal)
@@ -1327,7 +1654,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
             const auto &k = ConstantAt(candidate.operands[2].value.imm.k);
             elements.push_back(
                 Fission::MakeShared<BinaryExpressionNode>(
-                    "=", MakeTableKey(std::get<std::string>(k.constantData)), value(candidate.operands[0], store.closureSlots[0])
+                    "=", tableKey(std::get<std::string>(k.constantData)), value(candidate.operands[0], store.closureSlots[0])
                 )
             );
             ConsumeInlinedDefs(candidate.operands[0]);
@@ -1359,7 +1686,7 @@ std::shared_ptr<TableLiteralNode> ASTLifter::RenderTableLiteral(const LiftedInst
     for (auto &element : elements)
         if (const auto keyed = std::dynamic_pointer_cast<TableBinaryExpressionNode>(element))
             if (const auto str = AsLiteral<StringLiteralNode>(keyed->left); str && (bFoundSetList || templateKeys.contains(str->value)))
-                element = Fission::MakeShared<BinaryExpressionNode>("=", MakeTableKey(str->value), keyed->right);
+                element = Fission::MakeShared<BinaryExpressionNode>("=", tableKey(str->value), keyed->right);
     const auto literal = [](const std::shared_ptr<Expression> &value) {
         return AsLiteral<NilLiteralNode>(value) || AsLiteral<BooleanLiteralNode>(value) || AsLiteral<NumberLiteralNode>(value) ||
                AsLiteral<StringLiteralNode>(value);

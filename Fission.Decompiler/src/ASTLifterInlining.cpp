@@ -6,6 +6,7 @@
 #include "ASTLifterShared.hpp"
 #include "DenominatorAnalysis.hpp"
 #include "SSABuilder.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <array>
@@ -155,6 +156,18 @@ bool ASTLifter::DeclaresLocal(const LiftedInstruction &inst, const LiftedOperand
            (m_valueCapturedValues.contains({static_cast<uint8_t>(target.value.reg), target.ssaVersion}) || BeginsDebugLocal(inst, target.value.reg));
 }
 
+// A later write to a captured register whose declaration was never emitted (a multret-empty
+// value leaves no defining instruction) assigns the binding the hoister will declare for the
+// capture. Declaring here would shadow it per scope (a loop body re-runs the declaration) and
+// detach the capture and later reads from the value. Gated past the first-definition window so
+// an initial store still declares.
+bool ASTLifter::AssignsCapturedOrphan(const LiftedInstruction &inst) const {
+    // Versions 0-1 cover parameters and the initial definition; anything past that is a later write.
+    constexpr int kFirstDefinitionVersionMax = 1;
+    return !inst.operands.empty() && inst.operands[0].type == LiftedOperandType::Register && inst.operands[0].ssaVersion > kFirstDefinitionVersionMax &&
+           m_capturedRegisters.contains(inst.operands[0].value.reg);
+}
+
 static bool SameRegisterValue(const LiftedOperand &a, const LiftedOperand &b) {
     return a.type == LiftedOperandType::Register && b.type == LiftedOperandType::Register && a.value.reg == b.value.reg && a.ssaVersion == b.ssaVersion;
 }
@@ -189,6 +202,7 @@ void ASTLifter::CollectCompoundAssignments() {
     const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
     const auto refOf = [](const LiftedOperand &operand) { return SSARef{static_cast<uint8_t>(operand.value.reg), operand.ssaVersion}; };
     for (const auto &store : instructions) {
+        Fission::CheckDecompileDeadline();
         const size_t targetOperands = store.operation == LiftedOperation::SETTABLE ? 3 : 2;
         if (store.operands.size() < targetOperands || store.operands[0].type != LiftedOperandType::Register)
             continue;
@@ -240,6 +254,7 @@ void ASTLifter::CollectCompoundAssignments() {
 void ASTLifter::KeepOrderedCompoundAssignments() {
     const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
     for (bool dropped = true; dropped;) {
+        Fission::CheckDecompileDeadline();
         dropped = false;
         m_shouldInlineMemo.clear();
         m_inlineBinaryDepth.clear();
@@ -355,8 +370,11 @@ bool ASTLifter::MustMaterialize(const LiftedInstruction *inst) {
                 const bool invariantCopy =
                     inst->operation == LiftedOperation::MOVE && inst->operands.size() > 1 && inst->operands[1].type == LiftedOperandType::Register;
                 if (std::ranges::none_of(m_loopsOfBlock[useBlock], [&](uint32_t index) {
-                        const auto &loop = m_loops[index];
-                        return !loop.blocks[defBlock] && !(invariantCopy && !loop.writes.test(inst->operands[1].value.reg));
+                        // Loop membership lives in the def block's own loop list (nesting-depth
+                        // long); the def is outside this loop when the list lacks its index.
+                        const auto &defLoops = m_loopsOfBlock[defBlock];
+                        return std::ranges::find(defLoops, index) == defLoops.end() &&
+                               !(invariantCopy && !m_loops[index].writes.test(inst->operands[1].value.reg));
                     }))
                     continue;
                 ExplainKeep(inst, "its use repeats with a loop the definition is outside of", user);
@@ -1033,31 +1051,41 @@ void ASTLifter::ComputeLoopBodies() {
     const auto &blocks = m_currentFunction->basicBlocks;
     m_loopsOfBlock.assign(blocks.size(), {});
     boost::unordered_flat_map<uint32_t, size_t> byHeader;
+    // Per-loop visited sets: floods of different loops overlap (nesting) and must not share
+    // marks, while merged latches of one header share theirs to avoid duplicate members.
+    std::vector<boost::unordered_flat_set<uint32_t>> seenByLoop;
     for (const auto &latch : blocks) {
+        Fission::CheckDecompileDeadline();
+        if (latch.bType == BlockType::LoopLatch)
+            m_hasLoopLatch = true;
         if (latch.bType != BlockType::LoopLatch || !latch.loopHeader || *latch.loopHeader >= blocks.size())
             continue;
         const uint32_t header = *latch.loopHeader;
         const auto [it, fresh] = byHeader.try_emplace(header, m_loops.size());
-        if (fresh)
-            m_loops.push_back({std::vector<bool>(blocks.size(), false), {}});
-        auto &loop = m_loops[it->second];
-        loop.blocks[header] = true;
+        if (fresh) {
+            m_loops.push_back({{}, {}, header, latch.dwBlockId});
+            seenByLoop.emplace_back();
+            seenByLoop.back().insert(header);
+            m_loops.back().members.push_back(header);
+        }
+        const size_t loopIndex = it->second;
+        auto &loop = m_loops[loopIndex];
+        auto &seen = seenByLoop[loopIndex];
         std::vector<uint32_t> pending{latch.dwBlockId};
         while (!pending.empty()) {
             const uint32_t id = pending.back();
             pending.pop_back();
-            if (id >= blocks.size() || loop.blocks[id])
+            if (id >= blocks.size() || !seen.insert(id).second)
                 continue;
-            loop.blocks[id] = true;
+            loop.members.push_back(id);
             for (const uint32_t previous : blocks[id].predecessors)
                 pending.push_back(previous);
         }
     }
     for (size_t index = 0; index < m_loops.size(); ++index) {
+        Fission::CheckDecompileDeadline();
         auto &loop = m_loops[index];
-        for (uint32_t id = 0; id < blocks.size(); ++id) {
-            if (!loop.blocks[id])
-                continue;
+        for (const uint32_t id : loop.members) {
             m_loopsOfBlock[id].push_back(static_cast<uint32_t>(index));
             for (const auto *instruction = blocks[id].lpHead; instruction && instruction <= blocks[id].lpTail; ++instruction)
                 if (const auto defs = m_defsByInstruction.find(instruction); defs != m_defsByInstruction.end())

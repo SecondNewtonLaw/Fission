@@ -5,6 +5,7 @@
 #include "AbstractSyntaxTree/Traversal.hpp"
 #include "FissionAllocator.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <algorithm>
 #include <memory>
@@ -257,6 +258,7 @@ class IfExpressionFolder {
 
     void FoldLevel(std::vector<std::shared_ptr<Statement>> &stmts) {
         for (size_t i = 0; i < stmts.size(); ++i) {
+            Fission::CheckDecompileDeadline();
             auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmts[i]);
             if (!ifStmt)
                 continue;

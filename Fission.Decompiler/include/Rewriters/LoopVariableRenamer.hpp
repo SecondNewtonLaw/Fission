@@ -3,6 +3,7 @@
 #pragma once
 #include "AbstractSyntaxTree/ASTNode.hpp"
 #include "Rewriters/ScopeAwareRenamer.hpp"
+#include "SafetyGuard.hpp"
 
 #include <cctype>
 #include <memory>
@@ -98,6 +99,7 @@ class LoopVariableRenamer {
     void WalkBlock(std::vector<std::shared_ptr<Statement>> &stmts, std::unordered_set<std::string> &active) {
         std::vector<std::string> added;
         for (auto &s : stmts) {
+            Fission::CheckDecompileDeadline();
             WalkStmt(s, active);
             AddBindings(s, active, added);
         }

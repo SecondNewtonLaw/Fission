@@ -1,4 +1,5 @@
 #include "DenominatorAnalysis.hpp"
+#include "SafetyGuard.hpp"
 
 std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &func) {
     const auto &blocks = func.basicBlocks;
@@ -24,6 +25,7 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
 
     std::vector<int> dfsNumber(Nmax, -1);
     int dfsTime = 0;
+    std::vector<int> chainScratch;
 
     // recursion overflows the stack on CFGs with hundreds of blocks; walk with an explicit stack.
     {
@@ -68,20 +70,38 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
 
     const int N = dfsTime;
 
-    auto compress = [&](auto &self, int v) -> void {
-        int a = ancestor[v];
-        if (ancestor[a] != -1) {
-            self(self, a);
-            if (semi[best[a]] < semi[best[v]])
-                best[v] = best[a];
-            ancestor[v] = ancestor[a];
+    auto compress = [&](int v) {
+        // Iterative path compression: the recursive formulation overflows the native stack on
+        // long ancestor chains (tens of thousands of blocks from generated straight-line code
+        // reach this through debug-local resolution, the only caller of AnalyzeDenominators).
+        // Descend collecting frames, then unwind deepest-first, reading the same values the
+        // recursion would observe after each nested call returns.
+        if (v < 0 || v >= Nmax || ancestor[v] == -1)
+            return;
+        chainScratch.clear();
+        int cur = v;
+        while (cur >= 0 && cur < Nmax) {
+            const int a = ancestor[cur];
+            if (a < 0 || a >= Nmax || ancestor[a] == -1)
+                break;
+            chainScratch.push_back(cur);
+            cur = a;
+        }
+        for (auto it = chainScratch.rbegin(); it != chainScratch.rend(); ++it) {
+            const int node = *it;
+            const int a = ancestor[node];
+            if (a < 0 || a >= Nmax)
+                continue;
+            if (semi[best[a]] < semi[best[node]])
+                best[node] = best[a];
+            ancestor[node] = ancestor[a];
         }
     };
 
     auto eval = [&](int v) {
         if (ancestor[v] == -1)
             return v;
-        compress(compress, v);
+        compress(v);
         return best[v];
     };
 
@@ -93,6 +113,8 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
     const auto inRange = [&](int x) { return x >= 0 && x < Nmax; };
 
     for (int i = N - 1; i >= 1; i--) {
+        if ((i & 0xFF) == 0)
+            Fission::CheckDecompileDeadline();
         int w = vertex[i];
         if (!inRange(w))
             continue;
@@ -162,6 +184,8 @@ std::map<int32_t, DominatorInfo> AnalyzeDenominators(const AnalyzedFunction &fun
     }
 
     for (int i = 0; i < N; i++) {
+        if ((i & 0xFF) == 0)
+            Fission::CheckDecompileDeadline();
         int blkIdx = vertex[i];
         int32_t blkId = blocks[blkIdx].dwBlockId;
 

@@ -735,8 +735,9 @@ TEST_CASE("Replay: a closure key folds into the constructor", "[Decompiler][Repl
 }
 
 TEST_CASE("Replay: a long tail after an arm that continues into a compound until runs on both paths", "[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local n = 0\nrepeat\n  n += 1\n  if n % 2 == 0 then\n    print(n)\n  else\n    print(-n)\n    if n == 3 then continue end\n  end\n"
-                               "  for i = 1, 2 do\n    for j = 1, 2 do print(i, j) end\n  end\nuntil n > 5 and n < 100";
+    const std::string source =
+        "local n = 0\nrepeat\n  n += 1\n  if n % 2 == 0 then\n    print(n)\n  else\n    print(-n)\n    if n == 3 then continue end\n  end\n"
+        "  for i = 1, 2 do\n    for j = 1, 2 do print(i, j) end\n  end\nuntil n > 5 and n < 100";
     for (int opt = 0; opt <= 2; ++opt)
         replay_divergence::CheckSemanticParity(source, opt, 1);
 }
@@ -761,7 +762,8 @@ TEST_CASE("Replay: an inlined call's result read by a later compound assignment 
 }
 
 TEST_CASE("Replay: a nested if-expression inside a condition stays one condition", "[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local a, b, c = ...\nif a and (if (if b then nil else true) then 1 else c[1]) then\n  print(1)\nelse\n  print(2)\nend\nprint(3)\nreturn 4";
+    const std::string source =
+        "local a, b, c = ...\nif a and (if (if b then nil else true) then 1 else c[1]) then\n  print(1)\nelse\n  print(2)\nend\nprint(3)\nreturn 4";
     for (int opt = 0; opt <= 2; ++opt)
         replay_divergence::CheckSemanticParity(source, opt, 2);
     const replay_divergence::CompileLevels levels(0, 2);
@@ -773,8 +775,9 @@ TEST_CASE("Replay: a nested if-expression inside a condition stays one condition
 }
 
 TEST_CASE("Replay: an inner repeat sharing its header still lets the outer until exit", "[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local n, m = 0, 0\nrepeat\n  repeat\n    for _ in pairs({}) do end\n    n += 1\n  until n % 2 == 0 and (if m then true else false)\n"
-                               "  m += 1\nuntil (if m > 3 then 1 else nil)\nprint(n, m)";
+    const std::string source =
+        "local n, m = 0, 0\nrepeat\n  repeat\n    for _ in pairs({}) do end\n    n += 1\n  until n % 2 == 0 and (if m then true else false)\n"
+        "  m += 1\nuntil (if m > 3 then 1 else nil)\nprint(n, m)";
     for (int opt = 0; opt <= 2; ++opt)
         replay_divergence::CheckSemanticParity(source, opt, 2);
     const replay_divergence::CompileLevels levels(0, 2);
@@ -864,7 +867,8 @@ print(v2, type(v3()))
 }
 
 TEST_CASE("Replay: an empty if after a repeat sharing its header with an inner while stays out of the loop", "[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local a, b, c, d, e = tonumber(\"x\"), tostring, tonumber(\"2\"), { field = 1 }, tonumber(\"1\")\nrepeat\n  while a do\n    if b then\n      break\n    end\n  end\n"
+    const std::string source = "local a, b, c, d, e = tonumber(\"x\"), tostring, tonumber(\"2\"), { field = 1 }, tonumber(\"1\")\nrepeat\n  while a do\n    if "
+                               "b then\n      break\n    end\n  end\n"
                                "until c\nif d.field then\nelse\nend\nif e then\n  print(1)\nelse\n  print(2)\nend\nreturn 1";
     for (int opt = 0; opt <= 2; ++opt) {
         replay_divergence::CheckSemanticParity(source, opt, 1);
@@ -879,7 +883,8 @@ TEST_CASE("Replay: an empty if after a repeat sharing its header with an inner w
 }
 
 TEST_CASE("Replay: a closure stored inside a loop and read after it stays visible past the loop", "[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local function f0()\nend\nrepeat\n  f0 = function()\n    return 1\n  end\n  if f0 then\n    break\n  end\nuntil f0()\nprint(f0())";
+    const std::string source =
+        "local function f0()\nend\nrepeat\n  f0 = function()\n    return 1\n  end\n  if f0 then\n    break\n  end\nuntil f0()\nprint(f0())";
     for (int opt = 0; opt <= 2; ++opt)
         for (int debug = 1; debug <= 2; ++debug)
             replay_divergence::CheckSemanticParity(source, opt, debug);
@@ -1090,13 +1095,14 @@ print(fixed, counted, captured, shadowed))LUA";
     CHECK(result.output.find("const shadowed_2 =") != std::string::npos);
 }
 
-TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item","[Decompiler][ReplayRegress][Semantics]") {
-    const std::string source = "local o = { field = 1, method = function() return 2 end }\nresult = { o.field, [function() end] = { y = 160 }, o:method(), [\"k\"] = 3 }\nprint(#result, result.k)";
+TEST_CASE("Replay: a closure-keyed constructor stored to a global keeps every item", "[Decompiler][ReplayRegress][Semantics]") {
+    const std::string source = "local o = { field = 1, method = function() return 2 end }\nresult = { o.field, [function() end] = { y = 160 }, o:method(), "
+                               "[\"k\"] = 3 }\nprint(#result, result.k)";
     for (int opt = 0; opt <= 2; ++opt)
         replay_divergence::CheckSemanticParity(source, opt, 1);
 }
 
-TEST_CASE("Replay: a named closure keyed between list items folds into the constructor","[Decompiler][ReplayRegress][Semantics]") {
+TEST_CASE("Replay: a named closure keyed between list items folds into the constructor", "[Decompiler][ReplayRegress][Semantics]") {
     const std::string source = "local a = ...\nlocal f = function()\n    return 1\nend\nprint(#{ a, [\"\\n\"] = f, nil, true })";
     replay_divergence::CheckSemanticParity(source, 1, 1);
     const replay_divergence::CompileLevels levels(1, 1);
@@ -1160,7 +1166,8 @@ until table[""].field.field)LUA";
 TEST_CASE("Replay: values and effects keep their evaluation count and order", "[Decompiler][ReplayRegress][Semantics]") {
     const std::vector<std::string> sources{
         // a duplicated loop tail keeps the generic-for's iterator call inside its header
-        "local n = 0\nwhile n < 2 do\n    n += 1\n    if n == 1 then\n    else\n        print(1)\n        if n > 5 then\n            continue\n        end\n    end\n"
+        "local n = 0\nwhile n < 2 do\n    n += 1\n    if n == 1 then\n    else\n        print(1)\n        if n > 5 then\n            continue\n        end\n   "
+        " end\n"
         "    for a, b in pairs({ n }) do\n        print(a, b)\n    end\nend",
         // a value read before a loop is read once, not on every iteration
         "local b = t.field\nlocal n = 0\nrepeat\n    b(n)\n    n += 1\nuntil n > 2",
@@ -1195,5 +1202,69 @@ TEST_CASE("Replay: values and effects keep their evaluation count and order", "[
         const auto reconstructed = fuzz::RunLuauTrace(Luau::compile(result.output, options), prelude);
         CHECK(reconstructed.status == original.status);
         CHECK(reconstructed.trace == original.trace);
+    }
+}
+
+TEST_CASE("Replay: sequential stores with a nil hole do not fold into a constructor", "[Decompiler][ReplayRegress][Semantics]") {
+    // Folding these stores into `{ ab = "h", [1] = "a", [2] = nil, [3] = "c" }` observes #t == 3;
+    // the incremental store history observes #t == 1 (the length boundary of a holey table depends
+    // on its construction history). Bracket keys stay unpredicted so the shape prediction matches.
+    const std::string source = "local t = {}\nt[\"ab\"] = \"h\"\nt[1] = \"a\"\nt[2] = nil\nt[3] = \"c\"\nreturn #t";
+    for (int optimization = 1; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: a constructor with a nil hole does not split into stores", "[Decompiler][ReplayRegress][Semantics]") {
+    // Splitting this constructor into sequential stores observes #t == 1; the bulk SETLIST
+    // history observes #t == 3.
+    const std::string source = "local t = {\n    [\"a\\nb\"] = function()\n        return nil\n    end,\n    function()\n        return pairs\n    end,\n    "
+                               "nil,\n    { x = 1 },\n}\nreturn #t";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: a keyed store after a holey bulk keeps the bulk constructor", "[Decompiler][ReplayRegress][Semantics]") {
+    // Folding the trailing store into the constructor predicts a hash entry the source never
+    // had and observes #t == 3; the bulk history observes #t == 1.
+    const std::string source = "local t = {1, nil, 3}\nt[\"k\"] = 5\nreturn #t";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: a hole left by a call keeps sequential stores out of constructors", "[Decompiler][ReplayRegress][Semantics]") {
+    // The nil only materializes at runtime, but the fold would still observe the wrong length
+    // boundary: #t == 3 instead of #t == 1. (At opt 2 the call inlines, so both agree there.)
+    const std::string source = "local function z()\n    return nil\nend\nlocal t = {}\nt[\"ab\"] = \"h\"\nt[1] = z()\nt[2] = \"c\"\nreturn #t";
+    for (int optimization = 1; optimization <= 2; ++optimization) {
+        INFO("optimization " << optimization);
+        CheckSemanticParity(source, optimization, 2);
+    }
+}
+
+TEST_CASE("Replay: loop-carried captured store survives a shadowing if-expression", "[Decompiler][ReplayRegress][Semantics]") {
+    // The if-expression assigns its arms to shadowing consts and never declares the outer v0
+    // (its then-value is multret-empty), so the loop store saw an undefined register and
+    // declared yet another shadowing local. The capture and the later read then bound to the
+    // still-nil outer, observing nil instead of true.
+    const std::string source = "local v0 = (if (if math.field then (-(-\"x\")) else (obj)) then 1 else tostring.field.field);\n"
+                               "repeat\n"
+                               "    v0 = true\n"
+                               "until {};\n"
+                               "local function f2(...)\n"
+                               "    local w = v0;\n"
+                               "    return \"key\";\n"
+                               "end\n"
+                               "return v0\n";
+    for (int optimization = 0; optimization <= 2; ++optimization) {
+        for (int debug = 1; debug <= 2; ++debug) {
+            INFO("optimization " << optimization << " debug " << debug);
+            CheckSemanticParity(source, optimization, debug);
+        }
     }
 }

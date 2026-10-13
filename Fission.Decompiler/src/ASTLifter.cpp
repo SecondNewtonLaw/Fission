@@ -744,6 +744,7 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
             return versions;
         };
         for (size_t i = 0; i < instrs.size(); ++i) {
+            Fission::CheckDecompileDeadline();
             const auto &inst = instrs[i];
             if (inst.operation != LiftedOperation::DUPCLOSURE && inst.operation != LiftedOperation::NEWCLOSURE)
                 continue;
@@ -879,6 +880,11 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                     writesByRegister[ref.regIndex].push_back(definition->instructionIndex);
             for (auto &entry : writesByRegister)
                 std::ranges::sort(entry.second);
+            // Same-register lookups below ran over every local (O(locals) each, O(locals^2) per
+            // function); index once so each query only visits its register's locals.
+            std::unordered_map<int32_t, std::vector<size_t>> localsByReg;
+            for (size_t i = 0; i < locals.size(); ++i)
+                localsByReg[locals[i].reg].push_back(i);
             const auto lastWriteBefore = [&](const LuauLocalVar &local) {
                 const auto &writes = writesByRegister[static_cast<uint8_t>(local.reg)];
                 const auto position = std::ranges::lower_bound(writes, local.startpc);
@@ -890,13 +896,21 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                 return from < 0 ? local.startpc : from;
             };
             for (const size_t i : openOrder) {
+                Fission::CheckDecompileDeadline();
                 const auto &local = locals[i];
                 if (!IsValidLuauIdent(local.varname) || local.reg < analyzedFunction.lpLiftedFunction->numparams)
                     continue;
                 // a move-elided inline parameter opens on a register another local still owns; it names nothing
-                if (std::ranges::any_of(locals, [&](const auto &owner) {
-                        return &owner != &local && owner.reg == local.reg && owner.startpc < local.startpc && local.startpc < owner.endpc;
-                    }))
+                bool ownedByOther = false;
+                if (const auto sameReg = localsByReg.find(local.reg); sameReg != localsByReg.end())
+                    for (const size_t j : sameReg->second) {
+                        const auto &owner = locals[j];
+                        if (j != i && owner.startpc < local.startpc && local.startpc < owner.endpc) {
+                            ownedByOther = true;
+                            break;
+                        }
+                    }
+                if (ownedByOther)
                     continue;
                 const std::string baseName = analyzedFunction.DebugLocalName(local.varname);
                 std::string name = localName(baseName, static_cast<uint8_t>(local.reg));
@@ -939,6 +953,7 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                 return false;
             };
             for (size_t i = 0; i < locals.size(); ++i) {
+                Fission::CheckDecompileDeadline();
                 const auto &local = locals[i];
                 if (debugNames[i].empty() || local.startpc <= 0 || static_cast<size_t>(local.startpc) > instrs.size())
                     continue;
@@ -950,15 +965,25 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                 // a later write on one arm of a branch is the last by index but not every path's initializer
                 if (last < 0 || !dominates(BlockOf(&instrs[last]), BlockOf(&opener)))
                     continue;
-                if (std::ranges::any_of(locals, [&](const auto &owner) {
-                        return &owner != &local && owner.reg == local.reg && owner.startpc <= last && owner.endpc > local.startpc && !owner.varname.empty();
-                    }))
+                bool shadowedAtOpen = false;
+                if (const auto sameReg = localsByReg.find(local.reg); sameReg != localsByReg.end())
+                    for (const size_t j : sameReg->second) {
+                        const auto &owner = locals[j];
+                        if (j != i && owner.startpc <= last && owner.endpc > local.startpc && !owner.varname.empty()) {
+                            shadowedAtOpen = true;
+                            break;
+                        }
+                    }
+                if (shadowedAtOpen)
                     continue;
                 analyzedFunction.debugLocalInitializers.emplace(last, local.reg);
             }
             const auto debugLocalAt = [&](uint8_t reg, int32_t index) -> std::optional<size_t> {
                 std::optional<size_t> found;
-                for (size_t i = 0; i < locals.size(); ++i) {
+                const auto sameReg = localsByReg.find(reg);
+                if (sameReg == localsByReg.end())
+                    return found;
+                for (const size_t i : sameReg->second) {
                     if (index < locals[i].startpc && locals[i].startpc > 0 && static_cast<size_t>(locals[i].startpc - 1) < instrs.size()) {
                         const auto &prep = instrs[locals[i].startpc - 1];
                         const bool numeric = prep.operation == LiftedOperation::FORNPREP;
@@ -975,13 +1000,15 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
             };
             const auto root = [&](const SSARef &ref) { return VariableOf(ref); };
             std::unordered_map<SSARef, std::optional<size_t>> componentLocals; // nullopt: two different locals share it
-            for (const auto &[ref, definition] : analyzedFunction.definitionMap)
+            for (const auto &[ref, definition] : analyzedFunction.definitionMap) {
+                Fission::CheckDecompileDeadline();
                 if (definition && definition->operation != LiftedOperation::PHI && ref.regIndex >= analyzedFunction.lpLiftedFunction->numparams)
                     if (const auto local = debugLocalAt(ref.regIndex, definition->instructionIndex)) {
                         const auto [entry, inserted] = componentLocals.try_emplace(root(ref), local);
                         if (!inserted && entry->second && debugNames[*entry->second] != debugNames[*local])
                             entry->second.reset();
                     }
+            }
             // a value read outside its local's scope (an inlined call's result) is not that local; constructor stores precede the open
             const auto populates = [](const LiftedInstruction &user, const SSARef &table) {
                 const size_t operand = user.operation == LiftedOperation::SETLIST ? 0 : 1;
@@ -990,7 +1017,8 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                        user.operands.size() > operand && user.operands[operand].type == LiftedOperandType::Register &&
                        user.operands[operand].value.reg == table.regIndex && user.operands[operand].ssaVersion == table.version;
             };
-            for (const auto &[ref, users] : analyzedFunction.users)
+            for (const auto &[ref, users] : analyzedFunction.users) {
+                Fission::CheckDecompileDeadline();
                 if (const auto owner = componentLocals.find(root(ref)); owner != componentLocals.end() && owner->second)
                     for (const auto *user : users)
                         if (user->operation != LiftedOperation::PHI &&
@@ -999,7 +1027,9 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
                             owner->second.reset();
                             break;
                         }
+            }
             for (const auto &[ref, definition] : analyzedFunction.definitionMap) {
+                Fission::CheckDecompileDeadline();
                 if (analyzedFunction.variableNames.contains(ref))
                     continue;
                 const auto owner = componentLocals.find(root(ref));
@@ -1020,6 +1050,7 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
     for (const auto &[ref, name] : analyzedFunction.ssaOverrides)
         capturedNames.push_back(ref);
     for (size_t i = 0; i < capturedNames.size(); ++i) {
+        Fission::CheckDecompileDeadline();
         const auto ref = capturedNames[i];
         const auto name = analyzedFunction.ssaOverrides.at(ref);
         if (const auto users = analyzedFunction.users.find(ref); users != analyzedFunction.users.end())
@@ -1048,6 +1079,7 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
         if (definition && definition->operation != LiftedOperation::PHI)
             definitionsByRegister[ref.regIndex].emplace_back(ref, definition);
     for (auto &[reg, definitions] : definitionsByRegister) {
+        Fission::CheckDecompileDeadline();
         if (definitions.size() < 2 || analyzedFunction.globalRegNames.contains(reg))
             continue;
         std::ranges::sort(definitions, [](const auto &left, const auto &right) { return left.second->instructionIndex < right.second->instructionIndex; });
@@ -1114,6 +1146,7 @@ ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
     if (!analyzedFunction.basicBlocks.empty()) {
         // pre-scan: mark CALLs consumed by generic FOR loops processed so they don't double-emit.
         for (auto &b : analyzedFunction.basicBlocks) {
+            Fission::CheckDecompileDeadline();
             if (b.bType != BlockType::LoopHeader)
                 continue;
             auto *tail = b.lpTail;
@@ -1548,7 +1581,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
     // iterative tail-traversal: recursing the linear `after` continuation overflows the stack on long
     // `if .. return end; ...` chains. branch/loop bodies still recurse (bounded by nesting depth).
+    uint64_t walkBudgetCounter = 0;
     while (true) {
+        if ((++walkBudgetCounter & 0x3FF) == 0)
+            Fission::CheckDecompileDeadline();
         if (currentBlockId == InvalidBlockId || currentBlockId >= m_currentFunction->basicBlocks.size())
             break;
         const size_t iterationStart = nodes.size();
@@ -1579,9 +1615,16 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     const bool plainExit = exit.bType == BlockType::Standard || exit.bType == BlockType::Return;
                     if ((plainExit || exit.bType == BlockType::IfHeader || exit.bType == BlockType::LoopHeader) && exit.predecessors.size() > 1 &&
                         exit.phiNodes.empty()) {
-                        m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
-                        const int32_t bodyId = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse, true);
-                        m_loopExitStack.pop_back();
+                        // The retry below hunts endless-loop bodies and loop-jump joins; every use of
+                        // its result (the latch-pred alternative, bodyNeverFallsOut) requires a
+                        // LoopLatch, so a loop-free function skips the two full-graph walks outright
+                        // with identical behavior (the wrapper conditions cannot fire without one).
+                        int32_t bodyId = InvalidBlockId;
+                        if (m_hasLoopLatch) {
+                            m_loopExitStack.push_back(static_cast<uint32_t>(exitId));
+                            bodyId = FindMergeBlock(*entry.ifStatementTrue, *entry.ifStatementFalse, true);
+                            m_loopExitStack.pop_back();
+                        }
                         // a loop whose body ends in an endless loop loses its back edge; the test skipping the body is its only normal exit
                         const auto bodyNeverFallsOut = [&] {
                             if (std::ranges::find(exit.predecessors, currentBlockId) == exit.predecessors.end())
@@ -2006,9 +2049,11 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     mergeIdx = stopBlockId;
 
                 auto ifStmt = Fission::MakeShared<IfStatementNode>();
-                auto visitedCopy = visited;
-                if (mergeIdx != InvalidBlockId)
-                    visitedCopy.insert(mergeIdx);
+                // Arms lift against the main visited set instead of a full copy per `if`
+                // (quadratic on long if-chains): arm-added blocks stay afterwards, exactly like
+                // the old copy-then-merge-back, while mergeIdx is only masked in and out so the
+                // main walk still processes it after.
+                const bool maskedMerge = mergeIdx != InvalidBlockId && visited.insert(mergeIdx).second;
 
                 // snapshot regs declared BEFORE branches: HoistPhiLocals tests "already in outer scope?"
                 // against this, not the post-branch set (branch assigns would wrongly suppress the hoist).
@@ -2016,7 +2061,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
 
                 if (mergeIdx == falseIdx) {
                     ifStmt->condition = (trueCond);
-                    ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, mergeIdx, visitedCopy));
+                    ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, mergeIdx, visited));
                 } else if (mergeIdx == trueIdx) {
                     ifStmt->condition = InvertCondition(trueCond);
 
@@ -2060,7 +2105,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         IfStatementNode *parentIfRaw = ifStmt.get();
                         uint32_t chainBlockId = falseIdx;
                         uint32_t chainStopId = mergeIdx;
-                        boost::unordered_flat_set<uint32_t> chainVisited = visitedCopy;
+                        boost::unordered_flat_set<uint32_t> chainVisited = visited;
                         while (true) {
                             if (chainBlockId == InvalidBlockId || chainBlockId >= m_currentFunction->basicBlocks.size())
                                 break;
@@ -2105,7 +2150,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         }
                         parentIfRaw->thenBranch = CreateBlock(co_await LiftControlFlow(chainBlockId, chainStopId, chainVisited));
                     } else {
-                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(falseIdx, mergeIdx, visitedCopy));
+                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(falseIdx, mergeIdx, visited));
                     }
                 } else {
                     const auto dispatchLink = [&](uint32_t id) {
@@ -2136,31 +2181,31 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                     std::vector<std::shared_ptr<Statement>> elseStmts;
                     if (chainLength == 24) {
                         ifStmt->condition = InvertCondition(trueCond);
-                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(falseIdx, mergeIdx, visitedCopy));
+                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(falseIdx, mergeIdx, visited));
                         auto parent = ifStmt;
                         uint32_t link = trueIdx;
                         while (dispatchLink(link)) {
-                            visitedCopy.insert(link);
+                            visited.insert(link);
                             const auto &part = m_currentFunction->basicBlocks[link];
                             auto prefix = LiftBlockInstructions(part);
                             auto child = Fission::MakeShared<IfStatementNode>();
                             child->condition = InvertCondition(LiftCondition(part.lpTail));
-                            child->thenBranch = CreateBlock(co_await LiftControlFlow(*part.ifStatementFalse, mergeIdx, visitedCopy));
+                            child->thenBranch = CreateBlock(co_await LiftControlFlow(*part.ifStatementFalse, mergeIdx, visited));
                             prefix.push_back(child);
                             parent->elseBranch = CreateBlock(prefix);
                             parent = child;
                             link = *part.ifStatementTrue;
                         }
-                        auto tail = co_await LiftControlFlow(link, mergeIdx, visitedCopy);
+                        auto tail = co_await LiftControlFlow(link, mergeIdx, visited);
                         if (!tail.empty())
                             parent->elseBranch = CreateBlock(tail);
                     } else {
                         // arms without a join still end at the enclosing region, so reaching the latch lifts as `continue`
                         const uint32_t armStop = mergeIdx == InvalidBlockId && !m_loopExitStack.empty() ? stopBlockId : mergeIdx;
                         ifStmt->condition = (trueCond);
-                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, armStop, visitedCopy));
+                        ifStmt->thenBranch = CreateBlock(co_await LiftControlFlow(trueIdx, armStop, visited));
                         m_definedRegisters = definedBeforeBranches;
-                        elseStmts = co_await LiftControlFlow(falseIdx, armStop, visitedCopy);
+                        elseStmts = co_await LiftControlFlow(falseIdx, armStop, visited);
                         // the arm the test falls into is the source's `then`
                         ifStmt->bFallthroughInElse = true;
                     }
@@ -2184,9 +2229,10 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 HoistPhiLocals(static_cast<int32_t>(mergeIdx), latchJoinsOnlyThisIf ? InvalidBlockId : stopBlockId, ifStmt, nodes, definedBeforeBranches);
                 nodes.push_back(ifStmt);
 
-                for (const uint32_t branchBlockId : visitedCopy)
-                    if (branchBlockId != mergeIdx)
-                        visited.insert(branchBlockId);
+                // Undo the merge mask above (arm-added blocks intentionally stay). The old
+                // copy-then-merge-back excluded mergeIdx the same way.
+                if (maskedMerge)
+                    visited.erase(mergeIdx);
 
                 // Restore scope: a register written only inside the branches that does not survive to the
                 // merge (it has no phi there) was a branch-local temporary. Drop it from m_definedRegisters
@@ -4717,7 +4763,6 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                     Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>("...")), std::nullopt
                 ); // insert vararg.
 
-
             auto fnDecl = Fission::MakeShared<FunctionDeclarationNode>(funcName, proto->numparams, argNames, proto->isvararg, bodyBlock, true);
             for (const auto &capture : captureActions)
                 fnDecl->capturedNames.insert(capture.upName);
@@ -4818,7 +4863,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
         }
 
         case LiftedOperation::MOVE: {
-            const bool isNewDef = !m_definedRegisters.contains(inst.operands[0].value.reg) || DeclaresLocal(inst, inst.operands[0]);
+            const bool isNewDef =
+                (!m_definedRegisters.contains(inst.operands[0].value.reg) && !AssignsCapturedOrphan(inst)) || DeclaresLocal(inst, inst.operands[0]);
             m_definedRegisters.insert(inst.operands[0].value.reg);
 
             auto target = Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(inst.operands[0])));
@@ -4884,8 +4930,8 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 auto val = LiftExpression(inst.operands[0], true);
 
                 const bool isParameterWrite = inst.operands[0].value.reg < m_currentFunction->lpLiftedFunction->lpDeserialized->numparams;
-                if ((inst.operands[0].ssaVersion <= 1 && !isParameterWrite && !m_hoistedRegisters.contains(inst.operands[0].value.reg)) || !isDefined ||
-                    DeclaresLocal(inst, inst.operands[0])) {
+                if ((inst.operands[0].ssaVersion <= 1 && !isParameterWrite && !m_hoistedRegisters.contains(inst.operands[0].value.reg)) ||
+                    (!isDefined && !AssignsCapturedOrphan(inst)) || DeclaresLocal(inst, inst.operands[0])) {
                     const auto users = m_currentFunction->users.find({inst.operands[0].value.reg, inst.operands[0].ssaVersion});
                     const bool unreadNil = inst.operation == LiftedOperation::LOAD && inst.operands.size() > 1 &&
                                            inst.operands[1].type == LiftedOperandType::ImmediateNil &&
@@ -4925,9 +4971,65 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
 bool ASTLifter::CanReach(uint32_t start, uint32_t target, uint32_t stopBlock, const boost::unordered_flat_set<uint32_t> &visitedScopes) {
     if (start == target)
         return true;
+    // The forward search never expands the start when it is the stop, and never pushes a
+    // scoped target; mirror both so the reversed search cannot "find" either barrier itself.
+    if (start == stopBlock || visitedScopes.contains(target))
+        return false;
+
+    const auto &blocks = m_currentFunction->basicBlocks;
+    if (start >= blocks.size() || target >= blocks.size())
+        return false;
+
+    // When the stop dominates the target (a loop header above its latch, queried for every
+    // while header), search backward from the target: the barrier cuts the region to the loop
+    // body, while forward search scans downstream to the 5000-block cap per loop. Reversal
+    // keeps the answer: the same edges are skipped (a latch's back-edge either way) and the
+    // same barriers apply.
+    bool reverse = false;
+    if (stopBlock < blocks.size() && stopBlock != target) {
+        if (!m_dominators)
+            m_dominators = AnalyzeDenominators(*m_currentFunction);
+        for (int32_t cursor = static_cast<int32_t>(target); cursor >= 0;) {
+            if (cursor == static_cast<int32_t>(stopBlock)) {
+                reverse = true;
+                break;
+            }
+            const auto it = m_dominators->find(cursor);
+            if (it == m_dominators->end() || it->second.idom == cursor)
+                break;
+            cursor = it->second.idom;
+        }
+    }
+
+    if (reverse) {
+        boost::unordered_flat_set<uint32_t> visited;
+        std::vector<uint32_t> pending{target};
+        while (!pending.empty()) {
+            const uint32_t curr = pending.back();
+            pending.pop_back();
+            if (curr == start)
+                return true;
+            if (curr == stopBlock || curr >= blocks.size())
+                continue;
+            if (visited.size() > 5000)
+                return false;
+            if (!visited.insert(curr).second)
+                continue;
+            for (const uint32_t prev : blocks[curr].predecessors) {
+                if (prev >= blocks.size())
+                    continue;
+                if (blocks[prev].bType == BlockType::LoopLatch && curr < prev)
+                    continue;
+                if (visitedScopes.contains(prev))
+                    continue;
+                pending.push_back(prev);
+            }
+        }
+        return false;
+    }
 
     std::queue<uint32_t> q;
-    std::set<uint32_t> visited;
+    boost::unordered_flat_set<uint32_t> visited;
 
     q.push(start);
     visited.insert(start);

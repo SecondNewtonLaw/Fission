@@ -41,11 +41,21 @@
 #include <filesystem>
 #include <format>
 #include <fstream>
+#include <future>
 #include <iostream>
 #include <optional>
 #include <ostream>
 #include <sstream>
 #include <unordered_map>
+
+#ifdef _WIN32
+#define NOMINMAX
+#define WIN32_LEAN_AND_MEAN
+#include <process.h>
+#include <windows.h>
+#else
+#include <pthread.h>
+#endif
 
 std::string GetIndentation(int indentationLevel) {
     std::string indent(indentationLevel, ' ');
@@ -837,9 +847,72 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     return res;
 }
 
+namespace {
+    // Luau's parser recurses once per nesting level with large (especially debug) frames, so a few
+    // hundred nested constructors overflow the calling thread before Luau's own recursion limit can
+    // fire. Compile on a dedicated thread with room to spare; the decompile below keeps running on
+    // the caller's stack, so a decompiler-side overflow still surfaces instead of hiding behind this
+    // bigger one.
+    constexpr size_t kLuauCompileStackSize = 8u * 1024u * 1024u;
+
+    struct CompileArgs {
+        const std::string *source;
+        const Luau::CompileOptions *options;
+        std::promise<std::string> *done;
+    };
+
+    void RunLuauCompile(CompileArgs *args) {
+        try {
+            args->done->set_value(Luau::compile(*args->source, *args->options));
+        } catch (...) {
+            args->done->set_exception(std::current_exception());
+        }
+    }
+
+#ifdef _WIN32
+    unsigned __stdcall CompileThreadMain(void *param) {
+        RunLuauCompile(static_cast<CompileArgs *>(param));
+        return 0;
+    }
+#else
+    void *CompileThreadMain(void *param) {
+        RunLuauCompile(static_cast<CompileArgs *>(param));
+        return nullptr;
+    }
+#endif
+
+    std::string CompileOnLargeStack(const std::string &source, const Luau::CompileOptions &options) {
+        std::promise<std::string> done;
+        CompileArgs args{&source, &options, &done};
+        std::future<std::string> result = done.get_future();
+#ifdef _WIN32
+        // _beginthreadex (not CreateThread) so the CRT the parser allocates with is per-thread ready.
+        const uintptr_t thread = _beginthreadex(nullptr, static_cast<unsigned>(kLuauCompileStackSize), &CompileThreadMain, &args, 0, nullptr);
+        if (thread == 0)
+            return Luau::compile(source, options); // same as before when no thread is available
+        // NOLINTNEXTLINE(cppcoreguidelines-pro-type-reinterpret-cast): Win32 thread APIs traffic in HANDLE.
+        auto handle = reinterpret_cast<HANDLE>(thread);
+        WaitForSingleObject(handle, INFINITE);
+        CloseHandle(handle);
+#else
+        pthread_attr_t attr{};
+        pthread_t thread{};
+        bool created = pthread_attr_init(&attr) == 0;
+        if (created) {
+            created = pthread_attr_setstacksize(&attr, kLuauCompileStackSize) == 0 && pthread_create(&thread, &attr, &CompileThreadMain, &args) == 0;
+            pthread_attr_destroy(&attr);
+        }
+        if (!created)
+            return Luau::compile(source, options); // same as before when no thread is available
+        pthread_join(thread, nullptr);
+#endif
+        return result.get(); // rethrows a compile failure on the caller thread
+    }
+} // namespace
+
 DecompilationResult Decompiler::DecompileTestCode(const std::string &testCode, const DecompilerFlags flags, const Luau::CompileOptions &compileOpts) {
     try {
-        const auto compiledBytecode = Luau::compile(testCode, compileOpts);
+        const auto compiledBytecode = CompileOnLargeStack(testCode, compileOpts);
         auto normalDecoder = Fission::InstructionDecoder{};
         return CommonDecompilerEntry(compiledBytecode, &normalDecoder, flags);
     } catch (...) {
