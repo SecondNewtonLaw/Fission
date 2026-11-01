@@ -227,6 +227,38 @@ TEST_CASE("Server: outputs=[cfg,ast] add the CFG graph and AST tree", "[Server][
     CHECK(Contains(res.body, "\"nodeKind\":\"IfStatement\""));
 }
 
+TEST_CASE("Server: a reused decompiler produces identical results across requests", "[Server][Decompile][Integration]") {
+    // Interleaving another script must not change a later result on the same decompiler.
+    const auto first = CompileVanilla(kSnippet);
+    const auto second = CompileVanilla("local t = {1, 2, 3}\nfor i = 1, #t do\n    print(t[i])\nend\nreturn t\n");
+    const auto runOnce = [](const std::string &bytecode) {
+        const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode)));
+        CheckResponse(res, bytecode);
+        const auto json = boost::json::parse(res.body);
+        const auto &value = json.at("result").at("decompilationOutput").as_string();
+        return std::string(value.data(), value.size());
+    };
+    const std::string firstRun(runOnce(first));
+    const std::string otherRun(runOnce(second));
+    const std::string secondRun(runOnce(first));
+    CHECK_FALSE(firstRun.empty());
+    CHECK_FALSE(otherRun.empty());
+    CHECK(firstRun == secondRun);
+}
+
+TEST_CASE("Server: the IR text dump is opt-in", "[Server][Decompile][Outputs][Integration]") {
+    const auto bytecode = CompileVanilla(kSnippet);
+    const auto plain = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode)));
+    CheckResponse(plain, bytecode);
+    CHECK(boost::json::parse(plain.body).at("result").at("irOutput").as_string().empty());
+
+    const auto withIR = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"outputs\":[\"ir\"]"));
+    CheckResponse(withIR, bytecode);
+    const auto ir = boost::json::parse(withIR.body).at("result").at("irOutput").as_string();
+    CHECK_FALSE(ir.empty());
+    CHECK(std::string(ir.data(), ir.size()).find("Fission IR Viewer") != std::string::npos);
+}
+
 TEST_CASE("Server: outputs=[debug] adds bounded decompiler notes", "[Server][Decompile][Outputs][Integration]") {
     const auto bytecode = CompileVanilla(kSnippet);
     const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"outputs\":[\"debug\"]"));
@@ -261,4 +293,45 @@ TEST_CASE("Server: a per-request timeout is accepted and clamped to the server m
     const auto bytecode = CompileVanilla(kSnippet);
     const auto res = Handle("POST", "/decompile", DecompileBody(Base64Encode(bytecode), ",\"timeout\":5"));
     CheckResponse(res, bytecode);
+}
+
+// Admission control
+
+TEST_CASE("Server: admission caps how many decompiles run at once", "[Server][Admission]") {
+    Fission::Server::DecompileGate gate{2, 0, 64ull * 1024 * 1024};
+    const auto noWait = std::chrono::milliseconds(0);
+    CHECK(gate.Acquire(1024, noWait));
+    CHECK(gate.Acquire(1024, noWait));
+    CHECK(gate.Active() == 2);
+    CHECK_FALSE(gate.Acquire(1024, noWait));
+    gate.Release(1024);
+    CHECK(gate.Active() == 1);
+    CHECK(gate.Acquire(1024, noWait));
+}
+
+TEST_CASE("Server: admission enforces the aggregate memory budget", "[Server][Admission]") {
+    Fission::Server::DecompileGate gate{8, 0, 1000};
+    const auto noWait = std::chrono::milliseconds(0);
+    CHECK(gate.Acquire(400, noWait));
+    CHECK(gate.Acquire(400, noWait));
+    // A third 400-byte decompile would exceed the 1000-byte budget.
+    CHECK_FALSE(gate.Acquire(400, noWait));
+    gate.Release(400);
+    CHECK(gate.Acquire(400, noWait));
+    // A request larger than the whole budget never fits; the server rejects it before the gate.
+    gate.Release(400);
+    gate.Release(400);
+    CHECK_FALSE(gate.Acquire(5000, noWait));
+
+    Fission::Server::DecompileGate unlimited{8, 0, 0};
+    CHECK(unlimited.Acquire(5000, noWait));
+}
+
+TEST_CASE("Server: the memory estimate scales with bytecode size", "[Server][Admission]") {
+    const auto small = Fission::Server::EstimateDecompileFootprint(1024);
+    const auto large = Fission::Server::EstimateDecompileFootprint(1024 * 1024);
+    CHECK(small > 0);
+    CHECK(large > small);
+    // Decoded bytecode is ~3/4 of the base64 body, and the footprint multiplier is fixed.
+    CHECK(large == ((1024ull * 1024 / 4) * 3) * 256);
 }

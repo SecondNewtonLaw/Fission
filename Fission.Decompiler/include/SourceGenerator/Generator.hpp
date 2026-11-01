@@ -44,6 +44,19 @@ class SourceGenerator : public Visitor {
 
     bool SawVectorConstant() const { return m_sawVectorConstant; }
 
+    void ReleaseRetainedState() {
+        buffer = std::stringstream{};
+        // clear() keeps the bucket array on libstdc++; swap it out so the allocation is released.
+        decltype(m_tableInlineCache){}.swap(m_tableInlineCache);
+        m_vectorConstructorAlias.clear();
+        m_vectorConstructorAlias.shrink_to_fit();
+        dwIndentationLevel = 0;
+        m_minPrecedence = 0;
+        m_firstStmtInBlock = false;
+        m_measuring = 0;
+        m_measureMultiline = false;
+    }
+
     // Luau precedence from lparser.cpp; lower numbers bind less tightly.
     static int OperatorPrecedence(const std::string &op) {
         if (op == "or")

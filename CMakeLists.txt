@@ -285,6 +285,7 @@ add_library(Fission.Decompiler STATIC
         Fission.Decompiler/src/Analysis/ConstantPropagation.cpp
         Fission.Decompiler/src/Decompiler.cpp
         Fission.Decompiler/include/SafetyGuard.hpp
+        Fission.Decompiler/include/FloatingPointClassify.hpp
         Fission.Decompiler/include/SourceGenerator/Generator.hpp
         Fission.Decompiler/include/Rewriters/ASTRewriter.hpp
         Fission.Decompiler/include/Rewriters/AttributeRenamer.hpp
