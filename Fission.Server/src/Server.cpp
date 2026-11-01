@@ -1,6 +1,7 @@
 #include "Server.hpp"
 #include "Decompiler.hpp"
 #include "FissionVersion.hpp"
+#include "ServerTransport.hpp"
 
 #ifdef __clang__
 #pragma clang diagnostic push
@@ -26,17 +27,23 @@
 
 #include <array>
 #include <atomic>
+#include <cerrno>
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
+#include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
 
 #if defined(_WIN32)
 #include <malloc.h>
-#elif defined(__GLIBC__)
+#else
+#include <poll.h>
+#include <sys/socket.h>
+#if defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #endif
 
 namespace beast = boost::beast;
@@ -290,18 +297,57 @@ namespace {
 
     // Beast deadlines require asynchronous operations and a running io_context. Socket timeouts bound
     // these synchronous reads and writes so stalled clients cannot pin workers indefinitely.
-    void SetBlockingSocketTimeout(tcp::socket &socket, std::chrono::seconds timeout) {
+    /// Bound each socket receive by `timeout` so a stalled client cannot pin a worker.
+    void SetReceiveTimeout(tcp::socket &socket, std::chrono::milliseconds timeout) {
         const auto handle = socket.native_handle();
+        timeout = std::max(timeout, std::chrono::milliseconds(1));
 #ifdef _WIN32
-        DWORD ms = static_cast<DWORD>(std::chrono::duration_cast<std::chrono::milliseconds>(timeout).count());
+        DWORD ms = static_cast<DWORD>(timeout.count());
+        setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&ms), sizeof(ms));
+#else
+        timeval tv{};
+        tv.tv_sec = static_cast<decltype(tv.tv_sec)>(timeout.count() / 1000);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout.count() % 1000) * 1000);
+        setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
+#endif
+    }
+
+    /// Bound both socket receives and sends by `timeout`.
+    void SetBlockingSocketTimeout(tcp::socket &socket, std::chrono::milliseconds timeout) {
+        const auto handle = socket.native_handle();
+        timeout = std::max(timeout, std::chrono::milliseconds(1));
+#ifdef _WIN32
+        DWORD ms = static_cast<DWORD>(timeout.count());
         setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, reinterpret_cast<const char *>(&ms), sizeof(ms));
         setsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, reinterpret_cast<const char *>(&ms), sizeof(ms));
 #else
         timeval tv{};
-        tv.tv_sec = static_cast<decltype(tv.tv_sec)>(timeout.count());
-        tv.tv_usec = 0;
+        tv.tv_sec = static_cast<decltype(tv.tv_sec)>(timeout.count() / 1000);
+        tv.tv_usec = static_cast<decltype(tv.tv_usec)>((timeout.count() % 1000) * 1000);
         setsockopt(handle, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
         setsockopt(handle, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));
+#endif
+    }
+
+    /// Read available socket bytes into `buffer`, mapping interruption and timeout conditions to `ec`.
+    std::size_t ReadSomeFromSocket(tcp::socket &socket, net::mutable_buffer buffer, beast::error_code &ec) {
+#ifdef _WIN32
+        return socket.read_some(buffer, ec);
+#else
+        ec = {};
+        const auto bytes = ::recv(socket.native_handle(), buffer.data(), buffer.size(), 0);
+        if (bytes > 0)
+            return static_cast<std::size_t>(bytes);
+        if (bytes == 0) {
+            ec = net::error::eof;
+            return 0;
+        }
+        if (errno == EINTR || errno == EAGAIN || errno == EWOULDBLOCK) {
+            ec = net::error::try_again;
+            return 0;
+        }
+        ec = beast::error_code(errno, boost::system::system_category());
+        return 0;
 #endif
     }
 
@@ -320,12 +366,14 @@ namespace {
         net::thread_pool &decompilePool, std::uint64_t maxOutstanding
     ) {
         beast::error_code ec;
-        SetBlockingSocketTimeout(socket, config.maxTimeout);
+        SetBlockingSocketTimeout(socket, std::chrono::duration_cast<std::chrono::milliseconds>(config.maxTimeout));
         beast::flat_buffer buffer;
         http::request_parser<http::string_body> parser;
         parser.body_limit(kMaxRequestBodyBytes);
 
-        http::read(socket, buffer, parser, ec);
+        // Bound the whole request read, not just each individual receive. SO_RCVTIMEO alone lets a
+        // client that dribbles bytes reset the timeout on every packet and hold a worker forever.
+        ec = Fission::Server::ReadHttpRequest(socket, buffer, parser, acceptedAt + config.maxTimeout);
         if (ec) {
             std::cerr << "Read error: " << ec.message() << std::endl;
             return;
@@ -400,6 +448,86 @@ namespace {
 } // anonymous namespace
 
 namespace Fission::Server {
+
+    boost::beast::error_code ReadHttpRequest(
+        tcp::socket &socket, beast::flat_buffer &buffer, http::request_parser<http::string_body> &parser, std::chrono::steady_clock::time_point deadline
+    ) {
+        for (;;) {
+            // Feed buffered bytes to the parser exactly once per pass. http::read_some may perform
+            // several socket reads internally, which would let a partial-header client bypass the
+            // deadline check between reads.
+            if (buffer.size() > 0) {
+                beast::error_code ec;
+                const auto used = parser.put(buffer.data(), ec);
+                buffer.consume(used);
+                if (ec != http::error::need_more) {
+                    if (ec)
+                        return ec;
+                    if (parser.is_done())
+                        break;
+                }
+                // basic_parser is not eager. A header and body arriving together can leave body
+                // bytes buffered after the first put, so drain them before waiting on the socket.
+                if (used > 0 && buffer.size() > 0)
+                    continue;
+            }
+
+            if (parser.is_done())
+                break;
+
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline)
+                return beast::error_code(beast::error::timeout);
+
+            // Each receive gets only the time that remains, so repeatedly arriving bytes cannot
+            // extend the absolute deadline.
+            const auto remaining = std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now);
+            SetReceiveTimeout(socket, remaining);
+
+#ifndef _WIN32
+            // Asio's synchronous receive re-polls a blocking socket forever when recv returns
+            // EAGAIN, so SO_RCVTIMEO alone is not a deadline on POSIX. Wait for readability with
+            // the remaining time, then read directly so no hidden retry loop can outlive it.
+            pollfd pfd{};
+            pfd.fd = socket.native_handle();
+            pfd.events = POLLIN;
+            const auto waitMs = static_cast<int>(std::min<std::int64_t>(std::max<std::int64_t>(remaining.count(), 1), std::numeric_limits<int>::max()));
+            const int pollResult = ::poll(&pfd, 1, waitMs);
+            if (pollResult == 0)
+                continue;
+            if (pollResult < 0) {
+                if (errno == EINTR)
+                    continue;
+                return beast::error_code(errno, boost::system::system_category());
+            }
+#endif
+
+            beast::error_code ec;
+            auto mutableBuffer = buffer.prepare(65536);
+            const auto bytesRead = ReadSomeFromSocket(socket, mutableBuffer, ec);
+            buffer.commit(bytesRead);
+
+            if (ec == net::error::eof) {
+                if (!parser.got_some())
+                    return beast::error_code(http::error::end_of_stream);
+                ec = {};
+                parser.put_eof(ec);
+                if (ec)
+                    return ec;
+                if (parser.is_done())
+                    break;
+                return beast::error_code(http::error::partial_message);
+            }
+            if (ec) {
+                if (std::chrono::steady_clock::now() >= deadline)
+                    return beast::error_code(beast::error::timeout);
+                if (ec == beast::error::timeout || ec == net::error::timed_out || ec == net::error::try_again || ec == net::error::would_block)
+                    continue;
+                return ec;
+            }
+        }
+        return {};
+    }
 
     HttpResult HandleRequest(std::string_view method, std::string_view target, const std::string &body, const ServerConfig &config) {
         if (method == "GET" && target == "/")
