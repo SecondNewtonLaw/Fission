@@ -1,7 +1,8 @@
 // Linux load test for the server's freed-page return path (malloc_trim). Repeated large-script
 // bursts must not leave resident memory permanently above the server's steady-state baseline.
 //
-// Guarded to Linux because it reads /proc/<pid>/status and because malloc_trim is glibc-only.
+// Guarded to glibc-based Linux because it reads /proc/<pid>/status and because the server only calls
+// malloc_trim(0) under __GLIBC__. Other Linux builds take the skip path in the last branch below.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -17,7 +18,7 @@
 #endif
 #endif
 
-#if defined(__linux__) && !defined(FISSION_TEST_ASAN)
+#if defined(__linux__) && defined(__GLIBC__) && !defined(FISSION_TEST_ASAN)
 
 #include "Luau/Common.h"
 #ifdef __clang__
@@ -340,7 +341,7 @@ TEST_CASE("Server: sustained large-script load returns resident memory near base
 #else
 
 TEST_CASE("Server: sustained large-script load returns resident memory near baseline", "[Server][Memory][Linux]") {
-    SKIP("Linux-only load test (requires /proc and malloc_trim)");
+    SKIP("Linux-only load test (requires a glibc allocator, malloc_trim, and /proc)");
 }
 
 #endif
