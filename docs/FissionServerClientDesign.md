@@ -125,6 +125,10 @@ Concurrency is capped by `--max-concurrency`; decompiles run on their own pool, 
 
 A request whose estimated footprint exceeds the whole budget is rejected with `413` before decompiling. When all slots are busy and the queue is full, the server answers `503` rather than accepting unbounded work. A queued request that outlives the server maximum timeout is dropped with `504` instead of starting stale work.
 
+After a request finishes, the server returns freed decompiler pages to the OS with `malloc_trim(0)` on glibc and `_heapmin()` on Windows. The trim is rate-limited to once per second and is also triggered by non-decompile sessions such as `/health`.
+
+`Fission.Tests` contains a Linux load test (`[Server][Memory][Linux]`) that starts the real server binary, warms it, measures `VmRSS` from `/proc/<pid>/status`, sends repeated bursts of a large compiled script, waits past the trim interval, triggers a health request, and asserts resident memory returns within 96 MiB of the warmed baseline. The test is skipped on non-Linux systems, on Linux builds without glibc, and in `USE_MIMALLOC=ON` builds. It depends on `/proc` and on the glibc `malloc_trim(0)` path the server compiles under `__GLIBC__`; mimalloc keeps Fission-owned allocations outside the system allocator, so the trim cannot reclaim them. It is also skipped under AddressSanitizer, whose quarantine retains freed memory independently of `malloc_trim` and prevents RSS from returning to the uninstrumented baseline.
+
 Clients that send many concurrent requests should treat `503` as transient backpressure: wait for other requests to finish instead of retrying immediately, and do not mark the provider unhealthy for it.
 
 ### Error response
