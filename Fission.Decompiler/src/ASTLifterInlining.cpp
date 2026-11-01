@@ -5,6 +5,7 @@
 #include "ASTLifter.hpp"
 #include "ASTLifterShared.hpp"
 #include "DenominatorAnalysis.hpp"
+#include "FloatingPointClassify.hpp"
 #include "SSABuilder.hpp"
 #include "SafetyGuard.hpp"
 
@@ -1501,7 +1502,7 @@ bool ASTLifter::KeyMayRaise(const LiftedInstruction &store) const {
     case LiftedOperandType::ImmediateConstant: {
         const auto &constant = ConstantAt(value.value.imm.k);
         if (constant.kType == LUA_TNUMBER)
-            return std::isnan(std::get<double>(constant.constantData));
+            return Fission::IsNaNDouble(std::get<double>(constant.constantData));
         return constant.kType == LUA_TNIL;
     }
     default:
