@@ -24,11 +24,12 @@ on:
         default: false
 
 permissions:
-  contents: write
+  contents: read
 
 concurrency:
-  group: release-fission-server-${{ github.ref }}
-  cancel-in-progress: true
+  # Serialize all runs for the same requested tag, including runs dispatched from different refs.
+  group: release-fission-server-${{ github.repository }}-${{ inputs.tag }}
+  cancel-in-progress: false
 
 jobs:
   build:
@@ -87,17 +88,9 @@ jobs:
           persist-credentials: false
 
       - name: Validate release tag
-        shell: bash
-        env:
-          RELEASE_TAG: ${{ inputs.tag }}
-        run: |
-          if git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
-            tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
-            if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
-              echo "::error::Tag $RELEASE_TAG points to $tag_commit, but this run checked out $GITHUB_SHA."
-              exit 1
-            fi
-          fi
+        uses: ./.github/actions/validate-release-tag
+        with:
+          tag: ${{ inputs.tag }}
 
       - name: Install build dependencies
         run: ${{ matrix.install_deps }}
@@ -154,7 +147,16 @@ jobs:
     name: Create GitHub Release
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
       - name: Download artifacts
         uses: actions/download-artifact@v4
         with:
@@ -164,6 +166,61 @@ jobs:
 
       - name: List release assets
         run: ls -lh dist
+
+      # Re-check immediately before publication: an existing tag may have moved after the build.
+      - name: Validate release tag
+        uses: ./.github/actions/validate-release-tag
+        with:
+          tag: ${{ inputs.tag }}
+
+      # Query the remote tag again because the checkout snapshot may predate a tag move. Repository
+      # tag rulesets must also prevent updates/deletion; this check catches movement before
+      # publication but cannot make the tag immutable atomically.
+      - name: Verify remote release tag
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.tag }}
+        run: |
+          response_file=$(mktemp)
+          trap 'rm -f "$response_file"' EXIT
+          api="https://api.github.com/repos/${GITHUB_REPOSITORY}/git"
+          fetch_ref() {
+            curl --silent --show-error --output "$response_file" --write-out '%{http_code}' \
+              -H "Authorization: Bearer ${GH_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              "$1"
+          }
+
+          encoded_tag=$(jq -rn --arg tag "$RELEASE_TAG" '$tag | @uri')
+          status=$(fetch_ref "$api/ref/tags/${encoded_tag}")
+          if [[ "$status" == "404" ]]; then
+            echo "Tag $RELEASE_TAG does not exist yet; it will be created at $GITHUB_SHA."
+            exit 0
+          fi
+          if [[ "$status" != "200" ]]; then
+            echo "::error::Could not verify tag $RELEASE_TAG (HTTP $status)."
+            cat "$response_file"
+            exit 1
+          fi
+
+          object_sha=$(jq -r '.object.sha' "$response_file")
+          object_type=$(jq -r '.object.type' "$response_file")
+          while [[ "$object_type" == "tag" ]]; do
+            status=$(fetch_ref "$api/tags/${object_sha}")
+            if [[ "$status" != "200" ]]; then
+              echo "::error::Could not resolve annotated tag $RELEASE_TAG (HTTP $status)."
+              cat "$response_file"
+              exit 1
+            fi
+            object_sha=$(jq -r '.object.sha' "$response_file")
+            object_type=$(jq -r '.object.type' "$response_file")
+          done
+
+          if [[ "$object_sha" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $RELEASE_TAG points to $object_sha, but this run built $GITHUB_SHA."
+            exit 1
+          fi
 
       - name: Publish release
         uses: softprops/action-gh-release@v2
@@ -175,4 +232,5 @@ jobs:
           draft: ${{ inputs.draft }}
           prerelease: ${{ inputs.prerelease }}
           generate_release_notes: true
+          overwrite_files: true
           files: dist/*

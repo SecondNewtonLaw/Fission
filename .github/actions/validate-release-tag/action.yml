@@ -1,0 +1,27 @@
+name: Validate release tag
+description: Fail when an existing release tag does not identify the checked-out commit.
+
+inputs:
+  tag:
+    description: Release tag to validate.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - name: Validate release tag
+      shell: bash
+      env:
+        RELEASE_TAG: ${{ inputs.tag }}
+      run: |
+        if [[ "$RELEASE_TAG" != "${RELEASE_TAG//[[:space:]]/}" || "$RELEASE_TAG" == refs/tags/* ]]; then
+          echo "::error::Tag must not contain whitespace or a refs/tags/ prefix: $RELEASE_TAG"
+          exit 1
+        fi
+        if git rev-parse --verify --quiet "refs/tags/$RELEASE_TAG" >/dev/null; then
+          tag_commit=$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")
+          if [[ "$tag_commit" != "$GITHUB_SHA" ]]; then
+            echo "::error::Tag $RELEASE_TAG points to $tag_commit, but this run checked out $GITHUB_SHA."
+            exit 1
+          fi
+        fi
