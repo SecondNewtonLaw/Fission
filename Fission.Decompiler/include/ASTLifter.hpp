@@ -436,6 +436,9 @@ class ASTLifter : private ASTLifterFunctionState {
     bool RegisterHeldOtherVariable(const LiftedInstruction &inst, const LiftedOperand &target);
     void SeedEnclosingNames(AnalyzedFunction &target) const;
     int32_t FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJumpsExit = false);
+    // True if `blockId` is the latch of the innermost active loop. A `while`/`repeat` latch jumps
+    // back to its own header instead of the exit, so match its recorded exit too.
+    bool IsInnermostLoopLatch(uint32_t blockId) const;
 
     // Pure shared value arms may be re-lifted without duplicating effects.
     bool IsDuplicableValueArm(uint32_t blockId, uint32_t stopBlockId) const;

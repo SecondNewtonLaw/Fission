@@ -443,6 +443,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/CompilerLiftingAuditRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticRegressions.cpp
             Fission.Tests/Decompiler/FuzzSemanticEvaluationRegressions.cpp
+            Fission.Tests/Decompiler/WhileLatchContinueMergeRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
     )

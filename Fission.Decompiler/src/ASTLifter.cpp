@@ -1570,12 +1570,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     };
 
     // the innermost loop's latch is the one exiting to the innermost loop exit
-    const auto isInnermostLatch = [&](uint32_t id) {
-        if (m_loopExitStack.empty() || id >= m_currentFunction->basicBlocks.size())
-            return false;
-        const auto &latch = m_currentFunction->basicBlocks[id];
-        return latch.bType == BlockType::LoopLatch && std::ranges::find(latch.successors, m_loopExitStack.back()) != latch.successors.end();
-    };
+    const auto isInnermostLatch = [&](uint32_t id) { return IsInnermostLoopLatch(id); };
 
     std::shared_ptr<BlockLift> previousLift;
 
