@@ -514,6 +514,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/WhileLatchContinueMergeRegressions.cpp
             Fission.Tests/Decompiler/VarargCapturedAssignmentRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
+            Fission.Tests/Server/ServerMemoryLinux.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
     )
 
@@ -530,7 +531,11 @@ if (BUILD_TESTING)
     target_link_options(Fission.Tests PRIVATE ${CXX_LINK_OPTIONS})
 
     # File-based regressions run from arbitrary working directories.
-    target_compile_definitions(Fission.Tests PRIVATE FISSION_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    target_compile_definitions(Fission.Tests PRIVATE
+            FISSION_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+            FISSION_SERVER_EXE="$<TARGET_FILE:Fission.Server.CLI>"
+    )
+    add_dependencies(Fission.Tests Fission.Server.CLI)
 
     list(APPEND CMAKE_MODULE_PATH "${Catch2_SOURCE_DIR}/extras")
 
