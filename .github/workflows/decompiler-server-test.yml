@@ -2,7 +2,6 @@ name: Decompiler Server
 
 on:
   push:
-  pull_request:
   workflow_dispatch:
 
 permissions:
