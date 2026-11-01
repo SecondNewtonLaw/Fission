@@ -74,6 +74,18 @@ Key project memory files:
 - `projects/Fission/handoff/session.md` — findings, gaps, open questions
 - `projects/Fission/cross-ref/` — dependency cross-ref notes (boost, luau, libassert, catch2, graphviz)
 
+## AI Attribution
+
+Every AI-authored pull request must end its description with the model, harness, and the human it was written for:
+
+```
+Authored by <model> in <harness> on behalf of <user>
+```
+
+For example: `Authored by DeepSeek V4.1 Flash in OpenCode on behalf of SecondNewtonLaw.`
+
+Use the same line at the end of AI-authored commit messages. This separates agent-authored work from human-authored work; human-only changes omit it.
+
 ## Unwritten Rules
 
 - **Regression sweep**: run `Samples/StressTests/run_all.ps1` after any CFA/SSA/AST change.
