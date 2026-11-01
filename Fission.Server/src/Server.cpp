@@ -297,6 +297,7 @@ namespace {
 
     // Beast deadlines require asynchronous operations and a running io_context. Socket timeouts bound
     // these synchronous reads and writes so stalled clients cannot pin workers indefinitely.
+    /// Bound each socket receive by `timeout` so a stalled client cannot pin a worker.
     void SetReceiveTimeout(tcp::socket &socket, std::chrono::milliseconds timeout) {
         const auto handle = socket.native_handle();
         timeout = std::max(timeout, std::chrono::milliseconds(1));
@@ -311,6 +312,7 @@ namespace {
 #endif
     }
 
+    /// Bound both socket receives and sends by `timeout`.
     void SetBlockingSocketTimeout(tcp::socket &socket, std::chrono::milliseconds timeout) {
         const auto handle = socket.native_handle();
         timeout = std::max(timeout, std::chrono::milliseconds(1));
@@ -327,6 +329,7 @@ namespace {
 #endif
     }
 
+    /// Read available socket bytes into `buffer`, mapping interruption and timeout conditions to `ec`.
     std::size_t ReadSomeFromSocket(tcp::socket &socket, net::mutable_buffer buffer, beast::error_code &ec) {
 #ifdef _WIN32
         return socket.read_some(buffer, ec);
