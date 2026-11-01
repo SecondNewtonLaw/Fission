@@ -58,7 +58,7 @@ Unknown routes and wrong methods return `404`, not `405`.
     "autoNameVariables": true,
     "omitFissionComments": false
   },
-  "outputs": ["cfg", "ast"],
+  "outputs": ["ir", "cfg", "ast"],
   "timeout": 20
 }
 ```
@@ -70,7 +70,7 @@ Fields:
 | `mode` | yes | `"vanilla"` or `"roblox"` |
 | `bytecode` | yes | Base64-encoded bytecode bytes |
 | `flags` | no | Boolean decompiler options |
-| `outputs` | no | Any combination of `"cfg"` and `"ast"` |
+| `outputs` | no | Any combination of `"ir"`, `"cfg"`, and `"ast"` |
 | `timeout` | no | Positive integer server budget in seconds, capped by server configuration |
 
 Client must expose only flags that affect an HTTP result:
@@ -81,7 +81,7 @@ Client must expose only flags that affect an HTTP result:
 - `autoNameVariables`
 - `omitFissionComments`
 
-Server accepts but strips `printIR`, `writeIRToFile`, `generateIRGraph`, `generateSSAIRGraph`, and `printTimingBreakdown`. Client must not send or expose those flags. CFG and AST use `outputs`, not file-producing flags.
+Server accepts but strips `printIR`, `writeIRToFile`, `generateIRGraph`, `generateSSAIRGraph`, and `printTimingBreakdown`. Client must not send or expose those flags. CFG, AST, and the IR text dump use `outputs`, not file-producing flags.
 
 Unknown output names and non-string output entries are currently ignored. Invalid, zero, or negative timeout values fall back to server maximum. Client should reject these values before sending because silent fallback is surprising.
 
@@ -105,7 +105,21 @@ HTTP request body is limited to 32 MiB. Client must serialize request first and 
 
 `cfg` and `ast` appear only when requested and produced. CFG is DOT text. AST is normally a JSON value; current server can fall back to a raw string if its stored AST text cannot be parsed. Client must represent AST as `boost::json::value` and accept a JSON string without treating it as a protocol failure.
 
-`irOutput` and `timingStatistics` remain in the response schema but are normally empty because server strips their output-producing flags.
+`irOutput` and `timingStatistics` remain in the response schema. They are empty unless `"ir"` is listed in `outputs`; the IR dump is several times the size of the decompiled source, so clients should leave it off unless they render it.
+
+### Capacity and memory
+
+A decompile's working set is roughly 240 times the bytecode size at its peak, and that memory stays resident in the process allocator after the request completes. Concurrency, not the number of CPU cores, therefore decides the process's memory high-water mark. The server bounds it:
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--max-concurrency` | `4` | Simultaneous decompiles |
+| `--max-queued` | `8` | Requests allowed to wait for a slot (clamped to spare workers) |
+| `--max-memory-mb` | `2048` | Aggregate estimated working-set budget; `0` disables the byte budget |
+
+A request whose estimated footprint exceeds the whole budget is rejected with `413` before decompiling. When all slots are busy and the queue is full, the server answers `503` rather than accepting unbounded work. A queued request that outlives the server maximum timeout is dropped with `504` instead of starting stale work.
+
+Clients that send many concurrent requests should treat `503` as transient backpressure: wait for other requests to finish instead of retrying immediately, and do not mark the provider unhealthy for it.
 
 ### Error response
 
@@ -120,8 +134,11 @@ HTTP request body is limited to 32 MiB. Client must serialize request first and 
 | --- | --- |
 | `400` | Malformed JSON, missing required field, invalid mode, or invalid Base64 |
 | `404` | Unknown route or wrong method |
+| `413` | Request estimate exceeds the server's decompile memory budget |
 | `422` | Bytecode could not be deserialized |
 | `500` | Internal decompilation failure |
+| `503` | All decompile slots and queue positions are busy |
+| `504` | Request waited past the server maximum timeout before starting |
 
 Oversized or incomplete HTTP bodies can fail before route handling and may close the connection without a JSON error. Client must classify that as a transport failure unless an HTTP response was received.
 
@@ -131,11 +148,13 @@ Oversized or incomplete HTTP bodies can fail before route handling and may close
 {
   "ok": true,
   "status": "healthy",
-  "uptime_seconds": 12.5
+  "uptime_seconds": 12.5,
+  "activeDecompiles": 2,
+  "maxConcurrentDecompiles": 4
 }
 ```
 
-Health confirms that HTTP worker can answer. It does not prove that arbitrary bytecode will decompile.
+Health confirms that HTTP worker can answer. It does not prove that arbitrary bytecode will decompile. Health requests are not throttled by the decompile gate, so they stay responsive while decompiles saturate the pool.
 
 ## Proposed C++ API
 

@@ -440,6 +440,10 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             g_pendingClones = nullptr;
         }
     } reset;
+    struct ReleaseState {
+        ASTLifter *lifter;
+        ~ReleaseState() { lifter->ReleaseRetainedState(); }
+    } releaseState{this};
     auto result = LiftBody(analyzedFunction);
     for (size_t i = 0; i < pending.size(); ++i) {
         Fission::CheckDecompileDeadline();
@@ -447,6 +451,16 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
             RunPendingChildLift(i);
     }
     return result;
+}
+
+void ASTLifter::ReleaseRetainedState() {
+    static_cast<ASTLifterFunctionState &>(*this) = {};
+    m_inlineSources.reset();
+    m_currentFunction = nullptr;
+    if (!m_debugFunction.empty()) {
+        m_debugFunction.clear();
+        m_debugFunction.shrink_to_fit();
+    }
 }
 
 ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {

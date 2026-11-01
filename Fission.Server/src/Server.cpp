@@ -24,10 +24,19 @@
 #endif
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <iostream>
+#include <mutex>
 #include <optional>
 #include <string>
+
+#if defined(_WIN32)
+#include <malloc.h>
+#elif defined(__GLIBC__)
+#include <malloc.h>
+#endif
 
 namespace beast = boost::beast;
 namespace http = beast::http;
@@ -41,6 +50,8 @@ namespace {
     thread_local Decompiler g_Decompiler;
 
     std::chrono::steady_clock::time_point g_ServerStartTime;
+    std::atomic<unsigned> g_ActiveDecompiles{0};
+    std::atomic<unsigned> g_MaxConcurrentDecompiles{0};
 
     const std::string kBase64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 
@@ -91,7 +102,7 @@ namespace {
         return json::serialize(obj);
     }
 
-    std::string ResultJson(const DecompilationResult &result) {
+    std::string ResultJson(DecompilationResult &&result) {
         json::object obj;
         obj["ok"] = true;
         json::object res;
@@ -111,9 +122,9 @@ namespace {
             if (ec)
                 res["ast"] = result.astJson; // fallback: hand back the raw string if it somehow won't parse
             else
-                res["ast"] = astValue;
+                res["ast"] = std::move(astValue);
         }
-        obj["result"] = res;
+        obj["result"] = std::move(res);
         return json::serialize(obj);
     }
 
@@ -123,7 +134,8 @@ namespace {
         obj["version"] = "1.0.0";
         obj["description"] = "Luau bytecode decompilation HTTP API";
         json::object endpoints;
-        endpoints["decompile"] = "POST /decompile  (body: {mode, bytecode, flags?, timeout?, outputs?}; outputs may include \"cfg\", \"ast\", and \"debug\")";
+        endpoints["decompile"] =
+            "POST /decompile  (body: {mode, bytecode, flags?, timeout?, outputs?}; outputs may include \"ir\", \"cfg\", \"ast\", and \"debug\")";
         endpoints["health"] = "GET /health";
         endpoints["root"] = "GET /";
         obj["endpoints"] = endpoints;
@@ -137,6 +149,8 @@ namespace {
         obj["ok"] = true;
         obj["status"] = "healthy";
         obj["uptime_seconds"] = uptime;
+        obj["activeDecompiles"] = g_ActiveDecompiles.load(std::memory_order_relaxed);
+        obj["maxConcurrentDecompiles"] = g_MaxConcurrentDecompiles.load(std::memory_order_relaxed);
         return json::serialize(obj);
     }
 
@@ -200,6 +214,7 @@ namespace {
         constexpr DecompilerFlags kServerUnsafeFlags = DecompilerFlags::PrintIR | DecompilerFlags::WriteIRToFile | DecompilerFlags::GenerateIRGraph |
                                                        DecompilerFlags::GenerateSSAIRGraph | DecompilerFlags::PrintTimingBreakdown;
         flags &= ~kServerUnsafeFlags;
+        bool includeIR = false;
 
         // CFG and AST generation is opt-in because both add response and processing cost.
         auto outputsIt = obj.find("outputs");
@@ -208,7 +223,9 @@ namespace {
                 if (!item.is_string())
                     continue;
                 std::string output = item.as_string().c_str();
-                if (output == "cfg")
+                if (output == "ir")
+                    includeIR = true;
+                else if (output == "cfg")
                     flags |= DecompilerFlags::CaptureCFGGraph;
                 else if (output == "ast")
                     flags |= DecompilerFlags::CaptureAST;
@@ -216,6 +233,8 @@ namespace {
                     flags |= DecompilerFlags::FissionDebugNotes;
             }
         }
+        if (!includeIR)
+            flags |= DecompilerFlags::OmitIR;
 
         // Reset reused thread-local state on every request so invalid or absent values cannot inherit
         // another request's budget.
@@ -227,6 +246,8 @@ namespace {
                 effectiveTimeout =
                     std::chrono::seconds(static_cast<int64_t>(std::min(static_cast<uint64_t>(val), static_cast<uint64_t>(config.maxTimeout.count()))));
         }
+
+        parsed = json::value{};
         g_Decompiler.SetDecompileBudget(effectiveTimeout);
 
         DecompilationResult result;
@@ -236,7 +257,7 @@ namespace {
             result = g_Decompiler.DecompileVanillaBytecode(*decoded, flags);
 
         if (result.resultCode == DecompileResult::Success)
-            return {200, "application/json", ResultJson(result)};
+            return {200, "application/json", ResultJson(std::move(result))};
 
         static const char *kErrorMessages[] = {"", "Failed to read file", "Failed to deserialize bytecode", "Internal decompilation failure"};
         const unsigned int httpStatus = (result.resultCode == DecompileResult::FailedToDeserialize) ? 422u : 500u;
@@ -246,6 +267,24 @@ namespace {
 
     // Bound memory consumed before request validation.
     constexpr std::uint64_t kMaxRequestBodyBytes = 32ull * 1024 * 1024;
+
+    // Return freed decompiler pages to the OS.
+    std::atomic<std::chrono::steady_clock::rep> g_lastTrimTicks{0};
+    void ReleaseUnusedMemory() {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto ticks = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
+        constexpr auto kTrimInterval = std::chrono::seconds(1);
+        auto last = g_lastTrimTicks.load(std::memory_order_relaxed);
+        if (ticks - last < std::chrono::duration_cast<std::chrono::milliseconds>(kTrimInterval).count())
+            return;
+        if (!g_lastTrimTicks.compare_exchange_strong(last, ticks, std::memory_order_relaxed))
+            return;
+#if defined(_WIN32)
+        (void)_heapmin();
+#elif defined(__GLIBC__)
+        (void)malloc_trim(0);
+#endif
+    }
 
     // Beast deadlines require asynchronous operations and a running io_context. Socket timeouts bound
     // these synchronous reads and writes so stalled clients cannot pin workers indefinitely.
@@ -264,7 +303,19 @@ namespace {
 #endif
     }
 
-    void handle_session(tcp::socket socket, const Fission::Server::ServerConfig &config) {
+    void WriteResponse(tcp::socket &socket, const http::request<http::string_body> &req, Fission::Server::HttpResult &&result) {
+        http::response<http::string_body> res{static_cast<http::status>(result.status), req.version()};
+        res.set(http::field::content_type, result.contentType);
+        res.set(http::field::server, "Fission.Server");
+        res.body() = std::move(result.body);
+        res.prepare_payload();
+        beast::error_code ec;
+        http::write(socket, res, ec);
+    }
+
+    void handle_session(
+        tcp::socket socket, const Fission::Server::ServerConfig &config, std::chrono::steady_clock::time_point acceptedAt, Fission::Server::DecompileGate &gate
+    ) {
         beast::error_code ec;
         SetBlockingSocketTimeout(socket, config.maxTimeout);
         beast::flat_buffer buffer;
@@ -276,19 +327,53 @@ namespace {
             std::cerr << "Read error: " << ec.message() << std::endl;
             return;
         }
-        const auto &req = parser.get();
+        auto &req = parser.get();
+        std::string body = std::move(req.body());
 
-        const auto result = Fission::Server::HandleRequest(http::to_string(req.method()), req.target(), req.body(), config);
+        const bool decompileRequest = req.method() == http::verb::post && req.target() == "/decompile";
+        if (decompileRequest) {
+            const auto queuedFor = std::chrono::steady_clock::now() - acceptedAt;
+            if (queuedFor >= config.maxTimeout) {
+                WriteResponse(socket, req, {504, "application/json", ErrorJson("Request expired before decompilation started")});
+                return;
+            }
+        }
+        const std::uint64_t estimate = Fission::Server::EstimateDecompileFootprint(body.size());
+        if (decompileRequest && config.maxDecompileMemoryBytes > 0 && estimate > config.maxDecompileMemoryBytes) {
+            const auto budgetMiB = config.maxDecompileMemoryBytes / (1024 * 1024);
+            WriteResponse(
+                socket, req, {413, "application/json", ErrorJson("Request exceeds the decompile memory budget (" + std::to_string(budgetMiB) + " MiB)")}
+            );
+            return;
+        }
+        const bool admitted = decompileRequest && gate.Acquire(estimate, config.queueWait);
+        if (decompileRequest && !admitted) {
+            WriteResponse(socket, req, {503, "application/json", ErrorJson("Server busy: too many decompilations in flight")});
+            return;
+        }
+        struct Release {
+            Fission::Server::DecompileGate &gate;
+            std::uint64_t estimate;
+            bool admitted;
+            ~Release() {
+                if (!admitted)
+                    return;
+                g_ActiveDecompiles.fetch_sub(1, std::memory_order_relaxed);
+                gate.Release(estimate);
+            }
+        } release{gate, estimate, admitted};
+        if (admitted)
+            g_ActiveDecompiles.fetch_add(1, std::memory_order_relaxed);
 
-        http::response<http::string_body> res{static_cast<http::status>(result.status), req.version()};
-        res.set(http::field::content_type, result.contentType);
-        res.set(http::field::server, "Fission.Server");
-        res.body() = result.body;
-        res.prepare_payload();
+        {
+            auto result = Fission::Server::HandleRequest(http::to_string(req.method()), req.target(), body, config);
+            body.clear();
+            body.shrink_to_fit();
 
-        http::write(socket, res, ec);
-
+            WriteResponse(socket, req, std::move(result));
+        }
         socket.shutdown(tcp::socket::shutdown_send, ec);
+        ReleaseUnusedMemory();
     }
 
 } // anonymous namespace
@@ -312,9 +397,17 @@ namespace Fission::Server {
         tcp::acceptor acceptor{ioc, {net::ip::make_address("127.0.0.1"), config.port}};
 
         net::thread_pool pool{config.threadCount};
+        // Keep a worker free so health checks still answer under load.
+        const unsigned int maxActive = std::min(config.maxConcurrentDecompiles, std::max(1u, config.threadCount));
+        const unsigned int headroom = config.threadCount > maxActive + 1 ? config.threadCount - maxActive - 1 : 0;
+        const unsigned int maxWaiting = std::min(config.maxQueuedRequests, headroom);
+        DecompileGate gate{maxActive, maxWaiting, config.maxDecompileMemoryBytes};
+        g_MaxConcurrentDecompiles.store(maxActive, std::memory_order_relaxed);
 
         std::cout << "Fission.Server listening on http://127.0.0.1:" << config.port << std::endl;
         std::cout << "Thread pool: " << config.threadCount << " workers" << std::endl;
+        std::cout << "Max concurrent decompiles: " << maxActive << " (" << maxWaiting << " queued)" << std::endl;
+        std::cout << "Decompile memory budget: " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB" << std::endl;
         std::cout << "Max timeout: " << config.maxTimeout.count() << "s" << std::endl;
 
         for (;;) {
@@ -325,10 +418,11 @@ namespace Fission::Server {
                 std::cerr << "Accept error: " << ec.message() << std::endl;
                 continue;
             }
+            const auto acceptedAt = std::chrono::steady_clock::now();
             // An escaping exception terminates a pool worker and can eventually exhaust the pool.
-            net::post(pool, [sock = std::move(socket), config]() mutable {
+            net::post(pool, [sock = std::move(socket), &config, &gate, acceptedAt]() mutable {
                 try {
-                    handle_session(std::move(sock), config);
+                    handle_session(std::move(sock), config, acceptedAt, gate);
                 } catch (const std::exception &e) {
                     std::cerr << "Session error: " << e.what() << std::endl;
                 } catch (...) {

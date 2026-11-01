@@ -590,6 +590,15 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
     astLifter.SetDebugNotes(debugEnabled ? &m_debugNotes : nullptr);
     m_debugNotes.Add(FissionDebugStage::Pipeline, "decompilation started for {} bytecode bytes", bytecode.size());
 
+    struct StageStateRelease {
+        ASTLifter &lifter;
+        SourceGenerator &generator;
+        ~StageStateRelease() {
+            lifter.ReleaseRetainedState();
+            generator.ReleaseRetainedState();
+        }
+    } releaseStageState{astLifter, sourceGenerator};
+
     if (decoder == nullptr) {
         DecompilationResult failure{"", "", "", DecompileResult::FailedToDecompile};
         m_debugNotes.Add(FissionDebugStage::Pipeline, "stopped before deserialization because decoder is null");

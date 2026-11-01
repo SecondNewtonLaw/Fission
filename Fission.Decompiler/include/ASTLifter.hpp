@@ -267,6 +267,7 @@ class ASTLifter : private ASTLifterFunctionState {
     std::shared_ptr<Expression> LiftCondition(const LiftedInstruction *inst);
     void SetDebugNotes(FissionDebugNotes *debugNotes) { m_debugNotes = debugNotes; }
     void SetInlineSources(std::shared_ptr<const InlineSourceMap> sources) { m_inlineSources = std::move(sources); }
+    void ReleaseRetainedState();
 
     struct PinnedRegisterScope {
         ASTLifter *m_lpLifter;

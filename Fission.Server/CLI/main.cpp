@@ -20,13 +20,35 @@ int main(int argc, char *argv[]) {
                 config.maxTimeout = std::chrono::seconds(timeout);
             else
                 std::cerr << "Warning: invalid timeout '" << argv[i] << "', using default " << config.maxTimeout.count() << "s" << std::endl;
+        } else if (strcmp(argv[i], "--max-concurrency") == 0 && i + 1 < argc) {
+            int concurrency = std::atoi(argv[++i]);
+            if (concurrency > 0)
+                config.maxConcurrentDecompiles = static_cast<unsigned int>(concurrency);
+            else
+                std::cerr << "Warning: invalid concurrency '" << argv[i] << "', using default " << config.maxConcurrentDecompiles << std::endl;
+        } else if (strcmp(argv[i], "--max-queued") == 0 && i + 1 < argc) {
+            int queued = std::atoi(argv[++i]);
+            if (queued >= 0)
+                config.maxQueuedRequests = static_cast<unsigned int>(queued);
+            else
+                std::cerr << "Warning: invalid queue size '" << argv[i] << "', using default " << config.maxQueuedRequests << std::endl;
+        } else if (strcmp(argv[i], "--max-memory-mb") == 0 && i + 1 < argc) {
+            int megabytes = std::atoi(argv[++i]);
+            if (megabytes >= 0)
+                config.maxDecompileMemoryBytes = static_cast<std::uint64_t>(megabytes) * 1024 * 1024;
+            else
+                std::cerr << "Warning: invalid memory budget '" << argv[i] << "', using default " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB"
+                          << std::endl;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
             std::cout << "Fission.Server - Luau bytecode decompilation HTTP API\n"
                       << "Usage: Fission.Server.CLI [options]\n"
                       << "Options:\n"
-                      << "  -p, --port <port>        Listen port (default: 8080)\n"
-                      << "  --max-timeout <seconds>   Max decompilation timeout (default: 30)\n"
-                      << "  -h, --help                Show this help\n";
+                      << "  -p, --port <port>           Listen port (default: 8080)\n"
+                      << "  --max-timeout <seconds>     Max decompilation timeout (default: 30)\n"
+                      << "  --max-concurrency <count>   Max simultaneous decompiles (default: 4)\n"
+                      << "  --max-queued <count>        Max requests waiting for a slot (default: 8)\n"
+                      << "  --max-memory-mb <size>      Decompile working-set budget, 0 to disable (default: 2048)\n"
+                      << "  -h, --help                  Show this help\n";
             return 0;
         } else {
             std::cerr << "Unknown option: " << argv[i] << ". Use --help for usage.\n";
