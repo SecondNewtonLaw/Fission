@@ -3979,10 +3979,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 m_emission.MarkEmitted(inst.instructionIndex);
                 break;
             }
-            // results bind by position, so unread leading ones still take a slot
+            // results bind by position, so unread leading ones still take a slot; a by-reference
+            // captured target updates the closure's upvalue even without an SSA reader.
             int32_t lastUsed = -1;
             for (const auto &ref : defs)
-                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(inst, ref.regIndex))
+                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(inst, ref.regIndex) || m_referenceCapturedValues.contains(ref))
                     lastUsed = ref.regIndex;
             std::erase_if(defs, [&](const SSARef &ref) { return ref.regIndex > lastUsed; });
             const auto defined = std::ranges::count_if(defs, [&](const SSARef &ref) { return m_definedRegisters.contains(ref.regIndex); });
