@@ -37,6 +37,8 @@ Server listens on `127.0.0.1` only. Default port is `8080`. Default maximum serv
 
 `GET /` reports the product version compiled into the binary. CMake derives it from `git describe --tags` by default, and the release workflow passes the release tag through `-DFISSION_VERSION=<tag>`, so the service descriptor, release tag, and `Fission.Server --version` agree. A local build outside a tag reports a describe string such as `1.0.3-beta-4-gabc1234`; an untagged source export reports `0.0.0-dev`.
 
+The request read deadline is absolute. Every receive is bounded by the time remaining, so a client that dribbles one byte at a time is closed when the server maximum timeout expires, not after the last packet. `/health` and other non-decompile routes use the same read deadline and are not throttled by decompile slots.
+
 ### Endpoints
 
 | Method | Path | Success | Purpose |

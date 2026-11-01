@@ -404,6 +404,7 @@ endforeach ()
 add_library(Fission.Server STATIC
     Fission.Server/src/Server.cpp
     Fission.Server/include/Server.hpp
+    Fission.Server/include/ServerTransport.hpp
 )
 target_include_directories(Fission.Server PUBLIC
         Fission.Server/include
@@ -515,6 +516,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/VarargCapturedAssignmentRegressions.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
+            Fission.Tests/Server/ServerReadDeadline.cpp
     )
 
     target_link_libraries(Fission.Tests PRIVATE
