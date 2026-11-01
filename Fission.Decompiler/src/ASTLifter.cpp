@@ -1594,12 +1594,7 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
     };
 
     // the innermost loop's latch is the one exiting to the innermost loop exit
-    const auto isInnermostLatch = [&](uint32_t id) {
-        if (m_loopExitStack.empty() || id >= m_currentFunction->basicBlocks.size())
-            return false;
-        const auto &latch = m_currentFunction->basicBlocks[id];
-        return latch.bType == BlockType::LoopLatch && std::ranges::find(latch.successors, m_loopExitStack.back()) != latch.successors.end();
-    };
+    const auto isInnermostLatch = [&](uint32_t id) { return IsInnermostLoopLatch(id); };
 
     std::shared_ptr<BlockLift> previousLift;
 
@@ -4008,10 +4003,11 @@ std::vector<std::shared_ptr<Statement>> ASTLifter::EmitBlockInstructions(const B
                 m_emission.MarkEmitted(inst.instructionIndex);
                 break;
             }
-            // results bind by position, so unread leading ones still take a slot
+            // results bind by position, so unread leading ones still take a slot; a by-reference
+            // captured target updates the closure's upvalue even without an SSA reader.
             int32_t lastUsed = -1;
             for (const auto &ref : defs)
-                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(inst, ref.regIndex))
+                if (m_currentFunction->useCounts[ref] > 0 || BeginsDebugLocal(inst, ref.regIndex) || m_referenceCapturedValues.contains(ref))
                     lastUsed = ref.regIndex;
             std::erase_if(defs, [&](const SSARef &ref) { return ref.regIndex > lastUsed; });
             const auto defined = std::ranges::count_if(defs, [&](const SSARef &ref) { return m_definedRegisters.contains(ref.regIndex); });

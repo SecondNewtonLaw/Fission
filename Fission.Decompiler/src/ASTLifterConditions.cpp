@@ -370,6 +370,25 @@ bool ASTLifter::IsDuplicablePureRegion(uint32_t startId, uint32_t stopBlockId) c
     return feedsMergePhi;
 }
 
+bool ASTLifter::IsInnermostLoopLatch(uint32_t blockId) const {
+    if (m_loopExitStack.empty() || !m_currentFunction || blockId >= m_currentFunction->basicBlocks.size())
+        return false;
+    const auto &blocks = m_currentFunction->basicBlocks;
+    const auto &latch = blocks[blockId];
+    if (latch.bType != BlockType::LoopLatch)
+        return false;
+    const uint32_t loopExit = m_loopExitStack.back();
+    // An unrolled loop's latch jumps straight to the exit.
+    if (std::ranges::find(latch.successors, loopExit) != latch.successors.end())
+        return true;
+    // A `while`/`repeat` latch jumps back to its header, but records the same exit as the header.
+    if (latch.loopExit.has_value())
+        return *latch.loopExit == loopExit;
+    if (latch.loopHeader.has_value() && *latch.loopHeader < blocks.size())
+        return blocks[*latch.loopHeader].loopExit == loopExit;
+    return false;
+}
+
 int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJumpsExit) {
     if (branchA == branchB)
         return static_cast<int32_t>(branchA);
@@ -385,10 +404,9 @@ int32_t ASTLifter::FindMergeBlock(uint32_t branchA, uint32_t branchB, bool loopJ
     // a conditional jump into the innermost loop's latch is a `continue`, not flow into the merge; with
     // `loopJumpsExit`, so is a lifted `continue` block's unconditional jump
     const auto continuesLoop = [&](const BasicBlock &from, uint32_t to) {
-        if (loopExit == InvalidBlockId || (from.bTerminator != BlockTerminator::Conditional && !(loopJumpsExit && from.bType == BlockType::Continue)) ||
-            blocks[to].bType != BlockType::LoopLatch)
+        if (loopExit == InvalidBlockId || (from.bTerminator != BlockTerminator::Conditional && !(loopJumpsExit && from.bType == BlockType::Continue)))
             return false;
-        return std::ranges::find(blocks[to].successors, loopExit) != blocks[to].successors.end();
+        return IsInnermostLoopLatch(to);
     };
     const auto sharedReturn = [&](uint32_t id) {
         const auto &block = blocks[id];
