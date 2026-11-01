@@ -117,7 +117,7 @@ A decompile's working set is roughly 240 times the bytecode size at its peak, an
 | `--max-queued` | `8` | Requests allowed to wait for a slot (clamped to spare workers) |
 | `--max-memory-mb` | `2048` | Aggregate estimated working-set budget; `0` disables the byte budget |
 
-Concurrency is also capped at one fewer than the worker count, so one worker stays available for health checks and other routes.
+Concurrency is capped by `--max-concurrency`; decompiles run on their own pool, so request reads and health checks are not blocked by decompile work.
 
 A request whose estimated footprint exceeds the whole budget is rejected with `413` before decompiling. When all slots are busy and the queue is full, the server answers `503` rather than accepting unbounded work. A queued request that outlives the server maximum timeout is dropped with `504` instead of starting stale work.
 

@@ -5,6 +5,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <iostream>
+#include <limits>
 #include <optional>
 
 namespace {
@@ -38,13 +39,13 @@ int main(int argc, char *argv[]) {
                 std::cerr << "Warning: invalid timeout '" << argv[i] << "', using default " << config.maxTimeout.count() << "s" << std::endl;
         } else if (strcmp(argv[i], "--max-concurrency") == 0 && i + 1 < argc) {
             const auto concurrency = ParseInteger(argv[++i]);
-            if (concurrency && *concurrency > 0)
+            if (concurrency && *concurrency > 0 && *concurrency <= std::numeric_limits<unsigned int>::max())
                 config.maxConcurrentDecompiles = static_cast<unsigned int>(*concurrency);
             else
                 std::cerr << "Warning: invalid concurrency '" << argv[i] << "', using default " << config.maxConcurrentDecompiles << std::endl;
         } else if (strcmp(argv[i], "--max-queued") == 0 && i + 1 < argc) {
             const auto queued = ParseInteger(argv[++i]);
-            if (queued && *queued >= 0)
+            if (queued && *queued >= 0 && *queued <= std::numeric_limits<unsigned int>::max())
                 config.maxQueuedRequests = static_cast<unsigned int>(*queued);
             else
                 std::cerr << "Warning: invalid queue size '" << argv[i] << "', using default " << config.maxQueuedRequests << std::endl;
