@@ -1,3 +1,4 @@
+#include "FissionVersion.hpp"
 #include "Server.hpp"
 
 #include <cerrno>
@@ -56,8 +57,11 @@ int main(int argc, char *argv[]) {
             else
                 std::cerr << "Warning: invalid memory budget '" << argv[i] << "', using default " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB"
                           << std::endl;
+        } else if (strcmp(argv[i], "--version") == 0 || strcmp(argv[i], "-V") == 0) {
+            std::cout << "Fission.Server " << FISSION_VERSION << "\n";
+            return 0;
         } else if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
-            std::cout << "Fission.Server - Luau bytecode decompilation HTTP API\n"
+            std::cout << "Fission.Server " << FISSION_VERSION << " - Luau bytecode decompilation HTTP API\n"
                       << "Usage: Fission.Server.CLI [options]\n"
                       << "Options:\n"
                       << "  -p, --port <port>           Listen port (default: 8080)\n"
@@ -65,6 +69,7 @@ int main(int argc, char *argv[]) {
                       << "  --max-concurrency <count>   Max simultaneous decompiles (default: 4)\n"
                       << "  --max-queued <count>        Max requests waiting for a slot (default: 8)\n"
                       << "  --max-memory-mb <size>      Decompile working-set budget, 0 to disable (default: 2048)\n"
+                      << "  -V, --version               Show version\n"
                       << "  -h, --help                  Show this help\n";
             return 0;
         } else {

@@ -1,5 +1,6 @@
 #include "Server.hpp"
 #include "Decompiler.hpp"
+#include "FissionVersion.hpp"
 
 #ifdef __clang__
 #pragma clang diagnostic push
@@ -132,7 +133,7 @@ namespace {
     std::string RootJson() {
         json::object obj;
         obj["name"] = "Fission.Server";
-        obj["version"] = "1.0.0";
+        obj["version"] = FISSION_VERSION;
         obj["description"] = "Luau bytecode decompilation HTTP API";
         json::object endpoints;
         endpoints["decompile"] =
@@ -426,7 +427,7 @@ namespace Fission::Server {
         g_MaxConcurrentDecompiles.store(maxActive, std::memory_order_relaxed);
         const std::uint64_t maxOutstanding = static_cast<std::uint64_t>(maxActive) + maxWaiting;
 
-        std::cout << "Fission.Server listening on http://127.0.0.1:" << config.port << std::endl;
+        std::cout << "Fission.Server " << FISSION_VERSION << " listening on http://127.0.0.1:" << config.port << std::endl;
         std::cout << "Thread pool: " << config.threadCount << " io, " << maxActive << " decompile" << std::endl;
         std::cout << "Max concurrent decompiles: " << maxActive << " (" << maxWaiting << " queued)" << std::endl;
         std::cout << "Decompile memory budget: " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB" << std::endl;

@@ -35,6 +35,8 @@ First release will not provide:
 
 Server listens on `127.0.0.1` only. Default port is `8080`. Default maximum server-side decompilation budget is 30 seconds. Server accepts one request per connection, writes one response, then closes the connection.
 
+`GET /` reports the product version compiled into the binary. CMake derives it from `git describe --tags` by default, and the release workflow passes the release tag through `-DFISSION_VERSION=<tag>`, so the service descriptor, release tag, and `Fission.Server --version` agree. A local build outside a tag reports a describe string such as `1.0.3-beta-4-gabc1234`; an untagged source export reports `0.0.0-dev`.
+
 ### Endpoints
 
 | Method | Path | Success | Purpose |
@@ -323,7 +325,7 @@ Client logs may include method, route, status, elapsed time, and byte counts. Th
 
 ## Compatibility
 
-Current root response reports product version `1.0.0`, not a distinct protocol version. Initial client will target current schema and tolerate added fields. It should reject missing required fields and incompatible types.
+Current root response reports the build-time product version, not a distinct protocol version. Initial client will target current schema and tolerate added fields. It should reject missing required fields and incompatible types.
 
 Before publishing client as a stable external package, server should add an integer `apiVersion` to `GET /` while keeping existing fields. Path versioning is unnecessary until incompatible protocol revision exists.
 
