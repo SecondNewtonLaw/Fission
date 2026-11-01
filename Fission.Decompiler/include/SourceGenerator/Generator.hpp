@@ -46,7 +46,8 @@ class SourceGenerator : public Visitor {
 
     void ReleaseRetainedState() {
         buffer = std::stringstream{};
-        m_tableInlineCache.clear();
+        // clear() keeps the bucket array on libstdc++; swap it out so the allocation is released.
+        decltype(m_tableInlineCache){}.swap(m_tableInlineCache);
         m_vectorConstructorAlias.clear();
         m_vectorConstructorAlias.shrink_to_fit();
         dwIndentationLevel = 0;

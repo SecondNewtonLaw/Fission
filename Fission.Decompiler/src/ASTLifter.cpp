@@ -454,6 +454,16 @@ ASTFunction ASTLifter::Lift(AnalyzedFunction &analyzedFunction) {
 }
 
 void ASTLifter::ReleaseRetainedState() {
+    // m_blockLifts owns every lift, and each lift may own its successor. Releasing the map can then
+    // destroy one long chain recursively, so unlink the chains iteratively first.
+    std::unordered_set<BlockLift *> unlinked;
+    for (const auto &entry : m_blockLifts) {
+        auto lift = entry.second;
+        while (lift && unlinked.insert(lift.get()).second) {
+            auto successor = std::move(lift->successor);
+            lift = std::move(successor);
+        }
+    }
     static_cast<ASTLifterFunctionState &>(*this) = {};
     m_inlineSources.reset();
     m_currentFunction = nullptr;

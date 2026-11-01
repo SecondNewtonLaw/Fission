@@ -398,7 +398,8 @@ namespace Fission::Server {
 
         net::thread_pool pool{config.threadCount};
         // Keep a worker free so health checks still answer under load.
-        const unsigned int maxActive = std::min(config.maxConcurrentDecompiles, std::max(1u, config.threadCount));
+        const unsigned int usableWorkers = config.threadCount > 1 ? config.threadCount - 1 : 1u;
+        const unsigned int maxActive = std::min(config.maxConcurrentDecompiles, usableWorkers);
         const unsigned int headroom = config.threadCount > maxActive + 1 ? config.threadCount - maxActive - 1 : 0;
         const unsigned int maxWaiting = std::min(config.maxQueuedRequests, headroom);
         DecompileGate gate{maxActive, maxWaiting, config.maxDecompileMemoryBytes};

@@ -117,6 +117,8 @@ A decompile's working set is roughly 240 times the bytecode size at its peak, an
 | `--max-queued` | `8` | Requests allowed to wait for a slot (clamped to spare workers) |
 | `--max-memory-mb` | `2048` | Aggregate estimated working-set budget; `0` disables the byte budget |
 
+Concurrency is also capped at one fewer than the worker count, so one worker stays available for health checks and other routes.
+
 A request whose estimated footprint exceeds the whole budget is rejected with `413` before decompiling. When all slots are busy and the queue is full, the server answers `503` rather than accepting unbounded work. A queued request that outlives the server maximum timeout is dropped with `504` instead of starting stale work.
 
 Clients that send many concurrent requests should treat `503` as transient backpressure: wait for other requests to finish instead of retrying immediately, and do not mark the provider unhealthy for it.
