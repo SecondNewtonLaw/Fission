@@ -1,6 +1,7 @@
 // Exercise routing, validation, decompilation, captures, and status mapping without socket I/O.
 
 #include "../Decompiler/IntegrationTestSupport.hpp"
+#include "FissionVersion.hpp"
 #include "Server.hpp"
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wlanguage-extension-token"
@@ -111,6 +112,14 @@ TEST_CASE("Server: GET / returns the service descriptor", "[Server][Routing]") {
     CHECK(res.contentType == "application/json");
     CHECK(Contains(res.body, "Fission.Server"));
     CHECK(Contains(res.body, "decompile"));
+}
+
+TEST_CASE("Server: GET / reports the configured build version", "[Server][Routing]") {
+    const auto res = Handle("GET", "/", "");
+    REQUIRE(res.status == 200);
+    const auto json = boost::json::parse(res.body);
+    const auto &version = json.at("version").as_string();
+    CHECK(std::string(version.data(), version.size()) == FISSION_VERSION);
 }
 
 TEST_CASE("Server: GET /health reports healthy", "[Server][Routing]") {

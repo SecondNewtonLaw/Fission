@@ -1,0 +1,5 @@
+#pragma once
+
+// Generated from cmake/FissionVersion.hpp.in. Do not edit directly.
+// Override at configure time with -DFISSION_VERSION=<value>.
+#define FISSION_VERSION "@FISSION_VERSION_ESCAPED@"

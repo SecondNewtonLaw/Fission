@@ -1,6 +1,68 @@
 cmake_minimum_required(VERSION 3.31)
 project(Fission)
 
+# Product version reported by the server and release binaries. Empty derives from the
+# checked-out tag so local builds and release workflows share one source of truth.
+set(FISSION_VERSION "" CACHE STRING "Product version reported by Fission (default: git describe)")
+# An explicit cache value is an override. An empty value is re-derived at build time so incremental
+# builds pick up a new checkout or a dirty working tree.
+set(FISSION_VERSION_OVERRIDE "${FISSION_VERSION}")
+if (FISSION_VERSION STREQUAL "")
+    find_package(Git QUIET)
+    if (Git_FOUND)
+        # git describe walks up to a parent repository. Only use it when the discovered worktree
+        # is this source tree, so an export unpacked inside another checkout keeps the fallback.
+        execute_process(
+                COMMAND "${GIT_EXECUTABLE}" rev-parse --show-toplevel
+                WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                OUTPUT_VARIABLE FISSION_GIT_TOPLEVEL
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+                RESULT_VARIABLE FISSION_GIT_TOPLEVEL_RESULT
+                ERROR_QUIET
+        )
+        if (FISSION_GIT_TOPLEVEL_RESULT EQUAL 0 AND FISSION_GIT_TOPLEVEL)
+            file(REAL_PATH "${CMAKE_CURRENT_SOURCE_DIR}" FISSION_SOURCE_REAL)
+            file(REAL_PATH "${FISSION_GIT_TOPLEVEL}" FISSION_GIT_TOPLEVEL_REAL)
+            if (FISSION_SOURCE_REAL STREQUAL FISSION_GIT_TOPLEVEL_REAL)
+                execute_process(
+                        COMMAND "${GIT_EXECUTABLE}" describe --tags --always --dirty
+                        WORKING_DIRECTORY "${CMAKE_CURRENT_SOURCE_DIR}"
+                        OUTPUT_VARIABLE FISSION_GIT_DESCRIBE
+                        OUTPUT_STRIP_TRAILING_WHITESPACE
+                        RESULT_VARIABLE FISSION_GIT_DESCRIBE_RESULT
+                        ERROR_QUIET
+                )
+                if (FISSION_GIT_DESCRIBE_RESULT EQUAL 0 AND NOT "${FISSION_GIT_DESCRIBE}" STREQUAL "")
+                    set(FISSION_VERSION "${FISSION_GIT_DESCRIBE}")
+                endif ()
+            endif ()
+        endif ()
+    endif ()
+    if (FISSION_VERSION STREQUAL "")
+        set(FISSION_VERSION "0.0.0-dev")
+    endif ()
+endif ()
+message(STATUS "Fission version: ${FISSION_VERSION}")
+# Preserve the complete value as a C++ string literal, including any semicolons or quotes.
+string(REPLACE "\\" "\\\\" FISSION_VERSION_ESCAPED "${FISSION_VERSION}")
+string(REPLACE "\"" "\\\"" FISSION_VERSION_ESCAPED "${FISSION_VERSION_ESCAPED}")
+configure_file(
+        "${CMAKE_CURRENT_SOURCE_DIR}/cmake/FissionVersion.hpp.in"
+        "${CMAKE_CURRENT_BINARY_DIR}/generated/FissionVersion.hpp"
+        @ONLY
+)
+file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/generated/FissionVersionOverride.txt" "${FISSION_VERSION_OVERRIDE}")
+add_custom_target(FissionVersionHeader
+        COMMAND "${CMAKE_COMMAND}"
+        "-DFISSION_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+        "-DFISSION_VERSION_OVERRIDE_FILE=${CMAKE_CURRENT_BINARY_DIR}/generated/FissionVersionOverride.txt"
+        "-DFISSION_OUTPUT=${CMAKE_CURRENT_BINARY_DIR}/generated/FissionVersion.hpp"
+        "-DFISSION_GIT_EXECUTABLE=${GIT_EXECUTABLE}"
+        -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/WriteFissionVersion.cmake"
+        BYPRODUCTS "${CMAKE_CURRENT_BINARY_DIR}/generated/FissionVersion.hpp"
+        VERBATIM
+)
+
 include(CTest)
 include(CMakeDependentOption)
 find_package(Threads REQUIRED)
@@ -343,7 +405,11 @@ add_library(Fission.Server STATIC
     Fission.Server/src/Server.cpp
     Fission.Server/include/Server.hpp
 )
-target_include_directories(Fission.Server PUBLIC Fission.Server/include)
+target_include_directories(Fission.Server PUBLIC
+        Fission.Server/include
+        "${CMAKE_CURRENT_BINARY_DIR}/generated"
+)
+add_dependencies(Fission.Server FissionVersionHeader)
 # Consumers of Fission.Server also compile Boost.Asio headers.
 target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast Boost::json Threads::Threads)
 if (WIN32)
@@ -370,6 +436,7 @@ add_executable(Fission.Server.CLI
     Fission.Server/CLI/main.cpp
 )
 set_target_properties(Fission.Server.CLI PROPERTIES OUTPUT_NAME Fission.Server)
+add_dependencies(Fission.Server.CLI FissionVersionHeader)
 target_link_libraries(Fission.Server.CLI PUBLIC Fission.Server)
 target_compile_options(Fission.Server.CLI PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Server.CLI PRIVATE ${CXX_LINK_OPTIONS})
@@ -458,6 +525,7 @@ if (BUILD_TESTING)
             Catch2
     )
 
+    add_dependencies(Fission.Tests FissionVersionHeader)
     target_compile_options(Fission.Tests PRIVATE ${CXX_COMPILE_OPTIONS})
     target_link_options(Fission.Tests PRIVATE ${CXX_LINK_OPTIONS})
 
