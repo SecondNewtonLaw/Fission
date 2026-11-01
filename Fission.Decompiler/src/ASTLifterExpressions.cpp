@@ -900,8 +900,8 @@ static std::optional<int32_t> TableArrayStoreIndex(const AnalyzedFunction *funct
                 if (constant.kType != LUA_TNUMBER)
                     return std::nullopt;
                 const double value = std::get<LuauNumber>(constant.constantData);
-                // NaN fails both range comparisons, so reject non-finite keys explicitly before converting; a NaN
-                // key addresses the hash part and converting it to an integer is undefined behavior.
+                // A NaN key addresses the hash part. Casting NaN to an integer is undefined behavior, and NaN
+                // fails both range checks, so screen for finite keys first.
                 if (!Fission::IsFiniteDouble(value) || value < 1.0 || value > 2147483647.0)
                     return std::nullopt;
                 const auto asIndex = static_cast<int32_t>(value);

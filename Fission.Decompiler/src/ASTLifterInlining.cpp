@@ -1487,7 +1487,7 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
     return false;
 }
 
-// A store even into a fresh table raises on a nil or NaN key.
+// A store into a fresh table still raises on a nil or NaN key, so the lifter keeps it.
 bool ASTLifter::KeyMayRaise(const LiftedInstruction &store) const {
     if (store.operation != LiftedOperation::SETTABLE || store.operands.size() < 3 || store.operands[2].type != LiftedOperandType::Register)
         return false;
