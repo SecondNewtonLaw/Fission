@@ -2,7 +2,8 @@
 // bursts must not leave resident memory permanently above the server's steady-state baseline.
 //
 // Guarded to glibc-based Linux because it reads /proc/<pid>/status and because the server only calls
-// malloc_trim(0) under __GLIBC__. Other Linux builds take the skip path in the last branch below.
+// malloc_trim(0) under __GLIBC__. The trim only reclaims pages from the system allocator, so mimalloc
+// builds, which route Fission-owned allocations elsewhere, take the skip path too.
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -18,7 +19,7 @@
 #endif
 #endif
 
-#if defined(__linux__) && defined(__GLIBC__) && !defined(FISSION_TEST_ASAN)
+#if defined(__linux__) && defined(__GLIBC__) && !defined(FISSION_TEST_ASAN) && !defined(FISSION_USE_MIMALLOC)
 
 #include "Luau/Common.h"
 #ifdef __clang__
@@ -341,7 +342,7 @@ TEST_CASE("Server: sustained large-script load returns resident memory near base
 #else
 
 TEST_CASE("Server: sustained large-script load returns resident memory near baseline", "[Server][Memory][Linux]") {
-    SKIP("Linux-only load test (requires a glibc allocator, malloc_trim, and /proc)");
+    SKIP("Linux-only load test (requires glibc malloc_trim and /proc; skipped for mimalloc builds)");
 }
 
 #endif
