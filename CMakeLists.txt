@@ -514,6 +514,7 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/FuzzSemanticEvaluationRegressions.cpp
             Fission.Tests/Decompiler/WhileLatchContinueMergeRegressions.cpp
             Fission.Tests/Decompiler/VarargCapturedAssignmentRegressions.cpp
+            Fission.Tests/Decompiler/ChaosMachineRegression.cpp
             Fission.Tests/SSA/SSAInvariants.cpp
             Fission.Tests/Server/ServerMemoryLinux.cpp
             Fission.Tests/Server/ServerBehaviour.cpp
