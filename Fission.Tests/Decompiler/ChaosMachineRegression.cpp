@@ -84,6 +84,7 @@ local f = __integration_subject()
 print(f(1048576, "abc"))
 print(f(-1))
 print(f(1048576, "xyz", 7))
+print(f(999999))
 )";
 } // namespace
 
