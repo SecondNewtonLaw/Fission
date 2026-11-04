@@ -620,7 +620,8 @@ run(true))LUA";
     fuzz::EnableLuauFlags();
     const auto output = fuzz::FullDecompile(source).output;
     INFO(output);
-    CHECK(output.find("v.Name == \"Torso\" ~= false") != std::string::npos);
+    // the materialized boolean term must still read the loop variable's field (name preserved).
+    CHECK(output.find("v.Name == \"Torso\" == false") != std::string::npos);
 }
 
 TEST_CASE("Compiler audit: a self-referencing local function reassigned in a branch stays local", "[Decompiler][ReplayRegress][Semantics]") {

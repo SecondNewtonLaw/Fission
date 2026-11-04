@@ -9,6 +9,7 @@
 #include "Rewriters/AttributeRenamer.hpp"
 #include "Rewriters/ChildLookupRenamer.hpp"
 #include "Rewriters/ClassMethodRewriter.hpp"
+#include "Rewriters/ConditionFolder.hpp"
 #include "Rewriters/ConstLocalMarker.hpp"
 #include "Rewriters/ConstructorResultRenamer.hpp"
 #include "Rewriters/DeadLocalEliminator.hpp"
@@ -722,6 +723,8 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     timeRewriter("Declaration Hoister 1", [&] { DeclarationHoister{}.Run(liftedAST.statements); });
 
     timeRewriter("Short-Circuit Folder", [&] { ShortCircuitFolder{}.Run(liftedAST.statements); });
+    // Conditions feed the loop and branch shape decisions below, so normalize them first.
+    timeRewriter("Condition Folder", [&] { ConditionFolder{}.Run(liftedAST.statements); });
     timeRewriter("While-True Repeat Rewriter", [&] { WhileTrueRepeatRewriter{}.Run(liftedAST.statements); });
     // Method reconstruction must precede dead-local elimination.
     timeRewriter("Class Method Rewriter", [&] { ClassMethodRewriter{}.Run(liftedAST.statements); });
@@ -729,6 +732,9 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     timeRewriter("Dead Local Eliminator 1", [&] { DeadLocalEliminator{}.Run(liftedAST.statements); });
     timeRewriter("Self-Assignment Eliminator", [&] { SelfAssignmentEliminator{}.Run(liftedAST.statements); });
     timeRewriter("If-Chain Simplifier", [&] { IfChainSimplifier{}.Run(liftedAST.statements); });
+    // The if-chain pass flattens `if c then break else rest end` into a leading guard, so loop guards
+    // are only foldable once it has run. The earlier run normalizes conditions for its branch decisions.
+    timeRewriter("Condition Folder 2", [&] { ConditionFolder{}.Run(liftedAST.statements); });
     timeRewriter("Child Lookup Renamer", [&] { ChildLookupRenamer{}.Run(liftedAST.statements); });
     timeRewriter("Require Renamer", [&] { RequireRenamer{}.Run(liftedAST.statements); });
     timeRewriter("Getter Renamer", [&] { GetterRenamer{}.Run(liftedAST.statements); });
@@ -743,6 +749,9 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
     timeRewriter("Global Assignment Renamer", [&] { GlobalAssignmentRenamer{}.Run(liftedAST.statements); });
     // Fold branch assignments before scope blocks separate declarations from their diamonds.
     timeRewriter("If-Expression Folder", [&] { IfExpressionFolder{}.Run(liftedAST.statements); });
+    // Value diamonds only become plain assignments after the if-expression fold, so the and-chain
+    // terminal shape is complete here; dead-local elimination below then drops the emptied bindings.
+    timeRewriter("And-Chain Folder", [&] { AndChainFolder{}.Run(liftedAST.statements); });
     timeRewriter("Dead Local Eliminator 2", [&] { DeadLocalEliminator{}.Run(liftedAST.statements); });
 
     // Scope blocks run last against final statement lifetimes.

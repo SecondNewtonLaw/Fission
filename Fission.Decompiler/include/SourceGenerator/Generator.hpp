@@ -8,6 +8,7 @@
 #include "AbstractSyntaxTree/Visitor.hpp"
 #include "SafetyGuard.hpp"
 
+#include <algorithm>
 #include <bit>
 #include <cstdint>
 #include <format>
@@ -22,6 +23,9 @@ class SourceGenerator : public Visitor {
     std::stringstream buffer;
     size_t dwIndentationLevel = 0;
     static constexpr size_t kIndentationSpaceCount = 4;
+    // Past this depth the leading whitespace dominates the output (a nested-table bomb costs O(depth) bytes per
+    // line), so deeper levels share the cap. Structure is still visible through the braces themselves.
+    static constexpr size_t kMaxIndentationLevel = 16;
     // Split table literals that exceed this column.
     static constexpr size_t kTableInlineColumnLimit = 80;
 
@@ -130,7 +134,9 @@ class SourceGenerator : public Visitor {
         return false;
     }
 
-    std::string GetIndentation() { return std::string(this->dwIndentationLevel * kIndentationSpaceCount, ' '); } // NOLINT(*-return-braced-init-list)
+    std::string GetIndentation() {
+        return std::string(std::min(this->dwIndentationLevel, kMaxIndentationLevel) * kIndentationSpaceCount, ' ');
+    } // NOLINT(*-return-braced-init-list)
 
     void NextLine() { buffer << "\n"; }
     void IncreaseIndentation() { this->dwIndentationLevel++; }

@@ -35,6 +35,9 @@ class ShortCircuitChainFolder : public ASTRewriter {
             changed = FoldTerminalOrChain(stmts);
             if (changed)
                 continue;
+            changed = FoldTerminalAndChain(stmts);
+            if (changed)
+                continue;
             for (size_t i = 0; i + 1 < stmts.size(); ++i) {
                 // Plain assignments and declarations both publish the value read by the next statement.
                 auto first = AsAssignmentForm(stmts[i]);
@@ -64,6 +67,14 @@ class ShortCircuitChainFolder : public ASTRewriter {
     }
 
     static void EraseSelfAssignments(std::vector<std::shared_ptr<Statement>> &stmts) { std::erase_if(stmts, IsSelfAssign); }
+
+    // second chance for the and-chain fold: later passes (if-chain flattening) expose the guarded shape.
+    static void FoldAndChains(std::vector<std::shared_ptr<Statement>> &stmts) {
+        for (size_t i = 0; i + 1 < stmts.size(); ++i) {
+            Fission::CheckDecompileDeadline();
+            FoldTerminalAndChainAt(stmts, i);
+        }
+    }
 
     // rewrite Luau's short-circuit lowering back into one assignment:
     //   if not target then target = expr end   ==>   target = target or expr
@@ -208,6 +219,28 @@ class ShortCircuitChainFolder : public ASTRewriter {
     }
 
     // drop empty `if cond then end` whose cond is a side-effect-free read. short-circuit fold residue.
+    static bool IsSideEffectFreeRead(const std::shared_ptr<Expression> &expr) {
+        if (!expr)
+            return false;
+        if (ExtractIdentifierName(expr).has_value())
+            return true;
+        if (expr->nodeKind == ASTNodeKind::LiteralValue) {
+            switch (expr->literalKind) {
+            case LiteralNodeKind::Nil:
+            case LiteralNodeKind::Boolean:
+            case LiteralNodeKind::Number:
+            case LiteralNodeKind::Integer:
+            case LiteralNodeKind::String:
+                return true;
+            default:
+                return false;
+            }
+        }
+        if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(expr); unary && unary->op == "not ")
+            return IsSideEffectFreeRead(unary->operand);
+        return false;
+    }
+
     static bool IsTriviallyDeadIf(const std::shared_ptr<Statement> &stmt) {
         auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmt);
         if (!ifStmt)
@@ -217,15 +250,8 @@ class ShortCircuitChainFolder : public ASTRewriter {
         if (!thenEmpty || !elseEmpty)
             return false;
 
-        // only bare identifier or `not <identifier>`.
-        auto cond = ifStmt->condition;
-        if (!cond)
-            return true;
-        if (ExtractIdentifierName(cond).has_value())
-            return true;
-        if (auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(cond); unary && unary->op == "not ")
-            return ExtractIdentifierName(unary->operand).has_value();
-        return false;
+        // a bare identifier, a literal, or `not <side-effect-free read>`.
+        return !ifStmt->condition || IsSideEffectFreeRead(ifStmt->condition);
     }
 
     static bool IsEmptyReturn(const std::shared_ptr<Statement> &stmt) {
@@ -425,6 +451,122 @@ class ShortCircuitChainFolder : public ASTRewriter {
         for (size_t i = 1; i < exprs.size(); ++i)
             chain = Fission::MakeShared<BinaryExpressionNode>("or", chain, exprs[i]);
         return chain;
+    }
+
+    static std::shared_ptr<Expression> MakeAndChain(const std::vector<std::shared_ptr<Expression>> &exprs) {
+        std::shared_ptr<Expression> chain = exprs.front();
+        for (size_t i = 1; i < exprs.size(); ++i)
+            chain = Fission::MakeShared<BinaryExpressionNode>("and", chain, exprs[i]);
+        return chain;
+    }
+
+    // a bare call or vararg is the last value in a return list, so it spreads all its results. Inside
+    // an `and` chain it is adjusted to one value instead.
+    static bool IsMultiResultExpression(const std::shared_ptr<Expression> &expr) {
+        if (!expr)
+            return false;
+        if (const auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr))
+            return !call->bAdjustToOne;
+        if (const auto call = std::dynamic_pointer_cast<NameCallExpressionNode>(expr))
+            return !call->bAdjustToOne;
+        if (const auto vararg = std::dynamic_pointer_cast<VarArgExpression>(expr))
+            return !vararg->bAdjustToOne;
+        return false;
+    }
+
+    // fold the `X = a; if not X then return X end; ...; return X` shape Luau emits for
+    // `return a and ... and n`. Every guard must return X itself, so the chain is the whole lifetime
+    // of the binding. The terminal may no longer name X when the last arm was constant-folded; that
+    // value is then the final term. Folds at one index only, so a scan over a block is linear.
+    static bool FoldTerminalAndChainAt(std::vector<std::shared_ptr<Statement>> &stmts, size_t i) {
+        if (i + 1 >= stmts.size())
+            return false;
+        auto first = AsAssignmentForm(stmts[i]);
+        if (!first)
+            return false;
+        // A binding introduced here cannot be captured by an earlier closure, so dropping the
+        // declaration is safe. An assignment to a pre-existing binding can be captured, and the fold
+        // would remove a write the closure observes.
+        if (!first->isDeclaration)
+            return false;
+
+        std::vector<std::shared_ptr<Expression>> exprs{first->rhs};
+        size_t cursor = i + 1;
+        bool sawGuard = false;
+        // a terminal that ignores the binding is only the folded last arm when the loop stopped on a
+        // guard; after an assignment to the binding the terminal may simply discard that assignment.
+        bool endedOnGuard = false;
+        while (cursor < stmts.size()) {
+            auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmts[cursor]);
+            if (!ifStmt || ifStmt->elseBranch || !ifStmt->thenBranch || ifStmt->thenBranch->body.size() != 1)
+                break;
+            auto unary = std::dynamic_pointer_cast<UnaryExpressionNode>(ifStmt->condition);
+            if (!unary || unary->op != "not ")
+                break;
+            auto condName = ExtractIdentifierName(unary->operand);
+            if (!condName || *condName != first->lhsName)
+                break;
+            auto guardRet = std::dynamic_pointer_cast<ReturnStatementNode>(ifStmt->thenBranch->body.front());
+            if (!guardRet || guardRet->returnValues.size() != 1)
+                break;
+            auto guardName = ExtractIdentifierName(guardRet->returnValues.front());
+            if (!guardName || *guardName != first->lhsName)
+                break;
+            sawGuard = true;
+            endedOnGuard = true;
+            ++cursor;
+            if (cursor >= stmts.size())
+                break;
+            auto next = AsAssignmentForm(stmts[cursor]);
+            if (!next || next->lhsName != first->lhsName)
+                break;
+            // a term that reads the binding would change meaning once the binding is gone.
+            std::unordered_set<std::string> rhsNames;
+            ScopeAwareRenamer::CollectIdentifierNames(Fission::MakeShared<ExpressionStatementNode>(next->rhs), rhsNames);
+            if (rhsNames.contains(first->lhsName))
+                break;
+            exprs.push_back(next->rhs);
+            endedOnGuard = false;
+            ++cursor;
+        }
+
+        if (!sawGuard || cursor >= stmts.size())
+            return false;
+        auto ret = std::dynamic_pointer_cast<ReturnStatementNode>(stmts[cursor]);
+        if (!ret || ret->returnValues.size() != 1)
+            return false;
+        auto retName = ExtractIdentifierName(ret->returnValues.front());
+        if (!retName || *retName != first->lhsName) {
+            // a terminal that ignores the binding is only valid right after a guard, where it is the
+            // last arm. After an assignment, the terminal discards the value the assignment produced.
+            if (!endedOnGuard)
+                return false;
+            std::unordered_set<std::string> terminalNames;
+            ScopeAwareRenamer::CollectIdentifierNames(ret->returnValues.front(), terminalNames);
+            if (terminalNames.contains(first->lhsName))
+                return false;
+            // A bare call or vararg in a return list yields all its results; wrapping it in `and`
+            // truncates it to one, changing the terminal return's arity.
+            if (IsMultiResultExpression(ret->returnValues.front()))
+                return false;
+            exprs.push_back(ret->returnValues.front());
+        }
+
+        // A one-term chain keeps the initializer's own arity. An unadjusted call or vararg would
+        // spread every result where the original returned the single stored value.
+        if (exprs.size() == 1 && IsMultiResultExpression(exprs.front()))
+            return false;
+
+        stmts[i] = Fission::MakeShared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{MakeAndChain(exprs)});
+        stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1, stmts.begin() + static_cast<std::ptrdiff_t>(cursor) + 1);
+        return true;
+    }
+
+    static bool FoldTerminalAndChain(std::vector<std::shared_ptr<Statement>> &stmts) {
+        for (size_t i = 0; i + 1 < stmts.size(); ++i)
+            if (FoldTerminalAndChainAt(stmts, i))
+                return true;
+        return false;
     }
 
     static std::shared_ptr<Statement> BuildTerminalReplacement(TerminalUse terminal, const std::shared_ptr<Expression> &chain) {
@@ -627,4 +769,10 @@ class ShortCircuitChainFolder : public ASTRewriter {
 
         return false;
     }
+};
+
+// Runs the and-chain terminal fold again once later passes have flattened the guarded if/else arms.
+class AndChainFolder : public ASTRewriter {
+  protected:
+    void RewriteStatements(std::vector<std::shared_ptr<Statement>> &stmts) override { ShortCircuitChainFolder::FoldAndChains(stmts); }
 };
