@@ -136,7 +136,7 @@ std::shared_ptr<Expression> ASTLifter::LiftExpression(const LiftedOperand &__ope
         return Fission::MakeShared<IdentifierExpressionNode>(Fission::MakeShared<Identifier>(ResolveVariableName(operand, false)));
     }
 
-    // nesting is bounded by the register file in real code; only a def feeding itself recurses forever
+    // a def feeding itself would recurse forever
     if (!m_liftingDefs.insert(def).second)
         throw Fission::DecompilerError("malformed bytecode: expression depends on itself (cycle). Cowardly refusing to decompile!");
     struct DefGuard {
@@ -1064,6 +1064,32 @@ std::optional<ASTLifter::TableLiteralPlan> ASTLifter::PlanTableLiteral(const Lif
             scanEnd = (std::max)(scanEnd, static_cast<size_t>(user->instructionIndex) + 1);
         }
     bool &bFoundSetList = plan.foundSetList;
+
+    // The scan below asks for the decision on every candidate in the window, and for the definitions
+    // their values read. Resolve them as one batch: the current table frame is suspended once, not once
+    // per store, so a constructor with many population stores is planned in one pass.
+    {
+        const auto &instructions = m_currentFunction->lpLiftedFunction->instructions;
+        std::vector<const LiftedInstruction *> inlineDependencies;
+        inlineDependencies.reserve(scanEnd - static_cast<size_t>(inst.instructionIndex));
+        const auto addDefinition = [&](const LiftedOperand &operand) {
+            if (operand.type != LiftedOperandType::Register)
+                return;
+            const auto *definition = m_currentFunction->GetDefinition(operand);
+            if (definition && definition != &inst)
+                inlineDependencies.push_back(definition);
+        };
+        for (size_t i = static_cast<size_t>(inst.instructionIndex) + 1; i < scanEnd && i < instructions.size(); ++i) {
+            const auto &candidate = instructions[i];
+            inlineDependencies.push_back(&candidate);
+            for (const auto &operand : candidate.operands)
+                addDefinition(operand);
+            if (candidate.operation == LiftedOperation::SETLIST)
+                for (const auto &element : SetListElements(candidate))
+                    addDefinition(element);
+        }
+        ResolveInlineBatch(inlineDependencies);
+    }
 
     std::unordered_set<SSARef, std::hash<SSARef>> closureVisited;
     std::function<bool(const LiftedOperand &)> dependsOnClosure = [&](const LiftedOperand &op) -> bool {

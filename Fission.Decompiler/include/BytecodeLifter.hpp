@@ -2,6 +2,7 @@
 
 #include "InstructionDecoder.hpp"
 
+#include <cstddef>
 #include <libassert/assert.hpp>
 #include <optional>
 #include <vector>
@@ -143,6 +144,11 @@ struct LiftedFunction {
 class BytecodeLifter {
     // lifts one function's own instructions; subfunctions are attached by LiftDeserializedBytecode.
     LiftedFunction LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain = false);
+
+    // AUX words are raw instruction slots without an opcode of their own: they are read as operands and
+    // padded with a NOP in the lifted stream. Every read is bounds-checked so a truncated function is
+    // rejected as malformed instead of throwing std::out_of_range.
+    static uint32_t ReadAuxWord(const DeserializedFunction *function, size_t instructionIndex);
 
     Fission::InstructionDecoder *lpDecoder = nullptr;
 

@@ -281,6 +281,17 @@ std::string GetLuauBuiltinName(LuauBuiltinFunction id) {
     }
 }
 
+uint32_t BytecodeLifter::ReadAuxWord(const DeserializedFunction *function, size_t instructionIndex) {
+    if (instructionIndex + 1 >= function->instructions.size()) {
+        const auto opCode = LUAU_INSN_OP(function->instructions[instructionIndex].instruction);
+        throw Fission::DecompilerError(
+            std::format("malformed bytecode: opcode {} at instruction {} is missing its AUX word", static_cast<int>(opCode), instructionIndex)
+        );
+    }
+
+    return function->instructions[instructionIndex + 1].instruction;
+}
+
 LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFunction *function, bool bIsMain) {
     DEBUG_ASSERT(function != nullptr);
     LiftedFunction liftedFunction{};
@@ -364,7 +375,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             if (opCode == LOP_LOADK) {
                 instr.operands[1].value.imm.k = instruction.GetD();
             } else {
-                instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+                instr.operands[1].value.imm.k = ReadAuxWord(function, currentIndex);
             }
 
             std::stringstream finalComment;
@@ -424,7 +435,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[1].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[1].value.imm.k);
@@ -446,7 +457,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].type = LiftedOperandType::Register;
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[1].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[1].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[1].value.imm.k);
@@ -492,7 +503,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateConstant; // destination to ktable if loaded properly
             instr.operands[1].value.imm.k = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::ImmediateAux; // index chain
-            instr.operands[2].value.imm.u = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.u = ReadAuxWord(function, currentIndex);
 
             // taken from luaV_getimport, thank you Luau, why the fuck isn't this in a fucking macro?
             int id0 = int(instr.operands[2].value.imm.u >> 20) & 1023;
@@ -500,12 +511,14 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             int id2 = int(instr.operands[2].value.imm.u) & 1023;
 
             int indexCount = instr.operands[2].value.imm.u >> 30;
+            // the compiler's getImportId encodes a path length of 1..3 in the top two bits; luaV_getimport
+            // asserts count > 0. a zero count would make the AUX slot disappear from the lifted stream and
+            // desynchronise every following instruction index.
+            if (indexCount == 0)
+                throw Fission::DecompilerError("malformed bytecode: GETIMPORT AUX encodes an empty import path");
+
             std::stringstream finalComment;
             finalComment << "INFO: Index Chain '";
-            if (indexCount == 0) {
-                instr.instructionRemarks = std::format("WARNING: Auxiliary corrupted? No GETIMPORT indexes found, cannot estimate path.");
-                break;
-            }
             if (indexCount-- > 0) {
                 auto &k0 = function->constants.at(id0);
                 if (k0.kType == LUA_TSTRING)
@@ -571,7 +584,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -597,7 +610,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -667,7 +680,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             const auto &constant = function->constants.at(instr.operands[2].value.imm.k);
@@ -839,7 +852,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::Register;
-            instr.operands[2].value.reg = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.reg = ReadAuxWord(function, currentIndex);
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
@@ -996,7 +1009,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[2].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.n = ReadAuxWord(function, currentIndex);
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
@@ -1020,7 +1033,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[3].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[3].value.imm.n = ReadAuxWord(function, currentIndex);
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
@@ -1053,7 +1066,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetD();
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
-            instr.operands[2].value.imm.n = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.n = ReadAuxWord(function, currentIndex);
             liftedFunction.instructions.emplace_back(LiftedOperation::NOP).instructionRemarks =
                 "INFO: padding due to the original instruction requiring an auxiliary.";
             break;
@@ -1076,7 +1089,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
-            const auto aux = function->instructions.at(currentIndex + 1).instruction;
+            const auto aux = ReadAuxWord(function, currentIndex);
             instr.operands[3].type = LiftedOperandType::Register;
             instr.operands[3].value.reg = LUAU_INSN_AUX_A(aux);
             instr.operands[4].type = LiftedOperandType::Register;
@@ -1207,7 +1220,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::Register;
-            instr.operands[3].value.reg = LUAU_INSN_AUX_A(function->instructions.at(currentIndex + 1).instruction);
+            instr.operands[3].value.reg = LUAU_INSN_AUX_A(ReadAuxWord(function, currentIndex));
 
             instr.instructionRemarks =
                 std::format("INFO: Perform FastCall2 of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
@@ -1225,7 +1238,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::ImmediateInteger;
             instr.operands[2].value.imm.n = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[3].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[3].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[3].value.imm.k = ReadAuxWord(function, currentIndex);
 
             instr.instructionRemarks =
                 std::format("INFO: Perform FastCall2K of '{}'", GetLuauBuiltinName(static_cast<LuauBuiltinFunction>(instr.operands[0].value.imm.n)));
@@ -1280,18 +1293,19 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::ImmediateInteger;
             instr.operands[1].value.imm.n = instruction.GetD() + 1;
 
+            const auto aux = ReadAuxWord(function, currentIndex);
             auto constantAsString = std::string("");
 
             if (opCode == LOP_JUMPXEQKB) {
                 instr.operands[2].type = LiftedOperandType::ImmediateBool;
-                instr.operands[2].value.imm.b = LUAU_INSN_AUX_KB(function->instructions.at(currentIndex + 1).instruction) != 0;
+                instr.operands[2].value.imm.b = LUAU_INSN_AUX_KB(aux) != 0;
                 constantAsString = std::format("{}", instr.operands[2].value.imm.b);
             } else {
                 instr.operands[2].type = LiftedOperandType::ImmediateNil;
                 constantAsString = "nil";
             }
             instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
-            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(aux) != 0;
 
             auto jumpTarget = instr.operands[1].value.imm.n + currentIndex;
             auto targetRegister = instr.operands[0].value.reg;
@@ -1319,10 +1333,11 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[0].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::A);
             instr.operands[1].type = LiftedOperandType::ImmediateInteger; // jmp off
             instr.operands[1].value.imm.n = instruction.GetD() + 1;
+            const auto aux = ReadAuxWord(function, currentIndex);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant; // ktable idx
-            instr.operands[2].value.imm.k = LUAU_INSN_AUX_KV(function->instructions.at(currentIndex + 1).instruction);
+            instr.operands[2].value.imm.k = LUAU_INSN_AUX_KV(aux);
             instr.operands[3].type = LiftedOperandType::ImmediateBool; // NOT flag
-            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(function->instructions.at(currentIndex + 1).instruction) != 0;
+            instr.operands[3].value.imm.b = LUAU_INSN_AUX_NOT(aux) != 0;
 
             auto jumpTarget = instr.operands[1].value.imm.n + currentIndex;
             auto targetRegister = instr.operands[0].value.reg;
@@ -1374,7 +1389,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex) & 0xFFFF;
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -1398,7 +1413,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex) & 0xFFFF;
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -1422,7 +1437,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::B);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction & 0xFFFF;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex) & 0xFFFF;
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -1445,7 +1460,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[1].type = LiftedOperandType::Register;
             instr.operands[1].value.reg = instruction.GetABCOperand(LuauInstruction::LuauOperand::C);
             instr.operands[2].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[2].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[2].value.imm.k = ReadAuxWord(function, currentIndex);
 
             std::stringstream finalComment;
             auto &k0 = function->constants.at(instr.operands[2].value.imm.k);
@@ -1476,7 +1491,7 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
             instr.operands[2].type = LiftedOperandType::ImmediateBool;
             instr.operands[2].value.imm.b = (instruction.GetABCOperand(LuauInstruction::LuauOperand::C) & 1u) != 0;
             instr.operands[3].type = LiftedOperandType::ImmediateConstant;
-            instr.operands[3].value.imm.k = function->instructions.at(currentIndex + 1).instruction;
+            instr.operands[3].value.imm.k = ReadAuxWord(function, currentIndex);
 
             const auto &shape = function->constants.at(instr.operands[3].value.imm.k);
             if (!shape.IsClassShape())
@@ -1700,6 +1715,11 @@ LiftedFunction BytecodeLifter::LiftFunctionBytecodeInternal(const DeserializedFu
                 throw Fission::DecompilerError("malformed bytecode: jump target outside the instruction stream");
         }
     }
+
+    // every raw slot (including AUX words) must have exactly one lifted slot; downstream stages map
+    // instructionIndex back into the raw stream and assume this 1:1 correspondence.
+    if (liftedFunction.instructions.size() != function->instructions.size())
+        throw Fission::DecompilerError("malformed bytecode: lifted instruction count does not match the raw instruction stream");
 
     for (size_t currentIndex = 0; currentIndex < function->instructions.size(); currentIndex++) {
         liftedFunction.instructions.at(currentIndex).instructionIndex = (int32_t)currentIndex;

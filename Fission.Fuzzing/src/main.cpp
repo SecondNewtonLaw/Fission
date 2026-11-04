@@ -296,6 +296,8 @@ int main(int argc, char **argv) {
     int corpusLimit = 0;
     std::string mutateFile; // --repro-mutate <path> <seed>: compile src, flip bytes by seed, decompile (single-shot)
     std::string semFile;    // --sem-file <path>: decompile one source, run both in the Luau VM, diff traces
+    bool semPlain = false;  // --sem-plain: run --sem-file under an empty prelude (self-checking fixture corpus)
+    std::string semPrelude; // --sem-prelude <path>: run --sem-file under this source as its only prelude
     std::string replayDir;  // --replay-dir <path>: validate every saved source finding in one run
     bool explainUnchecked = false;
     uint32_t mutateSeed = 0;
@@ -343,6 +345,10 @@ int main(int argc, char **argv) {
             corpusLimit = (std::max)(0, std::atoi(argv[++i]));
         else if (a == "--sem-file" && i + 1 < argc)
             semFile = argv[++i];
+        else if (a == "--sem-plain")
+            semPlain = true;
+        else if (a == "--sem-prelude" && i + 1 < argc)
+            semPrelude = argv[++i];
         else if (a == "--replay-dir" && i + 1 < argc)
             replayDir = argv[++i];
         else if (a == "--explain-unchecked")
@@ -505,8 +511,10 @@ int main(int argc, char **argv) {
             std::string decompiledBc;
             if (!fuzz::LuauCompiles(decompiled.output, &decompiledBc)) {
                 ++outcomes["INVALID_RECOMPILE"];
-                std::fprintf(stderr, "[replay] INVALID_RECOMPILE %016llx %s %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str(),
-                             decompiledBc.empty() ? "" : decompiledBc.c_str() + 1);
+                std::fprintf(
+                    stderr, "[replay] INVALID_RECOMPILE %016llx %s %s\n", static_cast<unsigned long long>(HashBytes(source)), path.string().c_str(),
+                    decompiledBc.empty() ? "" : decompiledBc.c_str() + 1
+                );
                 continue;
             }
             if (fuzz::UsesGeneratedLocalBeforeDeclared(decompiled.output, &source)) {
@@ -525,8 +533,8 @@ int main(int argc, char **argv) {
             if (semantics.kind == fuzz::SemVerdict::Kind::Diverge) {
                 ++outcomes["SEM_DIVERGE"];
                 const std::string semanticSignature = std::format(
-                    "{}\n{}\n{}\n{}", static_cast<int>(semantics.original.status), semantics.original.trace,
-                    static_cast<int>(semantics.decompiled.status), semantics.decompiled.trace
+                    "{}\n{}\n{}\n{}", static_cast<int>(semantics.original.status), semantics.original.trace, static_cast<int>(semantics.decompiled.status),
+                    semantics.decompiled.trace
                 );
                 const uint64_t signature = HashBytes(semanticSignature);
                 ++semanticClusters[signature];
@@ -563,8 +571,8 @@ int main(int argc, char **argv) {
                 semanticExamples.at(signature).string().c_str()
             );
         std::fprintf(stderr, "=========================================================\n");
-        const size_t failures = outcomes["INVALID_INPUT"] + outcomes["DECOMPILE_FAILED"] + outcomes["INVALID_RECOMPILE"] +
-                                outcomes["FORWARD_REFERENCE"] + outcomes["SEM_DIVERGE"];
+        const size_t failures =
+            outcomes["INVALID_INPUT"] + outcomes["DECOMPILE_FAILED"] + outcomes["INVALID_RECOMPILE"] + outcomes["FORWARD_REFERENCE"] + outcomes["SEM_DIVERGE"];
         return failures == 0 ? 0 : 1;
     }
     if (!sugarSource.empty()) {
@@ -878,7 +886,34 @@ int main(int argc, char **argv) {
             std::fprintf(stderr, "[sem-file] decompiled output does not recompile\n");
             return 1;
         }
-        const auto preludes = fuzz::CompilePreludes([](const std::string &s, std::string *o) { return fuzz::LuauCompiles(s, o); });
+        // self-checking corpora (e.g. Luau's conformance fixtures) must run in a plain VM: the effect
+        // preludes give nil/booleans operator metatables, which turns a legitimate runtime error into a
+        // traced call and changes the program's control flow.
+        std::vector<std::string> preludes;
+        if (!semPrelude.empty()) {
+            std::ifstream preludeIn(semPrelude, std::ios::binary);
+            if (!preludeIn) {
+                std::fprintf(stderr, "[sem-file] cannot open prelude: %s\n", semPrelude.c_str());
+                return 2;
+            }
+            std::stringstream preludeSource;
+            preludeSource << preludeIn.rdbuf();
+            std::string preludeBc;
+            if (!fuzz::LuauCompiles(preludeSource.str(), &preludeBc)) {
+                std::fprintf(stderr, "[sem-file] prelude does not compile: %s\n", semPrelude.c_str());
+                return 2;
+            }
+            preludes.push_back(std::move(preludeBc));
+        } else if (semPlain) {
+            std::string empty;
+            if (!fuzz::LuauCompiles("", &empty)) {
+                std::fprintf(stderr, "[sem-file] empty prelude failed to compile\n");
+                return 2;
+            }
+            preludes.push_back(std::move(empty));
+        } else {
+            preludes = fuzz::CompilePreludes([](const std::string &s, std::string *o) { return fuzz::LuauCompiles(s, o); });
+        }
         if (preludes.empty()) {
             std::fprintf(stderr, "[sem-file] semantic preludes failed to compile\n");
             return 2;
@@ -938,8 +973,7 @@ int main(int argc, char **argv) {
                         std::fprintf(
                             stderr, "] latch=%d exit=%d header=%d head=%d tail=%d\n", b.loopLatch.has_value() ? (int)b.loopLatch.value() : -1,
                             b.loopExit.has_value() ? (int)b.loopExit.value() : -1, b.loopHeader.has_value() ? (int)b.loopHeader.value() : -1,
-                            b.lpHead ? (int)b.lpHead->operation : -1,
-                            b.lpTail ? (int)b.lpTail->operation : -1
+                            b.lpHead ? (int)b.lpHead->operation : -1, b.lpTail ? (int)b.lpTail->operation : -1
                         );
                         for (const auto &note : b.analysisNotes)
                             std::fprintf(stderr, "[cfg] %*s    why: %s\n", dep * 2, "", note.c_str());
@@ -960,7 +994,7 @@ int main(int argc, char **argv) {
         } catch (...) {
             std::fprintf(stderr, "[cfg] (dump threw)\n");
         }
-        const char *stage = fuzz::RunStagesAttributed(bc);
+        const char *stage = fuzz::RunStagesAttributed(bc, true);
         std::fprintf(stderr, "[file] attributed stages: %s\n", stage ? stage : "all completed");
         const auto dec = fuzz::FullDecompile(src);
         std::fprintf(stderr, "[file] FullDecompile result code: %d\n", static_cast<int>(dec.code));
@@ -1290,9 +1324,8 @@ int main(int argc, char **argv) {
                     Write(crashDir / (id + ".lua"), source);
                     Write(crashDir / (id + ".out.lua"), dec.output);
                     Write(
-                        crashDir / (id + ".effects"),
-                        effectClass + "\n" + std::string(originalEffects->begin(), originalEffects->end()) + "\n" +
-                            std::string(liftedEffects->begin(), liftedEffects->end()) + "\n"
+                        crashDir / (id + ".effects"), effectClass + "\n" + std::string(originalEffects->begin(), originalEffects->end()) + "\n" +
+                                                          std::string(liftedEffects->begin(), liftedEffects->end()) + "\n"
                     );
                 }
             }
@@ -1332,7 +1365,9 @@ int main(int argc, char **argv) {
                 c.buckets[b]++;
                 if (v.kind == fuzz::SemVerdict::Kind::Unrunnable) {
                     static const std::regex nameRe(R"('[^']*'|\d+)");
-                    const std::string reason = v.skipped ? "skipped" : v.opaque ? "opaque" : "errors:" + std::regex_replace(v.original.error.value_or("?"), nameRe, "_");
+                    const std::string reason = v.skipped  ? "skipped"
+                                               : v.opaque ? "opaque"
+                                                          : "errors:" + std::regex_replace(v.original.error.value_or("?"), nameRe, "_");
                     c.buckets["  unch:" + reason]++;
                 }
                 if (v.kind == fuzz::SemVerdict::Kind::Diverge && c.savedExamples[b]++ < 50) {
