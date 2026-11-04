@@ -295,10 +295,30 @@ local function varargTail(a, ...)
     v = 6
     return ...
 end
-return store, get, multi, varargTail
+local function multiDirect(a, f)
+    local v = a
+    if not v then return v end
+    return f()
+end
+local function varargDirect(a, ...)
+    local v = a
+    if not v then return v end
+    return ...
+end
+local function singleCall(f)
+    local v = f()
+    if not v then return v end
+    return v
+end
+local function singleVararg(...)
+    local v = ...
+    if not v then return v end
+    return v
+end
+return store, get, multi, varargTail, multiDirect, varargDirect, singleCall, singleVararg
 )LUA";
     const std::string driver = R"LUA(
-local store, get, multi, varargTail = __integration_subject()
+local store, get, multi, varargTail, multiDirect, varargDirect, singleCall, singleVararg = __integration_subject()
 print(store(false), get())
 print(store(7), get())
 print(store(nil), get())
@@ -307,6 +327,10 @@ print(select('#', multi(true, f)), multi(true, f))
 print(multi(false, f))
 print(select('#', varargTail(true, 'a', 'b', 'c')), varargTail(true, 'a', 'b', 'c'))
 print(varargTail(false, 'a', 'b', 'c'))
+print(select('#', multiDirect(true, f)), multiDirect(true, f))
+print(select('#', varargDirect(true, 'a', 'b', 'c')), varargDirect(true, 'a', 'b', 'c'))
+print(select('#', singleCall(f)), singleCall(f))
+print(select('#', singleVararg('a', 'b', 'c')), singleVararg('a', 'b', 'c'))
 )LUA";
     CheckMatrix(source, driver);
 }

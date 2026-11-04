@@ -552,6 +552,11 @@ class ShortCircuitChainFolder : public ASTRewriter {
             exprs.push_back(ret->returnValues.front());
         }
 
+        // A one-term chain keeps the initializer's own arity. An unadjusted call or vararg would
+        // spread every result where the original returned the single stored value.
+        if (exprs.size() == 1 && IsMultiResultExpression(exprs.front()))
+            return false;
+
         stmts[i] = Fission::MakeShared<ReturnStatementNode>(std::vector<std::shared_ptr<Expression>>{MakeAndChain(exprs)});
         stmts.erase(stmts.begin() + static_cast<std::ptrdiff_t>(i) + 1, stmts.begin() + static_cast<std::ptrdiff_t>(cursor) + 1);
         return true;
