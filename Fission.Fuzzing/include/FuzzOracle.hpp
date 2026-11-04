@@ -4,6 +4,7 @@
 // Generator.hpp depends on these transitively.
 #include "libassert/assert.hpp"
 #include <algorithm>
+#include <cstdio>
 
 #include "ASTLifter.hpp"
 #include "BytecodeLifter.hpp"
@@ -117,7 +118,8 @@ namespace fuzz {
                     case LiftedOperation::GETIMPORT:
                     case LiftedOperation::GETGLOBAL: {
                         // a fastcall loads its builtin after the arguments; global reads only order against an environment metatable
-                        const uint32_t links = inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() > 2 ? inst.operands[2].value.imm.u >> 30 : 1;
+                        const uint32_t links =
+                            inst.operation == LiftedOperation::GETIMPORT && inst.operands.size() > 2 ? inst.operands[2].value.imm.u >> 30 : 1;
                         for (uint32_t link = 1; link < links; ++link)
                             trace.push_back('I');
                         break;
@@ -168,45 +170,55 @@ namespace fuzz {
     // Run the pipeline stage-by-stage, returning the stage name that threw, or nullptr if all
     // stages completed. `stage` tracks progress so the catch attributes the failure precisely.
     // Caller must have a Fission::ScopedThrowingAssertHandler live so asserts throw here.
-    inline const char *RunStagesAttributed(const std::string &bytecode) {
+    inline const char *RunStagesAttributed(const std::string &bytecode, bool trace = false) {
         const char *stage = "Deserializer";
+        // an uncatchable hard fault (stack overflow) kills the process, so --file asks for a flushed
+        // line before each stage to leave the culprit as the last one printed.
+        const auto step = [&](const char *name) {
+            stage = name;
+            if (trace) {
+                std::fprintf(stderr, "[stage] %s\n", name);
+                std::fflush(stderr);
+            }
+        };
         try {
+            step("Deserializer");
             Fission::InstructionDecoder decoder{};
             Deserializer des{};
             auto d = des.Deserialize(bytecode);
             if (!d || d->functions.empty())
                 return nullptr; // undecodable input is not a crash
 
-            stage = "BytecodeLifter";
+            step("BytecodeLifter");
             BytecodeLifter lifter{&decoder};
             auto lifted = lifter.LiftDeserializedBytecode(*d);
 
-            stage = "DetermineBasicBlocks";
+            step("DetermineBasicBlocks");
             ControlFlowAnalyzer cfa{};
             auto cf = cfa.DetermineBasicBlocks(&lifted);
-            stage = "OptimizeGraph";
+            step("OptimizeGraph");
             cfa.OptimizeGraph(cf);
-            stage = "PruneUnreachable";
+            step("PruneUnreachable");
             cfa.PruneUnreachable(cf);
-            stage = "IdentifyStructures";
+            step("IdentifyStructures");
             cfa.IdentifyStructures(cf);
 
-            stage = "SSABuilder";
+            step("SSABuilder");
             SSABuilder ssa{};
             ssa.Build(cf);
 
-            stage = "ASTLifter";
+            step("ASTLifter");
             ASTLifter astl{};
             auto ast = astl.Lift(cf);
 
-            stage = "ShortCircuitFolder";
+            step("ShortCircuitFolder");
             ShortCircuitFolder{}.Run(ast.statements);
-            stage = "IfChainSimplifier";
+            step("IfChainSimplifier");
             IfChainSimplifier{}.Run(ast.statements);
-            stage = "DeadLocalEliminator";
+            step("DeadLocalEliminator");
             DeadLocalEliminator{}.Run(ast.statements);
 
-            stage = "SourceGenerator";
+            step("SourceGenerator");
             RootNode root{ast.statements};
             SourceGenerator sg{};
             (void)sg.GenerateSource(&root);
@@ -327,8 +339,7 @@ namespace fuzz {
                 const auto &scope = visitor.result.scopes[i];
                 if (position < scope.begin || scope.end < position)
                     continue;
-                if (result == static_cast<size_t>(-1) ||
-                    (scope.begin >= visitor.result.scopes[result].begin && scope.end <= visitor.result.scopes[result].end))
+                if (result == static_cast<size_t>(-1) || (scope.begin >= visitor.result.scopes[result].begin && scope.end <= visitor.result.scopes[result].end))
                     result = i;
             }
             return result;

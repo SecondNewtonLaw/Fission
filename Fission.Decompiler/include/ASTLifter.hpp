@@ -165,6 +165,9 @@ struct ASTLifterFunctionState {
     boost::unordered_flat_map<const LiftedInstruction *, uint8_t> m_inlineBinaryDepth;
     boost::unordered_flat_map<const LiftedInstruction *, bool> m_constructorElementMemo;
     boost::unordered_flat_set<const LiftedInstruction *> m_shouldInlineActive;
+    // true while ShouldInline's worklist is evaluating an instruction; a nested query then reports its
+    // dependency instead of recursing, so a long SSA chain cannot exhaust the native stack
+    bool m_inlineResolving = false;
     struct ValueReads {
         std::vector<LiftedOperand> registers;
         size_t directRegisters = 0;
@@ -362,6 +365,9 @@ class ASTLifter : private ASTLifterFunctionState {
     // Identify calls that require truncation when inlined into a spread-tail position.
     bool IsMultretCall(const LiftedInstruction &callDef, int32_t callDefIndex) const;
     bool ShouldInline(const LiftedInstruction *inst);
+    // Resolve a set of decisions together; used by helpers that inspect a whole range.
+    void ResolveInlineBatch(const std::vector<const LiftedInstruction *> &instructions);
+    void ResolveInlineWorklist(std::vector<const LiftedInstruction *> &pending);
     // Mark the def chain of a value lifted inline so block lifting does not emit it again.
     void ConsumeInlinedDefs(const LiftedOperand &operand);
     void ConsumeInlinedInputs(const LiftedInstruction &def);

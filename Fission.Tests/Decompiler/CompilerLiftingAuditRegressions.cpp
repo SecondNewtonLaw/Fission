@@ -13,7 +13,52 @@
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
+#include <cstdint>
 #include <string>
+#include <vector>
+
+namespace {
+    void AppendVarint(std::string &out, uint32_t value) {
+        do {
+            auto byte = static_cast<uint8_t>(value & 0x7f);
+            value >>= 7;
+            if (value)
+                byte |= 0x80;
+            out.push_back(static_cast<char>(byte));
+        } while (value);
+    }
+
+    void AppendU32(std::string &out, uint32_t value) {
+        for (int i = 0; i < 4; ++i)
+            out.push_back(static_cast<char>((value >> (i * 8)) & 0xff));
+    }
+
+    // one v9 proto with the given raw instruction words and no constants/subfunctions.
+    std::string SingleFunctionBytecode(const std::vector<uint32_t> &instructions) {
+        std::string proto;
+        proto.append({char(1), char(0), char(0), char(0), char(0), char(0)}); // stack, params, upvalues, vararg, flags, empty type info
+        AppendVarint(proto, static_cast<uint32_t>(instructions.size()));
+        for (uint32_t instruction : instructions)
+            AppendU32(proto, instruction);
+        AppendVarint(proto, 0);   // constants
+        AppendVarint(proto, 0);   // child protos
+        AppendVarint(proto, 0);   // line defined
+        AppendVarint(proto, 0);   // debug name
+        proto.push_back(char(0)); // line info
+        proto.push_back(char(0)); // debug info
+
+        std::string bytecode;
+        bytecode.push_back(char(9)); // bytecode version
+        bytecode.push_back(char(3)); // type version
+        AppendVarint(bytecode, 0);   // strings
+        bytecode.push_back(char(0)); // no userdata mappings
+        AppendVarint(bytecode, 1);   // one proto
+        bytecode += proto;
+        AppendVarint(bytecode, 0); // main proto id
+        return bytecode;
+    }
+} // namespace
 
 TEST_CASE("Compiler audit: unread local keeps global read effects", "[Decompiler][CompilerAudit][Semantics]") {
     lifting_semantics_test::CheckSameTraceWithPrelude(
@@ -652,4 +697,81 @@ TEST_CASE("Compiler long alias chain snapshots an upvalue before mutation", "[De
     const auto output = lifting_semantics_test::DecompileOrFail(source, 0);
     INFO("decompiled:\n" << output);
     lifting_semantics_test::CheckSameTrace(source, output, 0);
+}
+
+TEST_CASE("Compiler audit: truncated AUX word is rejected as malformed bytecode", "[Decompiler][CompilerAudit][Hostile]") {
+    // GETGLOBAL is a two-slot instruction (opcode + AUX constant index); stopping after the opcode must
+    // be rejected by the lifter instead of escaping as std::out_of_range.
+    const std::string bytecode = SingleFunctionBytecode({static_cast<uint32_t>(LOP_GETGLOBAL) | (0u << 8)});
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode, DecompilerFlags::FissionDebugNotes);
+    CHECK(result.resultCode == DecompileResult::FailedToDecompile);
+    CHECK(result.debugNotes.find("missing its AUX word") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: GETIMPORT with an empty AUX path is rejected instead of desynchronising", "[Decompiler][CompilerAudit][Hostile]") {
+    // getImportId encodes a path length of 1..3 in the top two bits and luaV_getimport asserts count > 0.
+    // A zero count used to skip the padding NOP, so the lifted stream was one slot shorter than the raw
+    // stream and every following instructionIndex was shifted.
+    const std::vector<uint32_t> instructions = {
+        static_cast<uint32_t>(LOP_GETIMPORT) | (0u << 8) | (0u << 16),
+        0u, // AUX: empty import path
+        static_cast<uint32_t>(LOP_RETURN) | (2u << 16),
+    };
+    const std::string bytecode = SingleFunctionBytecode(instructions);
+    Decompiler decompiler{};
+    const auto result = decompiler.DecompileVanillaBytecode(bytecode, DecompilerFlags::FissionDebugNotes);
+    CHECK(result.resultCode == DecompileResult::FailedToDecompile);
+    CHECK(result.debugNotes.find("GETIMPORT AUX encodes an empty import path") != std::string::npos);
+}
+
+TEST_CASE("Compiler audit: long single-use call chain stays within the native stack", "[Decompiler][CompilerAudit][StackDepth]") {
+    // O0 keeps one SSA version per assignment, so each statement's call is the sole consumer of the
+    // previous one. ShouldInline used to evaluate that chain recursively, one frame per statement; a
+    // long straight-line spill block (SHA-style integer code) then overflowed the caller's stack.
+    std::string source = "local function add(a, b) return a + b end\n"
+                         "local function body()\n"
+                         "    local a, b, c, d = 1, 2, 3, 4\n";
+    const char *vars[] = {"a", "b", "c", "d"};
+    for (int i = 0; i < 320; ++i) {
+        const char *value = vars[i % 4];
+        const char *next = vars[(i + 1) % 4];
+        const char *third = vars[(i + 2) % 4];
+        const char *fourth = vars[(i + 3) % 4];
+        source += std::string("    ") + value + " = add(add(add(add(" + value + ", " + next + "), " + third + "), add(" + fourth + ", " + value + ")), 7)\n";
+    }
+    source += "    return a, b, c, d\nend\nprint(body())\n";
+
+    const auto out = lifting_semantics_test::DecompileOrFail(source, 0, static_cast<DecompilerFlags>(0), 1);
+    REQUIRE(lifting_semantics_test::CompilesOk(out));
+    lifting_semantics_test::CheckSameTrace(source, out, 0);
+}
+
+TEST_CASE("Compiler audit: wide table population plans in one pass", "[Decompiler][CompilerAudit][TablePlan]") {
+    // O0 emits one store per field. The iterative ShouldInline resolver originally restarted the table
+    // plan for every unresolved store decision, rescanning the constructor each time; a few thousand
+    // stores took minutes. The plan now declares its whole window as one batch.
+    std::string source = "local function build()\n"
+                         "    local t = {}\n";
+    constexpr int kStores = 2000;
+    for (int i = 0; i < kStores; ++i)
+        source += "    t[" + std::to_string(i) + "] = " + std::to_string(i % 7 + 1) + "\n";
+    source += "    return #t, t[0], t[" + std::to_string(kStores - 1) + "]\nend\nprint(build())\n";
+
+    const auto start = std::chrono::steady_clock::now();
+    const auto out = lifting_semantics_test::DecompileOrFail(source, 0, static_cast<DecompilerFlags>(0), 1);
+    const auto elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - start).count();
+    REQUIRE(lifting_semantics_test::CompilesOk(out));
+    // the pre-batch worklist took over a minute here in a debug build; keep generous headroom for CI
+    CHECK(elapsed < 10.0);
+    lifting_semantics_test::CheckSameTrace(source, out, 0);
+}
+
+TEST_CASE("Semantic oracle: prelude output does not mask an equal subject error", "[Decompiler][CompilerAudit][Semantics]") {
+    // Prelude prints are harness setup, not subject behavior. They must not make two identical
+    // subject errors look like a judged execution.
+    const std::string prelude = Luau::compile("print('prelude')");
+    const std::string subject = Luau::compile("error('boom')");
+    const auto verdict = fuzz::CompareSemantics(subject, subject, {prelude});
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Unrunnable);
 }

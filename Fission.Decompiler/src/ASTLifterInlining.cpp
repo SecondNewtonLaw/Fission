@@ -285,35 +285,133 @@ void ASTLifter::KeepOrderedCompoundAssignments() {
     m_inlineBinaryDepth.clear();
 }
 
+namespace {
+    // A decision can consult many other decisions before it finishes (a table plan folds every store, an
+    // effect scan inspects every instruction up to the use). Reporting the whole set lets the worklist
+    // resolve it in one pass; retrying after each single query would rescan the same prefix once per
+    // dependency and turn a linear lift into a quadratic one.
+    struct InlineDependencyBatch final {
+        std::vector<const LiftedInstruction *> instructions;
+    };
+} // namespace
+
 // The analysis a decision reads is fixed for the whole function lift, so answers are memoized.
 bool ASTLifter::ShouldInline(const LiftedInstruction *inst) {
     if (const auto it = m_shouldInlineMemo.find(inst); it != m_shouldInlineMemo.end())
         return it->second;
-    // input checks look backward and effect checks forward, so the query can cycle; a def whose
-    // answer is still being computed stays materialized
-    if (!m_shouldInlineActive.insert(inst).second)
-        return false;
-    bool r = ShouldInlineImpl(inst);
-    uint8_t binaryDepth = 0;
-    if (r && !m_compoundInlined.contains(inst) && BinaryOperatorSymbol(inst->operation) && inst->operands.size() > 1) {
-        binaryDepth = 1;
-        if (inst->operands[1].type == LiftedOperandType::Register) {
-            const auto *input = m_currentFunction->GetDefinition(inst->operands[1]);
-            if (input && input->instructionIndex < inst->instructionIndex && BinaryOperatorSymbol(input->operation)) {
-                const auto prior = m_inlineBinaryDepth.find(input);
-                if (prior == m_inlineBinaryDepth.end())
-                    r = false;
-                else
-                    binaryDepth += prior->second;
+
+    if (m_inlineResolving) {
+        // a query that closes a cycle stays conservative, exactly like the old active-set guard; it is
+        // not memoized so the node still receives its final answer after its inputs settle
+        if (m_shouldInlineActive.contains(inst))
+            return false;
+        throw InlineDependencyBatch{{inst}};
+    }
+
+    std::vector<const LiftedInstruction *> pending{inst};
+    ResolveInlineWorklist(pending);
+    const auto resolved = m_shouldInlineMemo.find(inst);
+    return resolved != m_shouldInlineMemo.end() ? resolved->second : false;
+}
+
+// Resolve several decisions together. A helper that will inspect a range of instructions calls this
+// once before its scan; the current frame is suspended as a whole instead of once per instruction.
+void ASTLifter::ResolveInlineBatch(const std::vector<const LiftedInstruction *> &instructions) {
+    if (!m_inlineResolving) {
+        std::vector<const LiftedInstruction *> pending;
+        pending.reserve(instructions.size());
+        for (const auto *inst : instructions)
+            if (!m_shouldInlineMemo.contains(inst))
+                pending.push_back(inst);
+        if (!pending.empty())
+            ResolveInlineWorklist(pending);
+        return;
+    }
+
+    std::vector<const LiftedInstruction *> missing;
+    missing.reserve(instructions.size());
+    for (const auto *inst : instructions)
+        if (!m_shouldInlineMemo.contains(inst) && !m_shouldInlineActive.contains(inst))
+            missing.push_back(inst);
+    if (!missing.empty())
+        throw InlineDependencyBatch{std::move(missing)};
+}
+
+void ASTLifter::ResolveInlineWorklist(std::vector<const LiftedInstruction *> &pending) {
+    struct ResolvingGuard {
+        bool &resolving;
+        ~ResolvingGuard() { resolving = false; }
+    } resolvingGuard{m_inlineResolving};
+    m_inlineResolving = true;
+
+    struct Frame {
+        const LiftedInstruction *instruction;
+        bool started = false;
+    };
+    std::vector<Frame> worklist;
+    worklist.reserve(pending.size());
+    for (const auto *inst : pending)
+        worklist.push_back({inst, false});
+    try {
+        while (!worklist.empty()) {
+            Frame &frame = worklist.back();
+            const LiftedInstruction *current = frame.instruction;
+            if (m_shouldInlineMemo.contains(current)) {
+                worklist.pop_back();
+                continue;
+            }
+            if (!frame.started) {
+                if (m_shouldInlineActive.contains(current)) {
+                    // a duplicate of a node already being evaluated lower in the worklist
+                    worklist.pop_back();
+                    continue;
+                }
+                m_shouldInlineActive.insert(current);
+                frame.started = true;
+            }
+
+            try {
+                bool r = ShouldInlineImpl(current);
+
+                uint8_t binaryDepth = 0;
+                if (r && !m_compoundInlined.contains(current) && BinaryOperatorSymbol(current->operation) && current->operands.size() > 1) {
+                    binaryDepth = 1;
+                    if (current->operands[1].type == LiftedOperandType::Register) {
+                        const auto *input = m_currentFunction->GetDefinition(current->operands[1]);
+                        if (input && input->instructionIndex < current->instructionIndex && BinaryOperatorSymbol(input->operation)) {
+                            const auto prior = m_inlineBinaryDepth.find(input);
+                            if (prior == m_inlineBinaryDepth.end()) {
+                                // a batch can resolve the outer operation before its inner operand. Resolve the
+                                // input first instead of memoizing a depth that its answer could still change;
+                                // an active input is a cycle and keeps the conservative result.
+                                if (!m_shouldInlineActive.contains(input) && !m_shouldInlineMemo.contains(input))
+                                    throw InlineDependencyBatch{{input}};
+                                r = false;
+                            } else {
+                                binaryDepth += prior->second;
+                            }
+                        }
+                    }
+                    if (binaryDepth >= 128)
+                        r = false;
+                }
+
+                m_shouldInlineActive.erase(current);
+                m_shouldInlineMemo[current] = r;
+                m_inlineBinaryDepth[current] = r ? binaryDepth : 0;
+                worklist.pop_back();
+            } catch (const InlineDependencyBatch &batch) {
+                // the frame stays active and is retried once its dependencies have answers
+                for (const auto *dependency : batch.instructions)
+                    worklist.push_back({dependency, false});
             }
         }
-        if (binaryDepth >= 128)
-            r = false;
+    } catch (...) {
+        for (const auto &frame : worklist)
+            if (frame.started)
+                m_shouldInlineActive.erase(frame.instruction);
+        throw;
     }
-    m_shouldInlineActive.erase(inst);
-    m_shouldInlineMemo[inst] = r;
-    m_inlineBinaryDepth[inst] = r ? binaryDepth : 0;
-    return r;
 }
 
 bool ASTLifter::ShouldInlineImpl(const LiftedInstruction *inst) {
@@ -1298,6 +1396,24 @@ bool ASTLifter::InliningReordersEffect(const LiftedInstruction *def, const Lifte
     if (useIdx <= defIdx + 1)
         return false;
     const auto &insts = m_currentFunction->lpLiftedFunction->instructions;
+    // The scan below consults a decision for every candidate in the window. Resolve that whole set in
+    // one batch so the scan starts from the definition once, rather than restarting for each candidate.
+    {
+        std::vector<const LiftedInstruction *> inlineDependencies;
+        inlineDependencies.reserve(static_cast<size_t>(useIdx - defIdx));
+        const auto addDefinition = [&](const LiftedOperand &operand) {
+            if (operand.type != LiftedOperandType::Register)
+                return;
+            if (const auto *definition = m_currentFunction->GetDefinition(operand))
+                inlineDependencies.push_back(definition);
+        };
+        for (int32_t k = defIdx + 1; k < useIdx && static_cast<size_t>(k) < insts.size(); ++k) {
+            inlineDependencies.push_back(&insts[k]);
+            for (const auto &operand : insts[k].operands)
+                addDefinition(operand);
+        }
+        ResolveInlineBatch(inlineDependencies);
+    }
     const LiftedInstruction *calleeDef = nullptr;
     if ((use->operation == LiftedOperation::CALL || use->operation == LiftedOperation::CALLFB) && !use->operands.empty()) {
         calleeDef = m_currentFunction->GetDefinition(use->operands[0]);

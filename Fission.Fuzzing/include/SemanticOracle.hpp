@@ -352,6 +352,15 @@ namespace fuzz {
             lua_close(L);
             return result; // fixture must run clean; anything else is a harness bug
         }
+        // The prelude is harness setup, not subject behavior. Its prints, comparability and
+        // object-serialization state must not leak into the subject's trace or verdict, and its
+        // runtime must not consume the subject's timeout budget.
+        trace.clear();
+        runBudget.prints.clear();
+        runBudget.comparable = true;
+        runBudget.seenObjects.clear();
+        runBudget.deadline = std::chrono::steady_clock::now() + budget;
+        runBudget.expired = false;
         lua_pushnil(L);
         lua_setglobal(L, "__fuzz_setmt");
 
