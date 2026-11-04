@@ -347,9 +347,13 @@ int main(int argc, char **argv) {
             semFile = argv[++i];
         else if (a == "--sem-plain")
             semPlain = true;
-        else if (a == "--sem-prelude" && i + 1 < argc)
+        else if (a == "--sem-prelude") {
+            if (i + 1 >= argc) {
+                std::fprintf(stderr, "missing path for --sem-prelude\n");
+                return 2;
+            }
             semPrelude = argv[++i];
-        else if (a == "--replay-dir" && i + 1 < argc)
+        } else if (a == "--replay-dir" && i + 1 < argc)
             replayDir = argv[++i];
         else if (a == "--explain-unchecked")
             explainUnchecked = true;
@@ -940,6 +944,10 @@ int main(int argc, char **argv) {
             return 2;
         }
         std::fprintf(stderr, "[file] compiled %zu bytes; running attributed stages...\n", bc.size());
+        // Attribute the stages before the CFG dump repeats deserialization/lifting/CFA/SSA: a hard
+        // fault in the dump must not hide which traced stage ran last.
+        const char *stage = fuzz::RunStagesAttributed(bc, true);
+        std::fprintf(stderr, "[file] attributed stages: %s\n", stage ? stage : "all completed");
         // CFG dump: block id/type/flags/successors + loop fields, for loop/break structure debugging.
         try {
             Fission::InstructionDecoder decoder{};
@@ -994,8 +1002,6 @@ int main(int argc, char **argv) {
         } catch (...) {
             std::fprintf(stderr, "[cfg] (dump threw)\n");
         }
-        const char *stage = fuzz::RunStagesAttributed(bc, true);
-        std::fprintf(stderr, "[file] attributed stages: %s\n", stage ? stage : "all completed");
         const auto dec = fuzz::FullDecompile(src);
         std::fprintf(stderr, "[file] FullDecompile result code: %d\n", static_cast<int>(dec.code));
         if (dec.code == DecompileResult::Success) {

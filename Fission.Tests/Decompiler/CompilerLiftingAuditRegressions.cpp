@@ -766,3 +766,12 @@ TEST_CASE("Compiler audit: wide table population plans in one pass", "[Decompile
     CHECK(elapsed < 10.0);
     lifting_semantics_test::CheckSameTrace(source, out, 0);
 }
+
+TEST_CASE("Semantic oracle: prelude output does not mask an equal subject error", "[Decompiler][CompilerAudit][Semantics]") {
+    // Prelude prints are harness setup, not subject behavior. They must not make two identical
+    // subject errors look like a judged execution.
+    const std::string prelude = Luau::compile("print('prelude')");
+    const std::string subject = Luau::compile("error('boom')");
+    const auto verdict = fuzz::CompareSemantics(subject, subject, {prelude});
+    CHECK(verdict.kind == fuzz::SemVerdict::Kind::Unrunnable);
+}

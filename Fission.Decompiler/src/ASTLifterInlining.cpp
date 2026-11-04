@@ -380,10 +380,16 @@ void ASTLifter::ResolveInlineWorklist(std::vector<const LiftedInstruction *> &pe
                         const auto *input = m_currentFunction->GetDefinition(current->operands[1]);
                         if (input && input->instructionIndex < current->instructionIndex && BinaryOperatorSymbol(input->operation)) {
                             const auto prior = m_inlineBinaryDepth.find(input);
-                            if (prior == m_inlineBinaryDepth.end())
+                            if (prior == m_inlineBinaryDepth.end()) {
+                                // a batch can resolve the outer operation before its inner operand. Resolve the
+                                // input first instead of memoizing a depth that its answer could still change;
+                                // an active input is a cycle and keeps the conservative result.
+                                if (!m_shouldInlineActive.contains(input) && !m_shouldInlineMemo.contains(input))
+                                    throw InlineDependencyBatch{{input}};
                                 r = false;
-                            else
+                            } else {
                                 binaryDepth += prior->second;
+                            }
                         }
                     }
                     if (binaryDepth >= 128)
