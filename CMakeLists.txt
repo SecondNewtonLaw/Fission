@@ -492,6 +492,8 @@ if (BUILD_TESTING)
             Fission.Tests/Decompiler/ControlFlowRewriterRegressions.cpp
             Fission.Tests/Decompiler/ControlFlowRewriterRegressionsPart2.cpp
             Fission.Tests/Decompiler/ControlFlowRewriterRegressionsPart3.cpp
+            Fission.Tests/Decompiler/ConditionFolderRegressions.cpp
+            Fission.Tests/Decompiler/ConditionFolderVariationMatrix.cpp
             Fission.Tests/Decompiler/ComplexControlFlow.cpp
             Fission.Tests/Decompiler/TypeInference.cpp
             Fission.Tests/Decompiler/IREquivalence.cpp
