@@ -460,6 +460,20 @@ class ShortCircuitChainFolder : public ASTRewriter {
         return chain;
     }
 
+    // a bare call or vararg is the last value in a return list, so it spreads all its results. Inside
+    // an `and` chain it is adjusted to one value instead.
+    static bool IsMultiResultExpression(const std::shared_ptr<Expression> &expr) {
+        if (!expr)
+            return false;
+        if (const auto call = std::dynamic_pointer_cast<CallExpressionNode>(expr))
+            return !call->bAdjustToOne;
+        if (const auto call = std::dynamic_pointer_cast<NameCallExpressionNode>(expr))
+            return !call->bAdjustToOne;
+        if (const auto vararg = std::dynamic_pointer_cast<VarArgExpression>(expr))
+            return !vararg->bAdjustToOne;
+        return false;
+    }
+
     // fold the `X = a; if not X then return X end; ...; return X` shape Luau emits for
     // `return a and ... and n`. Every guard must return X itself, so the chain is the whole lifetime
     // of the binding. The terminal may no longer name X when the last arm was constant-folded; that
@@ -469,6 +483,11 @@ class ShortCircuitChainFolder : public ASTRewriter {
             return false;
         auto first = AsAssignmentForm(stmts[i]);
         if (!first)
+            return false;
+        // A binding introduced here cannot be captured by an earlier closure, so dropping the
+        // declaration is safe. An assignment to a pre-existing binding can be captured, and the fold
+        // would remove a write the closure observes.
+        if (!first->isDeclaration)
             return false;
 
         std::vector<std::shared_ptr<Expression>> exprs{first->rhs};
@@ -525,6 +544,10 @@ class ShortCircuitChainFolder : public ASTRewriter {
             std::unordered_set<std::string> terminalNames;
             ScopeAwareRenamer::CollectIdentifierNames(ret->returnValues.front(), terminalNames);
             if (terminalNames.contains(first->lhsName))
+                return false;
+            // A bare call or vararg in a return list yields all its results; wrapping it in `and`
+            // truncates it to one, changing the terminal return's arity.
+            if (IsMultiResultExpression(ret->returnValues.front()))
                 return false;
             exprs.push_back(ret->returnValues.front());
         }

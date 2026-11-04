@@ -271,6 +271,46 @@ TEST_CASE("Matrix: negation forms", "[Decompiler][Condition][Matrix][Integration
 
 TEST_CASE("Matrix: one-shot repeat forms", "[Decompiler][Condition][Matrix][Integration]") { CheckMatrix(kOneShotSource, kOneShotDriver); }
 
+TEST_CASE("Matrix: and-chain fold must preserve captures and return arity", "[Decompiler][Condition][Matrix][Integration]") {
+    // The terminal `and`-chain fold rewrites `x = a; if not x then return x end; return E` to
+    // `return a and E`. It must not do that when the write to x is observable through a closure, or
+    // when E spreads multiple results that `and` would truncate.
+    const std::string source = R"LUA(
+local captured
+local function get() return captured end
+local function store(a)
+    captured = a
+    if not captured then return captured end
+    return 1
+end
+local function multi(a, f)
+    local v = a
+    if not v then return v end
+    v = 5
+    return f()
+end
+local function varargTail(a, ...)
+    local v = a
+    if not v then return v end
+    v = 6
+    return ...
+end
+return store, get, multi, varargTail
+)LUA";
+    const std::string driver = R"LUA(
+local store, get, multi, varargTail = __integration_subject()
+print(store(false), get())
+print(store(7), get())
+print(store(nil), get())
+local function f() return 1, 2, 3 end
+print(select('#', multi(true, f)), multi(true, f))
+print(multi(false, f))
+print(select('#', varargTail(true, 'a', 'b', 'c')), varargTail(true, 'a', 'b', 'c'))
+print(varargTail(false, 'a', 'b', 'c'))
+)LUA";
+    CheckMatrix(source, driver);
+}
+
 TEST_CASE("Matrix: dead empty if with constant conditions", "[Decompiler][Condition][Matrix][Integration]") {
     const std::string source = R"LUA(
 local function de(x)
