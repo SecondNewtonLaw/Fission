@@ -182,6 +182,7 @@ namespace fuzz {
             }
         };
         try {
+            step("Deserializer");
             Fission::InstructionDecoder decoder{};
             Deserializer des{};
             auto d = des.Deserialize(bytecode);
