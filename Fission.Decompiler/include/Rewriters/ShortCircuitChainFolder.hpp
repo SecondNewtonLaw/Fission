@@ -474,6 +474,9 @@ class ShortCircuitChainFolder : public ASTRewriter {
         std::vector<std::shared_ptr<Expression>> exprs{first->rhs};
         size_t cursor = i + 1;
         bool sawGuard = false;
+        // a terminal that ignores the binding is only the folded last arm when the loop stopped on a
+        // guard; after an assignment to the binding the terminal may simply discard that assignment.
+        bool endedOnGuard = false;
         while (cursor < stmts.size()) {
             auto ifStmt = std::dynamic_pointer_cast<IfStatementNode>(stmts[cursor]);
             if (!ifStmt || ifStmt->elseBranch || !ifStmt->thenBranch || ifStmt->thenBranch->body.size() != 1)
@@ -491,6 +494,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
             if (!guardName || *guardName != first->lhsName)
                 break;
             sawGuard = true;
+            endedOnGuard = true;
             ++cursor;
             if (cursor >= stmts.size())
                 break;
@@ -503,6 +507,7 @@ class ShortCircuitChainFolder : public ASTRewriter {
             if (rhsNames.contains(first->lhsName))
                 break;
             exprs.push_back(next->rhs);
+            endedOnGuard = false;
             ++cursor;
         }
 
@@ -513,6 +518,10 @@ class ShortCircuitChainFolder : public ASTRewriter {
             return false;
         auto retName = ExtractIdentifierName(ret->returnValues.front());
         if (!retName || *retName != first->lhsName) {
+            // a terminal that ignores the binding is only valid right after a guard, where it is the
+            // last arm. After an assignment, the terminal discards the value the assignment produced.
+            if (!endedOnGuard)
+                return false;
             std::unordered_set<std::string> terminalNames;
             ScopeAwareRenamer::CollectIdentifierNames(ret->returnValues.front(), terminalNames);
             if (terminalNames.contains(first->lhsName))
