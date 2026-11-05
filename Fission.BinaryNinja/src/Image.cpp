@@ -325,6 +325,12 @@ namespace fission::bn {
                         regKind[operand.value.reg] = kind;
                         regUpvalue[operand.value.reg] = origin;
                     };
+                    auto setDestReg = [&](uint32_t reg, Image::UpvalueKind kind) {
+                        if (reg >= regKind.size())
+                            return;
+                        regKind[reg] = kind;
+                        regUpvalue[reg] = -1;
+                    };
 
                     for (const auto &instruction : view.lifted->instructions) {
                         const auto &ops = instruction.operands;
@@ -428,10 +434,18 @@ namespace fission::bn {
 
                         case LiftedOperation::GETGLOBAL:
                         case LiftedOperation::GETIMPORT:
-                        case LiftedOperation::GETVARARGS:
                             if (!ops.empty())
                                 setDest(ops[0], Image::UpvalueKind::Unknown);
                             break;
+
+                        case LiftedOperation::GETVARARGS: {
+                            if (ops.empty() || ops[0].type != LiftedOperandType::Register)
+                                break;
+                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1);
+                            for (int i = 0; i < count; ++i)
+                                setDestReg(static_cast<uint32_t>(ops[0].value.reg) + static_cast<uint32_t>(i), Image::UpvalueKind::Unknown);
+                            break;
+                        }
 
                         case LiftedOperation::GETTABLE:
                         case LiftedOperation::GETTABLEKS:
@@ -662,6 +676,12 @@ namespace fission::bn {
                         regOrigin[operand.value.reg] = static_cast<int16_t>(origin);
                         regKind[operand.value.reg] = kind;
                     };
+                    const auto setDestReg = [&](uint32_t reg, int origin, Image::FieldKind kind) {
+                        if (reg >= regKind.size())
+                            return;
+                        regOrigin[reg] = static_cast<int16_t>(origin);
+                        regKind[reg] = kind;
+                    };
 
                     for (const auto &instruction : view.lifted->instructions) {
                         const auto &ops = instruction.operands;
@@ -793,10 +813,18 @@ namespace fission::bn {
 
                         case LiftedOperation::GETGLOBAL:
                         case LiftedOperation::GETIMPORT:
-                        case LiftedOperation::GETVARARGS:
                             if (!ops.empty())
                                 setDest(ops[0], -1, Image::FieldKind::Unknown);
                             break;
+
+                        case LiftedOperation::GETVARARGS: {
+                            if (ops.empty() || ops[0].type != LiftedOperandType::Register)
+                                break;
+                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1);
+                            for (int i = 0; i < count; ++i)
+                                setDestReg(static_cast<uint32_t>(ops[0].value.reg) + static_cast<uint32_t>(i), -1, Image::FieldKind::Unknown);
+                            break;
+                        }
 
                         case LiftedOperation::NEWTABLE:
                         case LiftedOperation::DUPTABLE:

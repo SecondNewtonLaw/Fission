@@ -294,27 +294,80 @@ namespace fission::bn {
             return line.substr(first, last - first + 1);
         }
 
-        // Removes an inline Luau comment, leaving "--" inside string literals and
-        // long-bracket strings untouched. Source text is generated code, not
-        // instruction-aligned, so a naive find would corrupt print("a--b").
+        // Returns the index just past a quoted string starting at `index`.
+        size_t SkipQuotedString(const std::string &line, size_t index, char quote) {
+            ++index;
+            while (index < line.size()) {
+                if (line[index] == '\\') {
+                    index += 2;
+                    continue;
+                }
+                if (line[index] == quote)
+                    return index + 1;
+                ++index;
+            }
+            return line.size();
+        }
+
+        // Returns the index just past a backtick string starting at `index`.
+        // Interpolation expressions are scanned structurally so nested strings
+        // and braces cannot terminate the outer literal early.
+        size_t SkipInterpolatedString(const std::string &line, size_t index) {
+            ++index;
+            while (index < line.size()) {
+                const char character = line[index];
+                if (character == '\\') {
+                    index += 2;
+                    continue;
+                }
+                if (character == '`')
+                    return index + 1;
+                if (character == '$' && index + 1 < line.size() && line[index + 1] == '{') {
+                    index += 2;
+                    int depth = 1;
+                    while (index < line.size() && depth > 0) {
+                        const char inner = line[index];
+                        if (inner == '"' || inner == '\'') {
+                            index = SkipQuotedString(line, index, inner);
+                            continue;
+                        }
+                        if (inner == '`') {
+                            index = SkipInterpolatedString(line, index);
+                            continue;
+                        }
+                        if (inner == '{') {
+                            ++depth;
+                            ++index;
+                            continue;
+                        }
+                        if (inner == '}') {
+                            --depth;
+                            ++index;
+                            continue;
+                        }
+                        ++index;
+                    }
+                    continue;
+                }
+                ++index;
+            }
+            return line.size();
+        }
+
+        // Removes an inline Luau comment, leaving "--" inside quoted,
+        // interpolated and long-bracket strings untouched. Source text is
+        // generated code, not instruction-aligned, so a naive find would corrupt
+        // print("a--b") or `a--{value}`.
         std::string StripLuauInlineComment(const std::string &line) {
             size_t index = 0;
             while (index < line.size()) {
                 const char character = line[index];
                 if (character == '"' || character == '\'') {
-                    const char quote = character;
-                    ++index;
-                    while (index < line.size()) {
-                        if (line[index] == '\\') {
-                            index += 2;
-                            continue;
-                        }
-                        if (line[index] == quote) {
-                            ++index;
-                            break;
-                        }
-                        ++index;
-                    }
+                    index = SkipQuotedString(line, index, character);
+                    continue;
+                }
+                if (character == '`') {
+                    index = SkipInterpolatedString(line, index);
                     continue;
                 }
                 if (character == '[') {
@@ -374,18 +427,14 @@ namespace fission::bn {
                 }
 
                 if (character == '"' || character == '\'') {
-                    size_t end = index + 1;
-                    while (end < line.size()) {
-                        if (line[end] == '\\' && end + 1 < line.size()) {
-                            end += 2;
-                            continue;
-                        }
-                        if (line[end] == character) {
-                            ++end;
-                            break;
-                        }
-                        ++end;
-                    }
+                    const size_t end = SkipQuotedString(line, index, character);
+                    appendRange(index, end, StringToken);
+                    index = end;
+                    continue;
+                }
+
+                if (character == '`') {
+                    const size_t end = SkipInterpolatedString(line, index);
                     appendRange(index, end, StringToken);
                     index = end;
                     continue;

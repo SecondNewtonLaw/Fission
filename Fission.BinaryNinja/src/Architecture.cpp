@@ -707,7 +707,9 @@ namespace fission::bn {
 
             int resultCount = 0;
             if (retc == 0)
-                resultCount = std::min<int>(maxStack - static_cast<int>(base), kResultCount);
+                // Multret: the runtime count is unknown, so model the full ABI
+                // window instead of clamping to the declared frame size.
+                resultCount = static_cast<int>(kResultCount);
             else
                 resultCount = std::min<int>(retc - 1, kResultCount);
 
@@ -793,7 +795,9 @@ namespace fission::bn {
             if (instruction.operands.size() < 2)
                 return;
             const auto base = static_cast<uint32_t>(instruction.operands[0].value.reg);
-            const int count = instruction.operands[1].value.imm.n == 0 ? 1 : instruction.operands[1].value.imm.n - 1;
+            // B == 0 returns every value from A to the top of the stack; the
+            // runtime count is unknown, so fill the whole result window.
+            const int count = instruction.operands[1].value.imm.n == 0 ? static_cast<int>(kResultCount) : instruction.operands[1].value.imm.n - 1;
             for (int i = 0; i < count && i < static_cast<int>(kResultCount); ++i) {
                 const uint32_t reg = base + static_cast<uint32_t>(i);
                 if (reg >= kRegisterCount)
