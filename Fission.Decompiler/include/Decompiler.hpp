@@ -96,9 +96,11 @@ class Decompiler {
     // Wall-clock limit for hostile or runaway CFG and lifting work.
     std::chrono::steady_clock::duration m_decompileBudget = std::chrono::seconds(120);
 
-    DecompilationResult CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
+    DecompilationResult
+    CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags, uint32_t targetBytecodeId = UINT32_MAX);
     // CommonDecompilerEntry converts pipeline exceptions into FailedToDecompile.
-    DecompilationResult CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags);
+    DecompilationResult
+    CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags, uint32_t targetBytecodeId);
 
   public:
     DecompilationResult
@@ -110,6 +112,8 @@ class Decompiler {
     DecompilationResult DecompileRobloxBytecodeFromFile(const std::string &fileName, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
     // Decompile non-Roblox Luau bytecode with the identity decoder.
     DecompilationResult DecompileVanillaBytecode(const std::string &bytecode, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
+    // Decompile a single proto as the root function. Used by per-function views.
+    DecompilationResult DecompileVanillaFunction(const std::string &bytecode, uint32_t bytecodeId, DecompilerFlags flags = static_cast<DecompilerFlags>(0));
 
     // Callers handling untrusted input can reduce the default 120-second budget.
     void SetDecompileBudget(std::chrono::steady_clock::duration budget) { m_decompileBudget = budget; }

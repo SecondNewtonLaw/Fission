@@ -581,7 +581,8 @@ static void InferTypes(ASTFunction &ast) {
 
 static void OptimizeAST(ASTFunction &ast) { OptimizeStatements(ast.statements); }
 
-DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
+DecompilationResult
+Decompiler::CommonDecompilerEntry(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags, uint32_t targetBytecodeId) {
     Fission::ScopedThrowingAssertHandler assertGuard;
     Fission::ScopedDecompileBudget budget(m_decompileBudget);
     const bool debugEnabled = (flags & DecompilerFlags::FissionDebugNotes) == DecompilerFlags::FissionDebugNotes;
@@ -608,7 +609,7 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
     }
 
     try {
-        auto result = CommonDecompilerEntryImpl(bytecode, decoder, flags);
+        auto result = CommonDecompilerEntryImpl(bytecode, decoder, flags, targetBytecodeId);
         result.debugNotes = m_debugNotes.Render();
         return result;
     } catch (const std::exception &error) {
@@ -628,7 +629,8 @@ DecompilationResult Decompiler::CommonDecompilerEntry(const std::string &bytecod
     }
 }
 
-DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags) {
+DecompilationResult
+Decompiler::CommonDecompilerEntryImpl(const std::string &bytecode, Fission::InstructionDecoder *decoder, DecompilerFlags flags, uint32_t targetBytecodeId) {
     DEBUG_ASSERT(decoder != nullptr);
     DecompilationResult res{};
 #ifndef PRODUCTION_BUILD
@@ -647,6 +649,21 @@ DecompilationResult Decompiler::CommonDecompilerEntryImpl(const std::string &byt
         return {"", "", "", DecompileResult::FailedToDeserialize};
     }
     m_debugNotes.Add(FissionDebugStage::Pipeline, "deserialized {} functions", deserializedBytecode->functions.size());
+
+    if (targetBytecodeId != UINT32_MAX) {
+        DeserializedFunction *target = nullptr;
+        for (auto &function : deserializedBytecode->functions) {
+            if (function.bytecodeId == targetBytecodeId) {
+                target = &function;
+                break;
+            }
+        }
+        if (!target) {
+            m_debugNotes.Add(FissionDebugStage::Pipeline, "requested function {} was not present", targetBytecodeId);
+            return {"", "", "", DecompileResult::FailedToDeserialize};
+        }
+        deserializedBytecode->lpMainFunction = target;
+    }
 
     auto bytecodeLifter = BytecodeLifter{decoder};
     const auto bytecodeLiftStart = std::chrono::steady_clock::now();
@@ -949,6 +966,11 @@ DecompilationResult Decompiler::DecompileTestCodeFromFile(const std::string &fil
 DecompilationResult Decompiler::DecompileVanillaBytecode(const std::string &bytecode, DecompilerFlags flags) {
     auto normalDecoder = Fission::InstructionDecoder{};
     return CommonDecompilerEntry(bytecode, &normalDecoder, flags);
+}
+
+DecompilationResult Decompiler::DecompileVanillaFunction(const std::string &bytecode, uint32_t bytecodeId, DecompilerFlags flags) {
+    auto normalDecoder = Fission::InstructionDecoder{};
+    return CommonDecompilerEntry(bytecode, &normalDecoder, flags, bytecodeId);
 }
 
 DecompilationResult Decompiler::DecompileRobloxBytecode(const std::string &bytecode, DecompilerFlags flags) {

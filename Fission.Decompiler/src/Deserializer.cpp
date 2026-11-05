@@ -37,6 +37,8 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         if (reader.HasFailed() || stringLength > reader.Remaining())
             return std::nullopt;
 
+        // Record where the payload starts so raw-byte consumers can point at the string itself.
+        result.stringTableOffsets.emplace_back(reader.GetPosition());
         // Preserve raw bytes; SourceGenerator owns escaping and UTF-8 emission.
         auto rS = reader.ReadString(stringLength);
         result.stringTable.emplace_back(rS);
@@ -140,6 +142,7 @@ std::optional<DeserializedBytecode> Deserializer::Deserialize(const std::string 
         // Every valid proto contains at least RETURN; bound instruction count before allocation.
         if (reader.HasFailed() || sizecode == 0 || sizecode > reader.Remaining())
             return std::nullopt;
+        function.instructionOffset = reader.GetPosition();
         function.instructions.resize(sizecode);
 
         for (auto j = 0llu; j < sizecode; j++)

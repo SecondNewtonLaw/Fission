@@ -131,6 +131,9 @@ struct DeserializedFunction {
     std::uint8_t flags{};
 
     std::vector<uint8_t> typeinfo{};
+    // Byte offset of the instruction array in the source file. Consumers that map the raw bytecode
+    // (debuggers, Binary Ninja views) place the proto's code at this offset.
+    std::size_t instructionOffset = 0;
     std::vector<LuauInstruction> instructions{};
     std::vector<LuauConstant> constants{};
     std::vector<DeserializedFunction *> subfunctions{};
@@ -149,6 +152,8 @@ struct DeserializedBytecode {
     std::uint8_t bytecodeVersion = 0;
     std::uint8_t typesVersion = 0;
     std::vector<std::string> stringTable{};
+    // Byte offset of each string's payload (after its length varint) in the source file.
+    std::vector<std::size_t> stringTableOffsets{};
     std::vector<DeserializedFunction> functions{};
     std::array<uint32_t, USERDATA_TYPE_LIMIT> userdataMappings{};
     DeserializedFunction *lpMainFunction;
