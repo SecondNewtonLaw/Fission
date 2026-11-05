@@ -243,6 +243,11 @@ namespace fission::bn {
             return signature;
         }
 
+        // Advances the Luau lexical state across one line. Returns the index
+        // where a comment starts, or npos. `longStringClose` carries an open
+        // long-bracket delimiter in and out.
+        size_t ScanLuauLine(const std::string &line, size_t index, std::string &longStringClose);
+
         std::string BuildPseudoLuauFunction(const Image &image, uint32_t bytecodeId) {
             const ProtoSignature signature = BuildProtoSignature(image, bytecodeId);
 
@@ -263,8 +268,15 @@ namespace fission::bn {
 
             std::istringstream stream(body);
             std::string line;
+            std::string longStringClose;
             while (std::getline(stream, line)) {
-                if (!line.empty())
+                // Continuation lines of a multiline long-bracket literal keep
+                // their exact bytes; only source lines get wrapper indentation.
+                const bool continuation = !longStringClose.empty();
+                (void)ScanLuauLine(line, 0, longStringClose);
+                if (continuation)
+                    source += line + "\n";
+                else if (!line.empty())
                     source += "    " + line + "\n";
                 else
                     source += "\n";
@@ -355,16 +367,17 @@ namespace fission::bn {
             return line.size();
         }
 
-        // Removes an inline Luau comment, leaving "--" inside quoted,
-        // interpolated and long-bracket strings untouched. Source text is
-        // generated code, not instruction-aligned, so a naive find would corrupt
-        // print("a--b") or `a--{value}`. When a long-bracket string does not
-        // close on this line, `longStringClose` receives its delimiter so the
-        // caller can carry the string state into the following lines.
-        std::string StripLuauInlineComment(const std::string &line, std::string &longStringClose) {
-            longStringClose.clear();
-            size_t index = 0;
+        size_t ScanLuauLine(const std::string &line, size_t index, std::string &longStringClose) {
             while (index < line.size()) {
+                if (!longStringClose.empty()) {
+                    const size_t end = line.find(longStringClose, index);
+                    if (end == std::string::npos)
+                        return std::string::npos;
+                    index = end + longStringClose.size();
+                    longStringClose.clear();
+                    continue;
+                }
+
                 const char character = line[index];
                 if (character == '"' || character == '\'') {
                     index = SkipQuotedString(line, index, character);
@@ -386,17 +399,26 @@ namespace fission::bn {
                         const size_t end = line.find(closing, cursor + 1);
                         if (end == std::string::npos) {
                             longStringClose = closing;
-                            return line;
+                            return std::string::npos;
                         }
                         index = end + closing.size();
                         continue;
                     }
                 }
                 if (character == '-' && index + 1 < line.size() && line[index + 1] == '-')
-                    return line.substr(0, index);
+                    return index;
                 ++index;
             }
-            return line;
+            return std::string::npos;
+        }
+
+        // Removes an inline Luau comment, leaving "--" inside quoted,
+        // interpolated and long-bracket strings untouched. Source text is
+        // generated code, not instruction-aligned, so a naive find would corrupt
+        // print("a--b") or `a--{value}`.
+        std::string StripLuauInlineComment(const std::string &line, std::string &longStringClose) {
+            const size_t comment = ScanLuauLine(line, 0, longStringClose);
+            return comment == std::string::npos ? line : line.substr(0, comment);
         }
 
         bool IsLuauKeyword(std::string_view word) {
@@ -565,32 +587,33 @@ namespace fission::bn {
                 bool inBlockComment = false;
                 std::string longStringClose;
                 for (std::string &line : lines) {
-                    // Inside a multiline long-bracket string every line is source
-                    // text, even when it starts with or contains "--".
-                    if (!longStringClose.empty()) {
-                        if (line.find(longStringClose) != std::string::npos)
-                            longStringClose.clear();
-                        if (line.find_first_not_of(" \t\r\n") == std::string::npos)
-                            m_lines.emplace_back();
-                        else
-                            m_lines.push_back(std::move(line));
-                        continue;
+                    const bool inLiteralAtStart = !longStringClose.empty();
+
+                    // Fission comment blocks are only recognized outside literals.
+                    if (!inLiteralAtStart) {
+                        const std::string trimmed = TrimSourceLine(line);
+                        if (inBlockComment) {
+                            if (trimmed.find("]]") != std::string::npos)
+                                inBlockComment = false;
+                            continue;
+                        }
+                        if (trimmed.starts_with("--[[")) {
+                            if (trimmed.find("]]") == std::string::npos)
+                                inBlockComment = true;
+                            continue;
+                        }
+                        if (trimmed.starts_with("--"))
+                            continue;
                     }
 
-                    const std::string trimmed = TrimSourceLine(line);
-                    if (inBlockComment) {
-                        if (trimmed.find("]]") != std::string::npos)
-                            inBlockComment = false;
-                        continue;
-                    }
-                    if (trimmed.starts_with("--[[")) {
-                        if (trimmed.find("]]") == std::string::npos)
-                            inBlockComment = true;
-                        continue;
-                    }
-                    if (trimmed.starts_with("--"))
-                        continue;
                     std::string content = StripLuauInlineComment(line, longStringClose);
+
+                    if (inLiteralAtStart) {
+                        // Inside a literal every byte matters, including
+                        // whitespace-only lines.
+                        m_lines.push_back(std::move(content));
+                        continue;
+                    }
                     if (TrimSourceLine(content).empty())
                         continue;
                     if (content.find_first_not_of(" \t\r\n") == std::string::npos)
