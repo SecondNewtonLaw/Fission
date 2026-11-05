@@ -68,6 +68,12 @@ include(CMakeDependentOption)
 find_package(Threads REQUIRED)
 
 option(BUILD_BINARY_NINJA_PLUGIN "Build the Fission Binary Ninja architecture/view plugin" OFF)
+if (BUILD_BINARY_NINJA_PLUGIN)
+    # The plugin links the Fission static libraries into a shared library, so
+    # their objects must be relocatable on platforms that build the plugin as
+    # a real .so (Linux/macOS). Windows ignores PIC.
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif ()
 
 
 set(CMAKE_CXX_STANDARD 23)

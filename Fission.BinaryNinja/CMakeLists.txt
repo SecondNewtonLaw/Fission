@@ -121,4 +121,6 @@ add_custom_command(TARGET Fission.BinaryNinja POST_BUILD
     COMMENT "Installing $<TARGET_FILE_NAME:Fission.BinaryNinja> -> ${BN_USER_PLUGINS_DIR}"
     VERBATIM)
 
-install(TARGETS Fission.BinaryNinja RUNTIME DESTINATION "${BN_USER_PLUGINS_DIR}")
+install(TARGETS Fission.BinaryNinja
+    RUNTIME DESTINATION "${BN_USER_PLUGINS_DIR}"
+    LIBRARY DESTINATION "${BN_USER_PLUGINS_DIR}")

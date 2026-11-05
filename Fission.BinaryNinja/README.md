@@ -32,7 +32,8 @@ that IL like it would for any native architecture.
     argument/return ABI (`a0..a15` in, `v0..v15` out), so HLIL shows
     `sub_xxx(arg0, arg1)` and direct closure calls become call-graph edges;
   - globals, imports and upvalues are loads/stores from named synthetic data
-    slots (`g_pcall`, `g_coroutine.create`, `upval_<proto>_<n>`);
+    slots (`luau_globals.pcall`, `luau_globals.coroutine.create`,
+    `upvalues_<proto>.upval_<n>`);
   - tables are pointer objects with stable field offsets, so `t.x` becomes a
     load/store instead of an opaque intrinsic;
   - closures become function pointers and captures write to their child proto's

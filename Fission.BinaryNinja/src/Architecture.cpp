@@ -326,6 +326,24 @@ namespace fission::bn {
             uint64_t UpvalueSlot(uint8_t index) const;
             void EmitPrologue();
 
+            // A loop header at instruction 0 turns the entry block into a branch
+            // target. The prologue is lifted into that block, so a back edge would
+            // re-run it and reset the parameter registers on every iteration.
+            [[nodiscard]] bool EntryIsBranchTarget() const {
+                const auto &words = m_proto.proto->instructions;
+                for (size_t i = 0; i < words.size();) {
+                    const uint32_t raw = words[i].instruction;
+                    const auto opcode = static_cast<LuauOpcode>(raw & 0xFF);
+                    if (opcode >= LOP__COUNT)
+                        return false;
+                    if (Luau::getJumpTarget(raw, static_cast<uint32_t>(i)) == 0)
+                        return true;
+                    const size_t length = static_cast<size_t>(Luau::getOpLength(opcode));
+                    i += length > 0 ? length : 1;
+                }
+                return false;
+            }
+
             ExprId Truthy(ExprId value) { return m_il.CompareNotEqual(kRegisterSize, value, Const(0)); }
             ExprId Falsey(ExprId value) { return m_il.CompareEqual(kRegisterSize, value, Const(0)); }
             ExprId Negate(ExprId condition) { return m_il.CompareEqual(kRegisterSize, condition, Const(0)); }
@@ -880,7 +898,7 @@ namespace fission::bn {
             const auto reg = [&](size_t index) -> uint32_t { return index < ops.size() ? ops[index].value.reg : 0; };
             const auto integer = [&](size_t index) -> int32_t { return index < ops.size() ? ops[index].value.imm.n : 0; };
 
-            if (m_index == 0)
+            if (m_index == 0 && !EntryIsBranchTarget())
                 EmitPrologue();
 
             switch (instruction.operation) {
@@ -1636,7 +1654,7 @@ namespace fission::bn {
     }
 
     bool LuauArchitecture::GetInstructionText(const uint8_t *data, uint64_t addr, size_t &len, std::vector<InstructionTextToken> &result) {
-        if (!data)
+        if (!data || len < kInstructionSize)
             return false;
 
         const auto image = ImageRegistry::Find(addr);
@@ -1651,7 +1669,10 @@ namespace fission::bn {
         if (opcode >= LOP__COUNT)
             return false;
 
-        len = kInstructionSize * static_cast<size_t>(Luau::getOpLength(opcode));
+        const size_t instructionLength = kInstructionSize * static_cast<size_t>(Luau::getOpLength(opcode));
+        if (len < instructionLength)
+            return false;
+        len = instructionLength;
         result.emplace_back(InstructionToken, kOpcodeNames[opcode]);
         result.emplace_back(TextToken, " ");
 
@@ -2055,8 +2076,8 @@ namespace fission::bn {
             return false;
         };
 
-        if (!data)
-            return fail("missing data");
+        if (!data || len < kInstructionSize)
+            return fail("missing data or len < 4");
 
         const auto image = ImageRegistry::Find(addr);
         if (!image)
@@ -2070,7 +2091,10 @@ namespace fission::bn {
         if (opcode >= LOP__COUNT)
             return fail("opcode >= LOP__COUNT");
 
-        len = kInstructionSize * static_cast<size_t>(Luau::getOpLength(opcode));
+        const size_t instructionLength = kInstructionSize * static_cast<size_t>(Luau::getOpLength(opcode));
+        if (len < instructionLength)
+            return fail("instruction longer than len");
+        len = instructionLength;
         const uint64_t index = (addr - proto->address) / kInstructionSize;
         if (!proto->lifted || index >= proto->lifted->instructions.size()) {
             il.AddInstruction(il.Unimplemented());

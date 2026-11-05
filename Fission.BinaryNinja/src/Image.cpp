@@ -154,7 +154,7 @@ namespace fission::bn {
                 if (ops.size() < 3)
                     return false;
                 const int count = ops[2].value.imm.n;
-                return count == 0 || reg < base + (count - 1);
+                return reg > base && (count == 0 || reg < base + (count - 1));
             }
             default:
                 return false;
@@ -936,12 +936,26 @@ namespace fission::bn {
 
     bool InstructionWritesRegister(const LiftedInstruction &instruction, uint8_t reg) { return WritesRegister(instruction, reg); }
 
+    namespace {
+
+        // The synthetic address range is only known after a file has been parsed,
+        // so AllocateBase -> Add must not interleave with another parse or two
+        // images could claim overlapping ranges and ImageRegistry::Find would
+        // resolve addresses to the wrong image.
+        std::mutex &ParseMutex() {
+            static std::mutex mutex;
+            return mutex;
+        }
+
+    } // namespace
+
     uint64_t ImageRegistry::s_nextBase = ImageRegistry::kInitialBase;
 
     std::shared_ptr<Image> Image::Parse(std::string bytes) {
         if (bytes.size() < 3)
             return nullptr;
 
+        std::lock_guard parseLock(ParseMutex());
         auto image = std::shared_ptr<Image>(new Image());
         image->m_bytes = std::move(bytes);
         image->m_baseAddress = ImageRegistry::AllocateBase(image->m_bytes.size());
