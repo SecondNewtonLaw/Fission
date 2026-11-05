@@ -322,8 +322,9 @@ namespace fission::bn {
                 }
                 if (character == '`')
                     return index + 1;
-                if (character == '$' && index + 1 < line.size() && line[index + 1] == '{') {
-                    index += 2;
+                if (character == '{') {
+                    // Luau interpolation uses a single brace: `a{expr}b`.
+                    ++index;
                     int depth = 1;
                     while (index < line.size() && depth > 0) {
                         const char inner = line[index];
@@ -1761,6 +1762,13 @@ namespace fission::bn {
     } // namespace
 
     LuauBinaryView::LuauBinaryView(BinaryView *data) : BinaryView("LuauBytecode", data->GetFile(), data), m_raw(data) {}
+
+    LuauBinaryView::~LuauBinaryView() {
+        // Address lookups must stop resolving to this image once its view closes,
+        // and the image must not stay alive for the rest of the process.
+        if (m_image)
+            ImageRegistry::Remove(m_image->BaseAddress());
+    }
 
     uint64_t LuauBinaryView::PerformGetEntryPoint() const {
         if (!m_image)

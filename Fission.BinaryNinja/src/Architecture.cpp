@@ -697,11 +697,12 @@ namespace fission::bn {
             const auto base = static_cast<uint32_t>(instruction.operands[0].value.reg);
             const int argc = instruction.operands[1].value.imm.n;
             const int retc = instruction.operands[2].value.imm.n;
-            const int maxStack = m_proto.proto->maxstacksize;
 
             int argumentCount = 0;
             if (argc == 0)
-                argumentCount = std::min<int>(maxStack - static_cast<int>(base) - 1, kArgumentCount);
+                // Forwarding call: pass the whole ABI window. The source loop
+                // below already stops at the VM register boundary.
+                argumentCount = static_cast<int>(kArgumentCount);
             else
                 argumentCount = std::min<int>(argc - 1, kArgumentCount);
 
@@ -733,12 +734,15 @@ namespace fission::bn {
                     outputs.push_back(ResultRegister(static_cast<uint32_t>(i)));
 
                 EmitIntrinsic(intrinsic, outputs, params);
-                if (resultCount > 0)
+                if (resultCount > 0 && base < kRegisterCount)
                     SetRegister(base, Register(firstOutput));
-                if (resultCount > 1 && secondOutput != UINT32_MAX)
+                if (resultCount > 1 && secondOutput != UINT32_MAX && base + 1 < kRegisterCount)
                     SetRegister(base + 1, Register(secondOutput));
-                for (int i = 2; i < resultCount; ++i)
+                for (int i = 2; i < resultCount; ++i) {
+                    if (base + static_cast<uint32_t>(i) >= kRegisterCount)
+                        break;
                     SetRegister(base + static_cast<uint32_t>(i), Register(ResultRegister(static_cast<uint32_t>(i))));
+                }
             };
 
             if (callee == "pcall" || callee == "ypcall") {
@@ -1113,7 +1117,7 @@ namespace fission::bn {
                 if (ops.size() < 2)
                     break;
                 const auto base = static_cast<uint8_t>(ops[0].value.reg);
-                const int count = ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1;
+                const int count = ops[1].value.imm.n == 0 ? static_cast<int>(kResultCount) : ops[1].value.imm.n - 1;
                 std::vector<uint32_t> outputs;
                 for (int i = 0; i < count; ++i) {
                     const unsigned target = static_cast<unsigned>(base) + static_cast<unsigned>(i);

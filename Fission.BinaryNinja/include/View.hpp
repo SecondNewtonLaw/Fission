@@ -19,6 +19,7 @@ namespace fission::bn {
     class LuauBinaryView : public BinaryNinja::BinaryView {
       public:
         explicit LuauBinaryView(BinaryNinja::BinaryView *data);
+        ~LuauBinaryView() override;
 
         bool Init() override;
 

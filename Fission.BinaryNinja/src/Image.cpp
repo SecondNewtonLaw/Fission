@@ -17,6 +17,10 @@ namespace fission::bn {
 
     namespace {
 
+        // Multret values are modelled over this many result registers, matching
+        // kResultCount in the architecture's calling convention.
+        constexpr int kMultretResultWindow = 16;
+
         std::string EscapeForDisplay(std::string_view value, size_t limit = 96) {
             std::string out;
             out.reserve(std::min(value.size(), limit) + 2);
@@ -151,7 +155,7 @@ namespace fission::bn {
                     return reg == base;
                 // GETVARARGS writes `count` registers starting at A. B == 0 means
                 // "all remaining varargs", which the lifter lowers as one value.
-                const int count = ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1;
+                const int count = ops[1].value.imm.n == 0 ? kMultretResultWindow : ops[1].value.imm.n - 1;
                 return count > 0 && reg >= base && static_cast<int>(reg) < static_cast<int>(base) + count;
             }
             case LiftedOperation::CALL:
@@ -441,7 +445,7 @@ namespace fission::bn {
                         case LiftedOperation::GETVARARGS: {
                             if (ops.empty() || ops[0].type != LiftedOperandType::Register)
                                 break;
-                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1);
+                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? kMultretResultWindow : ops[1].value.imm.n - 1);
                             for (int i = 0; i < count; ++i)
                                 setDestReg(static_cast<uint32_t>(ops[0].value.reg) + static_cast<uint32_t>(i), Image::UpvalueKind::Unknown);
                             break;
@@ -820,7 +824,7 @@ namespace fission::bn {
                         case LiftedOperation::GETVARARGS: {
                             if (ops.empty() || ops[0].type != LiftedOperandType::Register)
                                 break;
-                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1);
+                            const int count = ops.size() < 2 ? 1 : (ops[1].value.imm.n == 0 ? kMultretResultWindow : ops[1].value.imm.n - 1);
                             for (int i = 0; i < count; ++i)
                                 setDestReg(static_cast<uint32_t>(ops[0].value.reg) + static_cast<uint32_t>(i), -1, Image::FieldKind::Unknown);
                             break;
@@ -1470,6 +1474,17 @@ namespace fission::bn {
         // The image owns synthetic storage past the file-backed range; keep the
         // next allocation clear of it even though it was not known at AllocateBase.
         s_nextBase = std::max(s_nextBase, image->BaseAddress() + image->AddressSpaceSize() + 0x10000);
+    }
+
+    void ImageRegistry::Remove(uint64_t base) {
+        std::lock_guard lock(RegistryMutex());
+        auto &images = Registry();
+        for (auto it = images.begin(); it != images.end();) {
+            if (*it && (*it)->BaseAddress() == base)
+                it = images.erase(it);
+            else
+                ++it;
+        }
     }
 
     std::shared_ptr<Image> ImageRegistry::Find(uint64_t address) {

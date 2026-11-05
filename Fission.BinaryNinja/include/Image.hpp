@@ -160,9 +160,10 @@ namespace fission::bn {
     // discoverable without a view pointer.
     class ImageRegistry {
       public:
-        // Registers the image. Images are kept alive for the lifetime of the process
-        // because Binary Ninja may keep views open for a long time.
+        // Registers the image. Images are kept alive while their views are open;
+        // Remove drops the entry when the owning view is destroyed.
         static void Add(const std::shared_ptr<Image> &image);
+        static void Remove(uint64_t base);
 
         [[nodiscard]] static std::shared_ptr<Image> Find(uint64_t address);
         [[nodiscard]] static std::shared_ptr<Image> FindExactBase(uint64_t base);
