@@ -143,7 +143,17 @@ namespace fission::bn {
             case LiftedOperation::FORNLOOP:
             case LiftedOperation::FORGLOOP:
                 return !ops.empty() && ops[0].value.reg + 2 == reg;
-            case LiftedOperation::GETVARARGS:
+            case LiftedOperation::GETVARARGS: {
+                if (ops.empty() || ops[0].type != LiftedOperandType::Register)
+                    return false;
+                const uint32_t base = ops[0].value.reg;
+                if (ops.size() < 2)
+                    return reg == base;
+                // GETVARARGS writes `count` registers starting at A. B == 0 means
+                // "all remaining varargs", which the lifter lowers as one value.
+                const int count = ops[1].value.imm.n == 0 ? 1 : ops[1].value.imm.n - 1;
+                return count > 0 && reg >= base && static_cast<int>(reg) < static_cast<int>(base) + count;
+            }
             case LiftedOperation::CALL:
             case LiftedOperation::CALLFB: {
                 if (ops.empty() || ops[0].type != LiftedOperandType::Register)

@@ -294,6 +294,52 @@ namespace fission::bn {
             return line.substr(first, last - first + 1);
         }
 
+        // Removes an inline Luau comment, leaving "--" inside string literals and
+        // long-bracket strings untouched. Source text is generated code, not
+        // instruction-aligned, so a naive find would corrupt print("a--b").
+        std::string StripLuauInlineComment(const std::string &line) {
+            size_t index = 0;
+            while (index < line.size()) {
+                const char character = line[index];
+                if (character == '"' || character == '\'') {
+                    const char quote = character;
+                    ++index;
+                    while (index < line.size()) {
+                        if (line[index] == '\\') {
+                            index += 2;
+                            continue;
+                        }
+                        if (line[index] == quote) {
+                            ++index;
+                            break;
+                        }
+                        ++index;
+                    }
+                    continue;
+                }
+                if (character == '[') {
+                    size_t cursor = index + 1;
+                    size_t level = 0;
+                    while (cursor < line.size() && line[cursor] == '=') {
+                        ++level;
+                        ++cursor;
+                    }
+                    if (cursor < line.size() && line[cursor] == '[') {
+                        const std::string closing = "]" + std::string(level, '=') + "]";
+                        const size_t end = line.find(closing, cursor + 1);
+                        if (end == std::string::npos)
+                            return line;
+                        index = end + closing.size();
+                        continue;
+                    }
+                }
+                if (character == '-' && index + 1 < line.size() && line[index + 1] == '-')
+                    return line.substr(0, index);
+                ++index;
+            }
+            return line;
+        }
+
         bool IsLuauKeyword(std::string_view word) {
             static const std::unordered_set<std::string_view> keywords = {"local",    "function", "end",    "if",     "then",  "else",   "elseif",
                                                                           "for",      "while",    "do",     "repeat", "until", "return", "break",
@@ -476,15 +522,13 @@ namespace fission::bn {
                     }
                     if (trimmed.starts_with("--"))
                         continue;
-                    if (const auto comment = line.find("--"); comment != std::string::npos) {
-                        line.erase(comment);
-                        if (TrimSourceLine(line).empty())
-                            continue;
-                    }
-                    if (line.find_first_not_of(" \t\r\n") == std::string::npos)
+                    std::string content = StripLuauInlineComment(line);
+                    if (TrimSourceLine(content).empty())
+                        continue;
+                    if (content.find_first_not_of(" \t\r\n") == std::string::npos)
                         m_lines.emplace_back();
                     else
-                        m_lines.push_back(std::move(line));
+                        m_lines.push_back(std::move(content));
                 }
             }
 
@@ -505,19 +549,13 @@ namespace fission::bn {
                 tokens.NewLine();
             }
 
-            // Graph/basic-block rendering: show the source line covering this
-            // address so a node still carries readable code.
-            void EmitLineForAddress(uint64_t address, HighLevelILTokenEmitter &tokens) {
+            // Graph/basic-block rendering: Fission emits AST-shaped source text,
+            // not instruction-aligned lines, so there is no reliable mapping from
+            // a block address to a line. Point at the root node instead of
+            // guessing a line from the instruction index.
+            void EmitLineForAddress(uint64_t, HighLevelILTokenEmitter &tokens) {
                 tokens.InitLine();
-                if (m_proto && address >= m_proto->address && m_proto->instructionCount > 0) {
-                    const size_t index = static_cast<size_t>((address - m_proto->address) / sizeof(uint32_t));
-                    if (index < m_lines.size()) {
-                        AppendSourceLine(m_lines[index], tokens);
-                        tokens.NewLine();
-                        return;
-                    }
-                }
-                tokens.Append(TextToken, " ");
+                tokens.Append(CommentToken, "-- Pseudo Luau source is shown on the function root");
                 tokens.NewLine();
             }
 
