@@ -186,6 +186,10 @@ not depend on how Binary Ninja groups token lines.
   field offsets are layout hints rather than recovered types.
 - `CONCAT`, `LENGTH`, `MOD`, `POW`, `IDIV`, varargs and class operations remain
   intrinsics because LLIL has no exact equivalent for them.
+- The entry prologue copies argument registers into the VM registers. When a
+  branch targets instruction 0 (a loop header at function entry), the prologue
+  is omitted so a back edge cannot reset the parameters; in that shape the
+  parameters are not materialized into `R0..` for analysis.
 - The architecture has no assembly support; patching bytecode from the UI is not
   implemented.
 
