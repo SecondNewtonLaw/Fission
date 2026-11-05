@@ -9,6 +9,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -17,6 +18,11 @@
 #include <vector>
 
 namespace fission::bn {
+
+    // Serializes plugin-side Fission operations. libassert's failure handler is
+    // process-global, so overlapping validation, parsing and decompilation could
+    // restore the wrong handler and turn a recoverable assertion into an abort.
+    std::mutex &FissionOperationMutex();
 
     // One Luau proto, placed at a synthetic Binary Ninja address. Every address is
     // imageBase + the file offset of the proto's instruction array, so the raw bytes

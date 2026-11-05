@@ -936,18 +936,10 @@ namespace fission::bn {
 
     bool InstructionWritesRegister(const LiftedInstruction &instruction, uint8_t reg) { return WritesRegister(instruction, reg); }
 
-    namespace {
-
-        // The synthetic address range is only known after a file has been parsed,
-        // so AllocateBase -> Add must not interleave with another parse or two
-        // images could claim overlapping ranges and ImageRegistry::Find would
-        // resolve addresses to the wrong image.
-        std::mutex &ParseMutex() {
-            static std::mutex mutex;
-            return mutex;
-        }
-
-    } // namespace
+    std::mutex &FissionOperationMutex() {
+        static std::mutex mutex;
+        return mutex;
+    }
 
     uint64_t ImageRegistry::s_nextBase = ImageRegistry::kInitialBase;
 
@@ -955,7 +947,9 @@ namespace fission::bn {
         if (bytes.size() < 3)
             return nullptr;
 
-        std::lock_guard parseLock(ParseMutex());
+        // Covers AllocateBase -> Add (so images cannot claim overlapping ranges)
+        // and the process-global assertion handler used while parsing.
+        std::lock_guard fissionLock(FissionOperationMutex());
         auto image = std::shared_ptr<Image>(new Image());
         image->m_bytes = std::move(bytes);
         image->m_baseAddress = ImageRegistry::AllocateBase(image->m_bytes.size());

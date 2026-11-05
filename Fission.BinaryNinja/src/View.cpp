@@ -247,7 +247,11 @@ namespace fission::bn {
             const ProtoSignature signature = BuildProtoSignature(image, bytecodeId);
 
             Decompiler decompiler;
-            const auto result = decompiler.DecompileVanillaFunction(image.Bytes(), bytecodeId);
+            DecompilationResult result{};
+            {
+                std::lock_guard fissionLock(FissionOperationMutex());
+                result = decompiler.DecompileVanillaFunction(image.Bytes(), bytecodeId);
+            }
             std::string body = result.decompilationOutput;
             if (result.resultCode != DecompileResult::Success && body.empty())
                 body = std::format("--[[ Fission decompilation failed ({}): {} ]]", static_cast<int>(result.resultCode), result.errorMessage);
@@ -1687,7 +1691,11 @@ namespace fission::bn {
             return m_pseudoLuau;
 
         Decompiler decompiler;
-        const auto result = decompiler.DecompileVanillaBytecode(m_image->Bytes());
+        DecompilationResult result{};
+        {
+            std::lock_guard fissionLock(FissionOperationMutex());
+            result = decompiler.DecompileVanillaBytecode(m_image->Bytes());
+        }
         if (result.resultCode != DecompileResult::Success) {
             if (!result.decompilationOutput.empty())
                 m_pseudoLuau = result.decompilationOutput;
@@ -1957,6 +1965,9 @@ namespace fission::bn {
             return false;
 
         try {
+            // The assertion handler this installs is process-global, so the
+            // plugin serializes every Fission entry point that uses it.
+            std::lock_guard fissionLock(FissionOperationMutex());
             Fission::ScopedThrowingAssertHandler assertHandler;
             Fission::ScopedDecompileBudget budget(std::chrono::seconds(10));
             Deserializer deserializer;
