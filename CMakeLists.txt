@@ -67,6 +67,8 @@ include(CTest)
 include(CMakeDependentOption)
 find_package(Threads REQUIRED)
 
+option(BUILD_BINARY_NINJA_PLUGIN "Build the Fission Binary Ninja architecture/view plugin" OFF)
+
 
 set(CMAKE_CXX_STANDARD 23)
 option(USE_CCACHE "Use ccache as the compiler launcher when available." ON)
@@ -377,6 +379,10 @@ target_include_directories(Fission.Decompiler PUBLIC Fission.Decompiler/include)
 target_compile_options(Fission.Decompiler PRIVATE ${CXX_COMPILE_OPTIONS})
 target_link_options(Fission.Decompiler PRIVATE ${CXX_LINK_OPTIONS})
 target_link_libraries(Fission.Decompiler PUBLIC Fission.Common libassert::assert Luau.Ast Luau.Compiler Luau.VM Luau.VM.Internals Boost::container Boost::unordered Threads::Threads)
+
+if (BUILD_BINARY_NINJA_PLUGIN)
+    add_subdirectory(Fission.BinaryNinja)
+endif ()
 
 add_executable(Fission.CLI
         Fission.CLI/src/main.cpp
