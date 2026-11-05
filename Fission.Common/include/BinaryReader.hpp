@@ -124,5 +124,10 @@ class BinaryReader {
     const std::uint8_t *GetCurrentReaderPosition() const { return this->m_lpCurrentBufferPointer; }
     std::uint8_t *GetCurrentReaderPositionMut() { return const_cast<uint8_t *>(this->m_lpCurrentBufferPointer); }
 
+    // Byte offset of the cursor from the start of the buffer, for consumers that map the source bytes.
+    [[nodiscard]] std::size_t GetPosition() const {
+        return static_cast<std::size_t>(this->m_lpCurrentBufferPointer - this->m_lpBufferStart);
+    }
+
     const std::uint8_t *GetEndPosition() const { return this->m_lpBufferEnd; }
 };
