@@ -131,9 +131,10 @@ struct ASTLifterFunctionState {
     // Definitions mid-lift; revisiting one means the def graph is cyclic.
     boost::unordered_flat_set<const LiftedInstruction *> m_liftingDefs;
 
-    // Cap irreducible CFG re-lifts before memory exhaustion.
-    uint64_t m_blockLiftBudget = 0;
-    uint64_t m_blockLiftsPerformed = 0;
+    // Cap shared-arm re-lifts before memory exhaustion. A shared tail is deep-copied once per
+    // nesting level, so the cost doubles per level; bound the copied nodes, not the block visits.
+    std::size_t m_clonedNodes = 0;
+    std::size_t m_cloneNodeBudget = 0;
 
     // FindMergeBlock is pure over a fixed CFG.
     // (branchA, branchB, innermost loop exit, loop jumps exit) -> merge

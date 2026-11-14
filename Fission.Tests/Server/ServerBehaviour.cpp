@@ -15,12 +15,15 @@
 #include "Luau/Compiler.h"
 #pragma clang diagnostic pop
 
+#include <atomic>
 #include <catch2/catch_test_macros.hpp>
+#include <chrono>
 #include <cstring>
 #include <filesystem>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 
 namespace {
     void EnableLuauFFlagsOnce() {
@@ -127,6 +130,10 @@ TEST_CASE("Server: GET /health reports healthy", "[Server][Routing]") {
     CHECK(res.status == 200);
     CHECK(Contains(res.body, "\"ok\":true"));
     CHECK(Contains(res.body, "healthy"));
+    const auto json = boost::json::parse(res.body);
+    // The reported budget is the default 2 GiB, and the resident probe is wired in.
+    CHECK(json.at("memoryBudgetBytes").as_int64() == 2ll * 1024 * 1024 * 1024);
+    CHECK(json.as_object().contains("residentBytes"));
 }
 
 TEST_CASE("Server: an unknown route is 404", "[Server][Routing]") {
@@ -344,3 +351,52 @@ TEST_CASE("Server: the memory estimate scales with bytecode size", "[Server][Adm
     // Decoded bytecode is ~3/4 of the base64 body, and the footprint multiplier is fixed.
     CHECK(large == ((1024ull * 1024 / 4) * 3) * 256);
 }
+
+// A model-only budget cannot see allocator high-water marks, so admission consults the measured
+// resident set whenever a probe is supplied.
+TEST_CASE("Server: admission throttles on measured resident memory", "[Server][Admission][Memory]") {
+    std::atomic<std::uint64_t> resident{512ull * 1024 * 1024};
+    Fission::Server::DecompileGate gate{2, 4, 1024ull * 1024 * 1024, [&resident] { return resident.load(); }};
+    const auto noWait = std::chrono::milliseconds(0);
+
+    // 512 MiB resident + a 128 MiB estimate leaves 384 MiB of the 1 GiB budget.
+    CHECK(gate.Acquire(128ull << 20, noWait));
+    // Another 600 MiB overshoots the resident budget even though both estimates alone would fit.
+    CHECK_FALSE(gate.Acquire(600ull << 20, noWait));
+    // A measured drop admits the request while the first decompile is still active.
+    resident.store(64ull << 20);
+    CHECK(gate.Acquire(600ull << 20, noWait));
+    gate.Release(600ull << 20);
+    gate.Release(128ull << 20);
+
+    // Retained pages above the budget must not deadlock an idle gate; the next decompile reuses them.
+    resident.store(8ull << 30);
+    CHECK(gate.Acquire(1ull << 20, noWait));
+    gate.Release(1ull << 20);
+
+    // A request larger than the entire budget is refused instead of waited for.
+    CHECK_FALSE(gate.Acquire(2ull << 30, noWait));
+}
+
+TEST_CASE("Server: admission waits for measured memory to drop instead of failing fast", "[Server][Admission][Memory]") {
+    std::atomic<std::uint64_t> resident{512ull * 1024 * 1024};
+    Fission::Server::DecompileGate gate{2, 4, 1024ull * 1024 * 1024, [&resident] { return resident.load(); }};
+    REQUIRE(gate.Acquire(128ull << 20, std::chrono::milliseconds(0)));
+
+    std::thread dropper([&resident] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(60));
+        resident.store(64ull << 20);
+    });
+    const auto start = std::chrono::steady_clock::now();
+    CHECK(gate.Acquire(600ull << 20, std::chrono::seconds(2)));
+    const auto waited = std::chrono::steady_clock::now() - start;
+    dropper.join();
+    CHECK(waited >= std::chrono::milliseconds(30));
+    CHECK(gate.Active() == 2);
+    gate.Release(600ull << 20);
+    gate.Release(128ull << 20);
+}
+
+#if defined(_WIN32) || defined(__APPLE__) || defined(__linux__)
+TEST_CASE("Server: the resident-set probe reports real memory", "[Server][Admission][Memory]") { CHECK(Fission::Server::CurrentResidentBytes() > 0); }
+#endif

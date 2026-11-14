@@ -1268,3 +1268,29 @@ TEST_CASE("Replay: loop-carried captured store survives a shadowing if-expressio
         }
     }
 }
+
+// A materialized boolean chain (`(a and b) or (c and d) or ...`) shares each `and` tail with the
+// remainder of the `or` chain, so every nesting level used to copy the whole tail: the emitted
+// source grew as 2^terms (a 4.5 KB game module produced 25 GiB and never finished). The copy budget
+// must keep the tree bounded while preserving the value on every path.
+TEST_CASE("Replay: a materialized and/or chain keeps its shared tail bounded", "[Decompiler][ReplayRegress][Semantics]") {
+    std::string source = "local function isLatin(c)\n    if c == nil then return false end\n    return ";
+    for (int i = 0; i < 12; ++i) {
+        const int lower = 65 + i * 8;
+        if (i != 0)
+            source += " or ";
+        source += "(c >= " + std::to_string(lower) + " and c <= " + std::to_string(lower + 5) + ")";
+    }
+    source += "\nend\n";
+    for (int c = 60; c <= 160; ++c)
+        source += "print(" + std::to_string(c) + ", isLatin(" + std::to_string(c) + "))\n";
+    source += "print(nil, isLatin(nil))\n";
+
+    // The chain shape only appears at O2; O1 materializes a single condition register instead.
+    CheckSemanticParity(source, 2, 2);
+
+    const auto result = fuzz::FullDecompile(source);
+    REQUIRE(result.code == DecompileResult::Success);
+    INFO("decompiled bytes: " << result.output.size());
+    CHECK(result.output.size() < 256 * 1024);
+}

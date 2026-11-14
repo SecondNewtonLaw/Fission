@@ -426,7 +426,8 @@ add_dependencies(Fission.Server FissionVersionHeader)
 # Consumers of Fission.Server also compile Boost.Asio headers.
 target_link_libraries(Fission.Server PUBLIC Fission.Decompiler Boost::beast Boost::json Threads::Threads)
 if (WIN32)
-    target_link_libraries(Fission.Server PUBLIC ws2_32)
+    # psapi: GetProcessMemoryInfo feeds the resident-set admission limit.
+    target_link_libraries(Fission.Server PUBLIC ws2_32 psapi)
     target_compile_definitions(Fission.Server PUBLIC _WIN32_WINNT=0x0601)
 endif ()
 target_compile_options(Fission.Server PRIVATE ${CXX_COMPILE_OPTIONS})

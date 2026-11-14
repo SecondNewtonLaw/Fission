@@ -476,6 +476,16 @@ void ASTLifter::ReleaseRetainedState() {
 ASTFunction ASTLifter::LiftBody(AnalyzedFunction &analyzedFunction) {
     static_cast<ASTLifterFunctionState &>(*this) = {};
     this->m_currentFunction = &analyzedFunction;
+    // A shared value tail is legitimately lifted more than once, and each copy deep-clones the
+    // tail's AST. In an irreducible CFG the copies nest, so the cost doubles per level; stop
+    // duplicating once the copies outweigh the function instead of exhausting memory.
+    m_clonedNodes = 0;
+    m_cloneNodeBudget = std::max<std::size_t>(2048, analyzedFunction.lpLiftedFunction->instructions.size() * 4);
+    struct CloneCountScope {
+        std::size_t *m_previous;
+        explicit CloneCountScope(std::size_t &count) : m_previous(g_cloneNodeCount) { g_cloneNodeCount = &count; }
+        ~CloneCountScope() { g_cloneNodeCount = m_previous; }
+    } cloneCountScope{m_clonedNodes};
     if (m_debugNotes && m_debugNotes->Enabled())
         m_debugFunction = std::format(
             "F{} ({})",
@@ -1783,7 +1793,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                 }
                 // Re-lift a visited pure value region when exclusive branches share it.
                 constexpr uint32_t kMaxValueArmDuplications = 8192;
-                const bool canDup = atEntryBlock && m_valueArmDuplications < kMaxValueArmDuplications;
+                const bool duplicationBudgetLeft = m_clonedNodes < m_cloneNodeBudget;
+                const bool canDup = atEntryBlock && duplicationBudgetLeft && m_valueArmDuplications < kMaxValueArmDuplications;
                 // a sibling arm lifted this forward-entered block: it is a tail shared by exclusive paths, not a convergence
                 const auto &visitedBlock = m_currentFunction->basicBlocks[currentBlockId];
                 // a long tail is copied only when it rejoins this region's stop, never when it runs on to a return or out of a loop;
@@ -1799,7 +1810,8 @@ ControlFlowTask ASTLifter::LiftControlFlow(uint32_t currentBlockId, uint32_t sto
                         return region;
                     return std::nullopt;
                 };
-                const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && m_valueArmDuplications < kMaxValueArmDuplications &&
+                const bool siblingTail = !atEntryBlock && !walked.contains(currentBlockId) && duplicationBudgetLeft &&
+                                         m_valueArmDuplications < kMaxValueArmDuplications &&
                                          std::ranges::all_of(
                                              visitedBlock.predecessors,
                                              [&](uint32_t p) {

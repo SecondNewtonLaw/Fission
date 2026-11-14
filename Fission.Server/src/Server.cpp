@@ -1,3 +1,8 @@
+// Windows headers must not define min/max macros: this file uses std::min/std::max.
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+
 #include "Server.hpp"
 #include "Decompiler.hpp"
 #include "FissionVersion.hpp"
@@ -30,19 +35,33 @@
 #include <cerrno>
 #include <chrono>
 #include <condition_variable>
+#include <cstdio>
 #include <iostream>
 #include <limits>
 #include <mutex>
 #include <optional>
 #include <string>
 
+#ifdef FISSION_USE_MIMALLOC
+#include <mimalloc.h>
+#endif
+
 #if defined(_WIN32)
 #include <malloc.h>
+#include <psapi.h>
+#include <windows.h>
 #else
 #include <poll.h>
 #include <sys/socket.h>
+#if defined(__APPLE__)
+#include <mach/mach.h>
+#include <malloc/malloc.h>
+#include <unistd.h>
+#elif defined(__linux__)
+#include <unistd.h>
 #if defined(__GLIBC__)
 #include <malloc.h>
+#endif
 #endif
 #endif
 
@@ -151,7 +170,7 @@ namespace {
         return json::serialize(obj);
     }
 
-    std::string HealthJson() {
+    std::string HealthJson(const Fission::Server::ServerConfig &config) {
         auto now = std::chrono::steady_clock::now();
         auto uptime = std::chrono::duration<double>(now - g_ServerStartTime).count();
         json::object obj;
@@ -160,6 +179,8 @@ namespace {
         obj["uptime_seconds"] = uptime;
         obj["activeDecompiles"] = g_ActiveDecompiles.load(std::memory_order_relaxed);
         obj["maxConcurrentDecompiles"] = g_MaxConcurrentDecompiles.load(std::memory_order_relaxed);
+        obj["residentBytes"] = Fission::Server::CurrentResidentBytes();
+        obj["memoryBudgetBytes"] = config.maxDecompileMemoryBytes;
         return json::serialize(obj);
     }
 
@@ -277,22 +298,33 @@ namespace {
     // Bound memory consumed before request validation.
     constexpr std::uint64_t kMaxRequestBodyBytes = 32ull * 1024 * 1024;
 
-    // Return freed decompiler pages to the OS.
+    // Return freed decompiler pages to the OS. Allocator arenas (notably glibc's per-thread ones)
+    // otherwise keep a burst's high-water mark resident and add it to the next burst, which is how
+    // a 2 GiB estimate budget presents as a 4 GiB resident set.
+    void TrimAllocator() {
+#if defined(FISSION_USE_MIMALLOC)
+        mi_collect(true);
+#elif defined(_WIN32)
+        (void)_heapmin();
+#elif defined(__APPLE__)
+        malloc_zone_pressure_relief(nullptr, 0);
+#elif defined(__GLIBC__)
+        (void)malloc_trim(0);
+#endif
+    }
+
     std::atomic<std::chrono::steady_clock::rep> g_lastTrimTicks{0};
     void ReleaseUnusedMemory() {
         const auto now = std::chrono::steady_clock::now().time_since_epoch();
         const auto ticks = std::chrono::duration_cast<std::chrono::milliseconds>(now).count();
-        constexpr auto kTrimInterval = std::chrono::seconds(1);
+        // Trimming walks every arena, so bound it to a few calls per second under load.
+        constexpr auto kTrimInterval = std::chrono::milliseconds(250);
         auto last = g_lastTrimTicks.load(std::memory_order_relaxed);
-        if (ticks - last < std::chrono::duration_cast<std::chrono::milliseconds>(kTrimInterval).count())
+        if (ticks - last < kTrimInterval.count())
             return;
         if (!g_lastTrimTicks.compare_exchange_strong(last, ticks, std::memory_order_relaxed))
             return;
-#if defined(_WIN32)
-        (void)_heapmin();
-#elif defined(__GLIBC__)
-        (void)malloc_trim(0);
-#endif
+        TrimAllocator();
     }
 
     // Beast deadlines require asynchronous operations and a running io_context. Socket timeouts bound
@@ -529,11 +561,45 @@ namespace Fission::Server {
         return {};
     }
 
+    std::uint64_t CurrentResidentBytes() {
+#if defined(_WIN32)
+        PROCESS_MEMORY_COUNTERS counters{};
+        counters.cb = sizeof(counters);
+        if (GetProcessMemoryInfo(GetCurrentProcess(), &counters, sizeof(counters)) != 0)
+            return counters.WorkingSetSize;
+        return 0;
+#elif defined(__APPLE__)
+        mach_task_basic_info info{};
+        mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+        if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO, reinterpret_cast<task_info_t>(&info), &count) == KERN_SUCCESS)
+            return info.resident_size;
+        return 0;
+#elif defined(__linux__)
+        // /proc/self/statm: size, resident, shared, ... in pages. Avoids allocating a string in the
+        // admission loop, which runs while the gate mutex is held.
+        std::FILE *statm = std::fopen("/proc/self/statm", "r");
+        if (statm == nullptr)
+            return 0;
+        unsigned long total = 0;
+        unsigned long resident = 0;
+        const int read = std::fscanf(statm, "%lu %lu", &total, &resident);
+        std::fclose(statm);
+        if (read != 2)
+            return 0;
+        long pageSize = ::sysconf(_SC_PAGESIZE);
+        if (pageSize <= 0)
+            pageSize = 4096;
+        return static_cast<std::uint64_t>(resident) * static_cast<std::uint64_t>(pageSize);
+#else
+        return 0;
+#endif
+    }
+
     HttpResult HandleRequest(std::string_view method, std::string_view target, const std::string &body, const ServerConfig &config) {
         if (method == "GET" && target == "/")
             return {200, "application/json", RootJson()};
         if (method == "GET" && target == "/health")
-            return {200, "application/json", HealthJson()};
+            return {200, "application/json", HealthJson(config)};
         if (method == "POST" && target == "/decompile")
             return handle_decompile(body, config);
         return {404, "application/json", ErrorJson("Not found")};
@@ -549,16 +615,18 @@ namespace Fission::Server {
         const unsigned int maxActive = std::max(1u, config.maxConcurrentDecompiles);
         const unsigned int maxWaiting = config.maxQueuedRequests;
         // Decompiles run on their own pool so a request read cannot occupy a decompile slot and
-        // decompile work cannot delay /health.
-        net::thread_pool decompilePool{maxActive};
-        DecompileGate gate{maxActive, maxWaiting, config.maxDecompileMemoryBytes};
+        // decompile work cannot delay /health. The pool also hosts throttled requests: a waiter
+        // must not hold an execution slot, or a memory-limited gate would have nothing running to
+        // release memory and every queued request would time out.
+        net::thread_pool decompilePool{maxActive + maxWaiting};
+        DecompileGate gate{maxActive, maxWaiting, config.maxDecompileMemoryBytes, &CurrentResidentBytes};
         g_MaxConcurrentDecompiles.store(maxActive, std::memory_order_relaxed);
         const std::uint64_t maxOutstanding = static_cast<std::uint64_t>(maxActive) + maxWaiting;
 
         std::cout << "Fission.Server " << FISSION_VERSION << " listening on http://127.0.0.1:" << config.port << std::endl;
-        std::cout << "Thread pool: " << config.threadCount << " io, " << maxActive << " decompile" << std::endl;
+        std::cout << "Thread pool: " << config.threadCount << " io, " << maxActive << " decompile (" << maxWaiting << " throttled)" << std::endl;
         std::cout << "Max concurrent decompiles: " << maxActive << " (" << maxWaiting << " queued)" << std::endl;
-        std::cout << "Decompile memory budget: " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB" << std::endl;
+        std::cout << "Decompile memory budget: " << (config.maxDecompileMemoryBytes / (1024 * 1024)) << " MiB of resident set" << std::endl;
         std::cout << "Max timeout: " << config.maxTimeout.count() << "s" << std::endl;
 
         for (;;) {

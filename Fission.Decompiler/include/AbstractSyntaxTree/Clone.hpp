@@ -14,6 +14,15 @@
 
 std::shared_ptr<Statement> CloneStatement(const std::shared_ptr<Statement> &statement);
 
+// Optional per-thread accumulator for the AST lifter's duplication budget. Every cloned node
+// increments it, so pathological shared-arm re-lifting can stop before it exhausts memory.
+inline thread_local std::size_t *g_cloneNodeCount = nullptr;
+
+inline void CountClonedNode() {
+    if (g_cloneNodeCount)
+        ++*g_cloneNodeCount;
+}
+
 // Closure bodies are filled after their parent is lifted. A clone made in between would copy an empty body, so
 // it is recorded here and filled from its source once that source is.
 struct PendingCloneRegistry {
@@ -26,6 +35,7 @@ inline thread_local PendingCloneRegistry *g_pendingClones = nullptr;
 inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Expression> &expression) {
     if (!expression)
         return nullptr;
+    CountClonedNode();
     const auto cloneAll = [](std::vector<std::shared_ptr<Expression>> &expressions) {
         for (auto &item : expressions)
             item = CloneExpression(item);
@@ -136,6 +146,7 @@ inline std::shared_ptr<Expression> CloneExpression(const std::shared_ptr<Express
 inline std::shared_ptr<Statement> CloneStatement(const std::shared_ptr<Statement> &statement) {
     if (!statement)
         return nullptr;
+    CountClonedNode();
     if (const auto expression = std::dynamic_pointer_cast<Expression>(statement))
         return CloneExpression(expression);
     const auto cloneBlock = [](std::shared_ptr<BlockStatementNode> &block) { block = std::static_pointer_cast<BlockStatementNode>(CloneStatement(block)); };
