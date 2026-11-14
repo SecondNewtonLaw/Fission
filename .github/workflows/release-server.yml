@@ -105,7 +105,6 @@ jobs:
         uses: ilammy/msvc-dev-cmd@v1
 
       - name: Configure
-        shell: ${{ matrix.configure_shell }}
         env:
           FISSION_VERSION: ${{ inputs.tag }}
         run: cmake -S . -B build -DBUILD_TESTING=OFF -DUSE_CCACHE=OFF "-DFISSION_VERSION=${{ matrix.version_ref }}" ${{ matrix.configure_args }}
