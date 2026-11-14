@@ -1292,5 +1292,5 @@ TEST_CASE("Replay: a materialized and/or chain keeps its shared tail bounded", "
     const auto result = fuzz::FullDecompile(source);
     REQUIRE(result.code == DecompileResult::Success);
     INFO("decompiled bytes: " << result.output.size());
-    CHECK(result.output.size() < 256 * 1024);
+    CHECK(result.output.size() < 32 * 1024);
 }

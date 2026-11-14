@@ -17,14 +17,91 @@
 class ShortCircuitFolder : public ASTRewriter {
   protected:
     void RewriteStatements(std::vector<std::shared_ptr<Statement>> &stmts) override {
-        for (size_t i = 0; i + 1 < stmts.size();) {
-            if (TryFoldAt(stmts, i))
+        for (size_t i = 0; i < stmts.size();) {
+            if (TryFoldSharedTailIf(stmts, i))
+                continue; // folded in place; re-check the same index
+            if (i + 1 < stmts.size() && TryFoldAt(stmts, i))
                 continue; // folded in place; re-check the same index
             ++i;
         }
     }
 
   private:
+    // whether every path through `body` writes `name` before reading it. Folding a guard turns the
+    // store before it into a conditional store, so the store must be unobservable on the path that
+    // skips it; requiring it first on every path (and into a constant) proves that.
+    static bool EveryPathAssignsFirst(const std::vector<std::shared_ptr<Statement>> &body, const std::string &name) {
+        for (const auto &stmt : body) {
+            if (auto asn = std::dynamic_pointer_cast<AssignmentStatementNode>(stmt))
+                return SimpleIdentName(asn->left).value_or("") == name && AsConstant(asn->right);
+            if (auto decl = std::dynamic_pointer_cast<VariableDeclarationNode>(stmt))
+                return decl->value && SimpleIdentName(decl->identifier).value_or("") == name && AsConstant(decl->value);
+            if (auto nested = std::dynamic_pointer_cast<IfStatementNode>(stmt))
+                return nested->thenBranch && nested->elseBranch && EveryPathAssignsFirst(nested->thenBranch->body, name) &&
+                       EveryPathAssignsFirst(nested->elseBranch->body, name);
+            return false;
+        }
+        return false;
+    }
+
+    // `if C1 then A; if not C2 then T end else T end` (or the complement with `not C1` and the
+    // arms swapped) puts the same tail T on both the guard's false path and the outer else path,
+    // once per nesting level, so an and/or chain duplicates its tail exponentially. When A only
+    // stores a constant that T always overwrites first, collapsing the two tests preserves the
+    // store on every path that can observe it: `if C1 and C2 then A else T end`.
+    static bool TryFoldSharedTailIf(std::vector<std::shared_ptr<Statement>> &stmts, size_t i) {
+        auto outer = std::dynamic_pointer_cast<IfStatementNode>(stmts[i]);
+        if (!outer || !outer->thenBranch || !outer->elseBranch)
+            return false;
+        if (TryFoldArm(*outer, false))
+            return true;
+        return TryFoldArm(*outer, true);
+    }
+
+    static bool TryFoldArm(IfStatementNode &outer, bool negated) {
+        auto actionArm = negated ? outer.elseBranch : outer.thenBranch;
+        auto tailArm = negated ? outer.thenBranch : outer.elseBranch;
+        if (!actionArm || !tailArm)
+            return false;
+        auto &body = actionArm->body;
+        if (body.size() != 2)
+            return false;
+        auto stored = std::dynamic_pointer_cast<AssignmentStatementNode>(body[0]);
+        auto guard = std::dynamic_pointer_cast<IfStatementNode>(body[1]);
+        if (!stored || !guard || guard->elseBranch || !guard->thenBranch)
+            return false;
+        const auto storedName = SimpleIdentName(stored->left);
+        if (!storedName || !AsConstant(stored->right))
+            return false;
+        auto innerNot = std::dynamic_pointer_cast<UnaryExpressionNode>(guard->condition);
+        if (!innerNot || innerNot->op != "not ")
+            return false;
+        if (!StatementsEqual(tailArm->body, guard->thenBranch->body))
+            return false;
+        if (!EveryPathAssignsFirst(tailArm->body, *storedName))
+            return false;
+
+        std::shared_ptr<Expression> outerCondition = outer.condition;
+        if (negated) {
+            auto outerNot = std::dynamic_pointer_cast<UnaryExpressionNode>(outerCondition);
+            if (!outerNot || outerNot->op != "not ")
+                return false;
+            outerCondition = outerNot->operand;
+        }
+
+        outer.condition = Fission::MakeShared<BinaryExpressionNode>("and", outerCondition, innerNot->operand);
+        auto foldedArm = Fission::MakeShared<BlockStatementNode>();
+        foldedArm->body = {body[0]};
+        outer.thenBranch = foldedArm;
+        outer.elseBranch = guard->thenBranch;
+        return true;
+    }
+
+    static bool AsConstant(const std::shared_ptr<Expression> &expr) {
+        return AsLiteral<BooleanLiteralNode>(expr) || AsLiteral<NilLiteralNode>(expr) || AsLiteral<NumberLiteralNode>(expr) ||
+               AsLiteral<IntegerLiteralNode>(expr) || AsLiteral<StringLiteralNode>(expr);
+    }
+
     static std::optional<std::string> SimpleIdentName(const std::shared_ptr<Expression> &expr) {
         if (auto id = std::dynamic_pointer_cast<IdentifierExpressionNode>(expr); id && id->identifier)
             return id->identifier->name;
